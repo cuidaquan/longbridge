@@ -115,11 +115,11 @@ class AutoPositionManager:
                 
                 # 获取当前持仓和账户信息
                 self._add_log("📊 获取持仓信息...")
-                positions = get_positions()
+                positions = await asyncio.to_thread(get_positions)
                 self._add_log(f"✅ 发现 {len(positions)} 个持仓")
                 
                 self._add_log("💰 获取账户余额...")
-                account_balance = get_account_balance()
+                account_balance = await asyncio.to_thread(get_account_balance)
                 self._add_log(f"✅ 可用资金: ${account_balance.get('total_cash', 0):.2f}")
                 
                 # 分析并调整仓位
@@ -289,17 +289,18 @@ class AutoPositionManager:
         try:
             # 获取 K 线数据
             from .services import get_cached_candlesticks
-            klines = get_cached_candlesticks(symbol, 'day', 60)
+            klines = await asyncio.to_thread(get_cached_candlesticks, symbol, 'day', 60)
             
             if not klines or len(klines) < 20:
                 return None
                 
             # AI 分析（专注卖出时机和风险控制）
-            analysis = self.analyzer.analyze_trading_opportunity(
-                symbol=symbol,
-                klines=klines,
-                current_positions={symbol: position},
-                scenario="sell_focus"  # 🛡️ 智能持仓专注止盈止损
+            analysis = await asyncio.to_thread(
+                self.analyzer.analyze_trading_opportunity,
+                symbol,
+                klines,
+                {symbol: position},
+                "sell_focus",
             )
             
             action = analysis.get('action', 'HOLD')
@@ -563,4 +564,3 @@ def get_auto_position_manager() -> AutoPositionManager:
     if _auto_position_manager is None:
         _auto_position_manager = AutoPositionManager()
     return _auto_position_manager
-

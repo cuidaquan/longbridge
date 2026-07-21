@@ -57,7 +57,7 @@ export default function SimpleKLineTest() {
       };
     } catch (error) {
       console.error('SimpleKLineTest 错误:', error);
-      setStatus(`错误: ${error.message}`);
+      setStatus(`错误: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, []);
 

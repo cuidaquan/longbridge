@@ -27,7 +27,7 @@ import {
   LoadingSpinner,
   EmptyState,
 } from "../components/ui";
-import { resolveWsUrl } from "../api/client";
+import { API_BASE, resolveWsUrl } from "../api/client";
 
 interface PositionMonitoring {
   symbol: string;
@@ -38,24 +38,25 @@ interface PositionMonitoring {
   market_value: number;
   pnl: number;
   pnl_ratio: number;
-  monitoring_status: string;
-  strategy_mode: string;
+  monitoring_status: "enabled" | "disabled" | "paused";
+  strategy_mode: "auto" | "alert_only" | "disabled" | "balanced";
   enabled_strategies: string[];
-  custom_stop_loss?: number;
-  custom_take_profit?: number;
+  stop_loss_ratio: number;
+  take_profit_ratio: number;
+  max_position_ratio: number;
+  cooldown_minutes: number;
   notes?: string;
 }
 
 interface GlobalSettings {
-  auto_monitor_new_positions: boolean;
-  default_strategy_mode: string;
-  default_enabled_strategies: string[];
-  global_stop_loss: number;
-  global_take_profit: number;
-  max_daily_loss: number;
-  max_position_size: number;
+  global_enabled: boolean;
+  market_hours_only: boolean;
+  max_daily_trades: number;
+  max_total_exposure: number;
+  emergency_stop: boolean;
+  risk_level: string;
+  notifications_enabled: boolean;
   excluded_symbols: string[];
-  vip_symbols: string[];
 }
 
 interface Strategy {
@@ -85,11 +86,13 @@ export default function PositionMonitoringPage() {
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const [priceFlash, setPriceFlash] = useState<Record<string, "up" | "down" | null>>({});
   const wsRef = useRef<WebSocket | null>(null);
-  const priceFlashTimeouts = useRef<Record<string, NodeJS.Timeout>>({});
+  const reconnectTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const shouldReconnect = useRef(true);
+  const priceFlashTimeouts = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
 
   const loadPositions = async () => {
     try {
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const response = await fetch(`${base}/monitoring/positions`);
       if (response.ok) {
         const data = await response.json();
@@ -107,7 +110,7 @@ export default function PositionMonitoringPage() {
 
   const updatePositionMonitoring = async (symbol: string, updates: any) => {
     try {
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const response = await fetch(`${base}/monitoring/position/${symbol}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -117,6 +120,8 @@ export default function PositionMonitoringPage() {
         await loadPositions();
         setEditPosition(null);
         setSuccess("更新成功");
+      } else {
+        setError("更新失败，请检查配置值");
       }
     } catch (e) {
       setError("更新失败");
@@ -126,19 +131,21 @@ export default function PositionMonitoringPage() {
   const batchUpdateMonitoring = async (status: string) => {
     if (selectedPositions.size === 0) return;
     try {
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const response = await fetch(`${base}/monitoring/batch-update`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           symbols: Array.from(selectedPositions),
-          monitoring_status: status,
+          config: { monitoring_status: status },
         }),
       });
       if (response.ok) {
         await loadPositions();
         setSelectedPositions(new Set());
         setSuccess(`已更新 ${selectedPositions.size} 个持仓`);
+      } else {
+        setError("批量更新失败");
       }
     } catch (e) {
       setError("批量更新失败");
@@ -147,13 +154,13 @@ export default function PositionMonitoringPage() {
 
   const toggleMonitoring = async (symbol: string, enabled: boolean) => {
     await updatePositionMonitoring(symbol, {
-      monitoring_status: enabled ? "active" : "paused",
+      monitoring_status: enabled ? "enabled" : "paused",
     });
   };
 
   const excludePosition = async (symbol: string) => {
     try {
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const response = await fetch(`${base}/monitoring/exclude/${symbol}`, {
         method: "POST",
       });
@@ -166,9 +173,25 @@ export default function PositionMonitoringPage() {
     }
   };
 
+  const includePosition = async (symbol: string) => {
+    try {
+      const response = await fetch(`${API_BASE}/monitoring/include/${symbol}`, {
+        method: "POST",
+      });
+      if (response.ok) {
+        await loadPositions();
+        setSuccess(`已恢复 ${symbol} 的监控`);
+      } else {
+        setError("恢复监控失败");
+      }
+    } catch (e) {
+      setError("恢复监控失败");
+    }
+  };
+
   const updateGlobalSettings = async (settings: GlobalSettings) => {
     try {
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const response = await fetch(`${base}/monitoring/global-settings`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -178,6 +201,8 @@ export default function PositionMonitoringPage() {
         setGlobalSettings(settings);
         setShowSettings(false);
         setSuccess("全局设置已保存");
+      } else {
+        setError("保存设置失败，请检查配置值");
       }
     } catch (e) {
       setError("保存设置失败");
@@ -211,7 +236,9 @@ export default function PositionMonitoringPage() {
     ws.onerror = () => setWsConnected(false);
     ws.onclose = () => {
       setWsConnected(false);
-      setTimeout(connectWebSocket, 3000);
+      if (shouldReconnect.current) {
+        reconnectTimeout.current = setTimeout(connectWebSocket, 3000);
+      }
     };
 
     wsRef.current = ws;
@@ -246,11 +273,14 @@ export default function PositionMonitoringPage() {
   };
 
   useEffect(() => {
+    shouldReconnect.current = true;
     loadPositions();
     connectWebSocket();
     const interval = setInterval(loadPositions, 30000);
     return () => {
       clearInterval(interval);
+      shouldReconnect.current = false;
+      if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
       if (wsRef.current) wsRef.current.close();
       Object.values(priceFlashTimeouts.current).forEach(clearTimeout);
     };
@@ -274,7 +304,7 @@ export default function PositionMonitoringPage() {
   const totalMarketValue = positions.reduce((sum, p) => sum + p.market_value, 0);
   const totalCost = positions.reduce((sum, p) => sum + p.avg_cost * p.quantity, 0);
   const totalPnlRatio = totalCost > 0 ? totalPnl / totalCost : 0;
-  const activeCount = positions.filter((p) => p.monitoring_status === "active").length;
+  const activeCount = positions.filter((p) => p.monitoring_status === "enabled").length;
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -332,14 +362,14 @@ export default function PositionMonitoringPage() {
         <Card>
           <div className="flex items-center gap-4">
             <span className="text-sm text-slate-600 dark:text-slate-400">已选择 {selectedPositions.size} 个持仓</span>
-            <Button size="sm" variant="success" onClick={() => batchUpdateMonitoring("active")} icon={<PlayArrow className="w-4 h-4" />}>
+            <Button size="sm" variant="success" onClick={() => batchUpdateMonitoring("enabled")} icon={<PlayArrow className="w-4 h-4" />}>
               启用监控
             </Button>
             <Button size="sm" variant="warning" onClick={() => batchUpdateMonitoring("paused")} icon={<Pause className="w-4 h-4" />}>
               暂停监控
             </Button>
-            <Button size="sm" variant="danger" onClick={() => batchUpdateMonitoring("excluded")} icon={<Block className="w-4 h-4" />}>
-              排除监控
+            <Button size="sm" variant="danger" onClick={() => batchUpdateMonitoring("disabled")} icon={<Block className="w-4 h-4" />}>
+              禁用监控
             </Button>
             <Button size="sm" variant="ghost" onClick={() => setSelectedPositions(new Set())}>
               清除选择
@@ -383,9 +413,9 @@ export default function PositionMonitoringPage() {
             <tbody>
               {positions.map((position) => {
                 const isSelected = selectedPositions.has(position.symbol);
-                const isActive = position.monitoring_status === "active";
+                const isActive = position.monitoring_status === "enabled";
                 const flash = priceFlash[position.symbol];
-                const isExcluded = position.monitoring_status === "excluded";
+                const isExcluded = position.monitoring_status === "disabled";
 
                 return (
                   <tr
@@ -474,11 +504,11 @@ export default function PositionMonitoringPage() {
                     <td className="py-3 px-4 text-center">
                       <div className="text-xs">
                         <span className="text-red-500">
-                          -{((position.custom_stop_loss || globalSettings?.global_stop_loss || 0.05) * 100).toFixed(0)}%
+                          -{(position.stop_loss_ratio * 100).toFixed(0)}%
                         </span>
                         <span className="text-slate-400 mx-1">/</span>
                         <span className="text-emerald-500">
-                          +{((position.custom_take_profit || globalSettings?.global_take_profit || 0.15) * 100).toFixed(0)}%
+                          +{(position.take_profit_ratio * 100).toFixed(0)}%
                         </span>
                       </div>
                     </td>
@@ -506,7 +536,11 @@ export default function PositionMonitoringPage() {
                         <Button size="sm" variant="ghost" onClick={() => setEditPosition(position)}>
                           <Settings className="w-4 h-4" />
                         </Button>
-                        {!isExcluded && (
+                        {isExcluded ? (
+                          <Button size="sm" variant="ghost" onClick={() => includePosition(position.symbol)}>
+                            <Visibility className="w-4 h-4 text-emerald-500" />
+                          </Button>
+                        ) : (
                           <Button size="sm" variant="ghost" onClick={() => excludePosition(position.symbol)}>
                             <Block className="w-4 h-4 text-red-500" />
                           </Button>
@@ -535,7 +569,12 @@ export default function PositionMonitoringPage() {
             <Select
               label="策略模式"
               value={editPosition.strategy_mode}
-              onChange={(e) => setEditPosition({ ...editPosition, strategy_mode: e.target.value })}
+              onChange={(e) =>
+                setEditPosition({
+                  ...editPosition,
+                  strategy_mode: e.target.value as PositionMonitoring["strategy_mode"],
+                })
+              }
               options={[
                 { value: "auto", label: "自动执行" },
                 { value: "alert_only", label: "仅提醒" },
@@ -575,29 +614,29 @@ export default function PositionMonitoringPage() {
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-                  自定义止损: {((editPosition.custom_stop_loss || 0) * 100).toFixed(0)}%
+                  止损: {(editPosition.stop_loss_ratio * 100).toFixed(0)}%
                 </label>
                 <input
                   type="range"
-                  min="0"
-                  max="20"
+                  min="1"
+                  max="30"
                   step="1"
-                  value={(editPosition.custom_stop_loss || 0) * 100}
-                  onChange={(e) => setEditPosition({ ...editPosition, custom_stop_loss: Number(e.target.value) / 100 })}
+                  value={editPosition.stop_loss_ratio * 100}
+                  onChange={(e) => setEditPosition({ ...editPosition, stop_loss_ratio: Number(e.target.value) / 100 })}
                   className="w-full"
                 />
               </div>
               <div>
                 <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-                  自定义止盈: {((editPosition.custom_take_profit || 0) * 100).toFixed(0)}%
+                  止盈: {(editPosition.take_profit_ratio * 100).toFixed(0)}%
                 </label>
                 <input
                   type="range"
-                  min="0"
-                  max="50"
+                  min="2"
+                  max="100"
                   step="1"
-                  value={(editPosition.custom_take_profit || 0) * 100}
-                  onChange={(e) => setEditPosition({ ...editPosition, custom_take_profit: Number(e.target.value) / 100 })}
+                  value={editPosition.take_profit_ratio * 100}
+                  onChange={(e) => setEditPosition({ ...editPosition, take_profit_ratio: Number(e.target.value) / 100 })}
                   className="w-full"
                 />
               </div>
@@ -624,8 +663,8 @@ export default function PositionMonitoringPage() {
                   updatePositionMonitoring(editPosition.symbol, {
                     strategy_mode: editPosition.strategy_mode,
                     enabled_strategies: editPosition.enabled_strategies,
-                    custom_stop_loss: editPosition.custom_stop_loss || null,
-                    custom_take_profit: editPosition.custom_take_profit || null,
+                    stop_loss_ratio: editPosition.stop_loss_ratio,
+                    take_profit_ratio: editPosition.take_profit_ratio,
                     notes: editPosition.notes,
                   })
                 }
@@ -645,57 +684,83 @@ export default function PositionMonitoringPage() {
             <label className="flex items-center gap-3 cursor-pointer">
               <input
                 type="checkbox"
-                checked={globalSettings.auto_monitor_new_positions}
-                onChange={(e) => setGlobalSettings({ ...globalSettings, auto_monitor_new_positions: e.target.checked })}
+                checked={globalSettings.global_enabled}
+                onChange={(e) => setGlobalSettings({ ...globalSettings, global_enabled: e.target.checked })}
                 className="rounded border-slate-300"
               />
-              <span className="text-sm text-slate-700 dark:text-slate-300">自动监控新持仓</span>
+              <span className="text-sm text-slate-700 dark:text-slate-300">启用全局持仓监控</span>
+            </label>
+
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={globalSettings.market_hours_only}
+                onChange={(e) => setGlobalSettings({ ...globalSettings, market_hours_only: e.target.checked })}
+                className="rounded border-slate-300"
+              />
+              <span className="text-sm text-slate-700 dark:text-slate-300">仅在交易时段运行</span>
+            </label>
+
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={globalSettings.notifications_enabled}
+                onChange={(e) => setGlobalSettings({ ...globalSettings, notifications_enabled: e.target.checked })}
+                className="rounded border-slate-300"
+              />
+              <span className="text-sm text-slate-700 dark:text-slate-300">启用监控通知</span>
+            </label>
+
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={globalSettings.emergency_stop}
+                onChange={(e) => setGlobalSettings({ ...globalSettings, emergency_stop: e.target.checked })}
+                className="rounded border-slate-300"
+              />
+              <span className="text-sm font-medium text-red-600 dark:text-red-400">紧急停止所有自动操作</span>
             </label>
 
             <div>
               <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-                全局止损: {(globalSettings.global_stop_loss * 100).toFixed(0)}%
+                每日最大交易次数: {globalSettings.max_daily_trades}
               </label>
               <input
                 type="range"
                 min="1"
-                max="20"
+                max="100"
                 step="1"
-                value={globalSettings.global_stop_loss * 100}
-                onChange={(e) => setGlobalSettings({ ...globalSettings, global_stop_loss: Number(e.target.value) / 100 })}
+                value={globalSettings.max_daily_trades}
+                onChange={(e) => setGlobalSettings({ ...globalSettings, max_daily_trades: Number(e.target.value) })}
                 className="w-full"
               />
             </div>
 
             <div>
               <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-                全局止盈: {(globalSettings.global_take_profit * 100).toFixed(0)}%
+                最大总敞口: {(globalSettings.max_total_exposure * 100).toFixed(0)}%
               </label>
               <input
                 type="range"
-                min="5"
-                max="50"
-                step="1"
-                value={globalSettings.global_take_profit * 100}
-                onChange={(e) => setGlobalSettings({ ...globalSettings, global_take_profit: Number(e.target.value) / 100 })}
+                min="10"
+                max="100"
+                step="5"
+                value={globalSettings.max_total_exposure * 100}
+                onChange={(e) => setGlobalSettings({ ...globalSettings, max_total_exposure: Number(e.target.value) / 100 })}
                 className="w-full"
               />
             </div>
 
-            <div>
-              <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-                单日最大亏损: {(globalSettings.max_daily_loss * 100).toFixed(0)}%
-              </label>
-              <input
-                type="range"
-                min="5"
-                max="30"
-                step="1"
-                value={globalSettings.max_daily_loss * 100}
-                onChange={(e) => setGlobalSettings({ ...globalSettings, max_daily_loss: Number(e.target.value) / 100 })}
-                className="w-full"
-              />
-            </div>
+            <Select
+              label="风险等级"
+              value={globalSettings.risk_level}
+              onChange={(e) => setGlobalSettings({ ...globalSettings, risk_level: e.target.value })}
+              options={[
+                { value: "low", label: "低" },
+                { value: "medium", label: "中" },
+                { value: "high", label: "高" },
+              ]}
+            />
 
             <div className="flex gap-3 pt-4 border-t border-slate-200 dark:border-slate-700">
               <Button variant="secondary" onClick={() => setShowSettings(false)} className="flex-1">

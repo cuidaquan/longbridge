@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { Box, Typography, Chip, Stack, CircularProgress } from '@mui/material';
-import TrendingUpIcon from '@mui/icons-material/TrendingUp';
-import TrendingDownIcon from '@mui/icons-material/TrendingDown';
+import {
+  TrendingUp as TrendingUpIcon,
+  TrendingDown as TrendingDownIcon,
+} from '@mui/icons-material';
 import { resolveWsUrl } from '../api/client';
 
 interface KLineData {
@@ -253,7 +255,6 @@ export default function RealTimeKLineChart({
     </Box>
   );
 }
-
 
 
 

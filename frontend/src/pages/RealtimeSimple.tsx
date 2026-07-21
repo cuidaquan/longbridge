@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { createChart, IChartApi, Time } from 'lightweight-charts';
+import { ColorType, createChart, IChartApi, Time } from 'lightweight-charts';
+import { resolveWsUrl } from '../api/client';
 
 interface RealtimeQuote {
   symbol: string;
@@ -44,7 +45,7 @@ export default function RealtimeSimplePage() {
       width: chartContainerRef.current.clientWidth,
       height: 400,
       layout: {
-        backgroundColor: isDark ? '#1f2937' : '#ffffff',
+        background: { type: ColorType.Solid, color: isDark ? '#1f2937' : '#ffffff' },
         textColor: isDark ? '#d1d5db' : '#374151',
       },
       grid: {
@@ -87,7 +88,7 @@ export default function RealtimeSimplePage() {
       const isDark = document.documentElement.classList.contains('dark');
       chart.applyOptions({
         layout: {
-          backgroundColor: isDark ? '#1f2937' : '#ffffff',
+          background: { type: ColorType.Solid, color: isDark ? '#1f2937' : '#ffffff' },
           textColor: isDark ? '#d1d5db' : '#374151',
         },
         grid: {
@@ -122,7 +123,7 @@ export default function RealtimeSimplePage() {
   // WebSocket connection for real-time data
   useEffect(() => {
     const connectWebSocket = () => {
-      const wsUrl = `ws://localhost:8000/ws/quotes`;
+      const wsUrl = resolveWsUrl('/ws/quotes');
 
       setConnectionStatus('connecting');
       const ws = new WebSocket(wsUrl);

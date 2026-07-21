@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import copy
+import threading
+import time
 from contextlib import contextmanager
 from typing import Dict, Iterable, List, Optional
 
@@ -26,6 +29,10 @@ except ImportError:  # pragma: no cover - fallback when symbol is missing
 
 logger = logging.getLogger(__name__)
 _candlestick_fallback_warned = False
+_portfolio_cache_lock = threading.Lock()
+_portfolio_cache_value: Optional[Dict[str, object]] = None
+_portfolio_cache_expires_at = 0.0
+_PORTFOLIO_CACHE_TTL_SECONDS = 15.0
 
 _PERIOD_NAME_MAP = {
     "min1": "Min_1",
@@ -283,7 +290,7 @@ def get_positions() -> List[Dict[str, object]]:
         accounts = list(response) if hasattr(response, "__iter__") else []  # type: ignore[arg-type]
 
     for account in accounts or []:
-        logger.info("get_positions: raw account=%s", account)
+        logger.debug("get_positions: processing account type=%s", type(account).__name__)
         if isinstance(account, dict):
             account_channel = account.get("account_channel") or account.get("channel")
             stock_items = (
@@ -511,7 +518,7 @@ def get_account_balance() -> Dict[str, object]:
             pass
 
 
-def get_portfolio_overview() -> Dict[str, object]:
+def _fetch_portfolio_overview() -> Dict[str, object]:
     positions = get_positions()
     if not positions:
         return {
@@ -658,3 +665,27 @@ def get_portfolio_overview() -> Dict[str, object]:
         },
         "account_balance": account_balance
     }
+
+
+def get_portfolio_overview(force_refresh: bool = False) -> Dict[str, object]:
+    """Return a short-lived, coalesced portfolio snapshot.
+
+    A single snapshot requires multiple broker API calls. Serializing refreshes and
+    caching them briefly prevents several pages/background workers from issuing the
+    same expensive request at once and starving unrelated API traffic.
+    """
+    global _portfolio_cache_value, _portfolio_cache_expires_at
+
+    now = time.monotonic()
+    with _portfolio_cache_lock:
+        if (
+            not force_refresh
+            and _portfolio_cache_value is not None
+            and now < _portfolio_cache_expires_at
+        ):
+            return copy.deepcopy(_portfolio_cache_value)
+
+        snapshot = _fetch_portfolio_overview()
+        _portfolio_cache_value = copy.deepcopy(snapshot)
+        _portfolio_cache_expires_at = time.monotonic() + _PORTFOLIO_CACHE_TTL_SECONDS
+        return copy.deepcopy(snapshot)

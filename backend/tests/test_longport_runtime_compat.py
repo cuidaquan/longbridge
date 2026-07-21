@@ -73,6 +73,11 @@ class LongportRuntimeCompatTest(unittest.TestCase):
             with self.subTest(script=name):
                 self.assertIn(".longport.env", script)
                 self.assertIn("--env-file", script)
+                self.assertIn("--host 127.0.0.1", script)
+                self.assertNotIn("--reload", script)
+
+        self.assertIn("logs/backend.pid", linux_script)
+        self.assertIn("logs/frontend.pid", linux_script)
 
     def test_endpoint_example_contains_no_credentials(self) -> None:
         example_path = BACKEND_ROOT / "longport.env.example"

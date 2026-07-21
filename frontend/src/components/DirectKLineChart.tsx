@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Chart } from '@antv/g2';
+import { API_BASE } from '../api/client';
 
 export default function DirectKLineChart() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -11,7 +12,7 @@ export default function DirectKLineChart() {
     const fetchData = async () => {
       try {
         setStatus('获取数据...');
-        const response = await fetch('http://localhost:8000/quotes/history?symbol=700.HK&limit=1000&period=min1&adjust_type=no_adjust');
+        const response = await fetch(`${API_BASE}/quotes/history?symbol=700.HK&limit=1000&period=min1&adjust_type=no_adjust`);
         const result = await response.json();
 
         console.log('API响应:', result);
@@ -53,7 +54,7 @@ export default function DirectKLineChart() {
         container: containerRef.current,
         width: 700,
         height: 350,
-        padding: [20, 40, 50, 60],
+        padding: 40,
       });
 
       // 绘制收盘价线图 (G2 v5 简化版本)
@@ -103,7 +104,7 @@ export default function DirectKLineChart() {
       };
     } catch (error) {
       console.error('图表创建失败:', error);
-      setStatus(`图表创建失败: ${error.message}`);
+      setStatus(`图表创建失败: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, [data]);
 

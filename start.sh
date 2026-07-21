@@ -5,6 +5,9 @@
 
 set -e  # 遇到错误立即退出
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
 echo "🚀 启动 Longbridge Quant Console..."
 echo "================================================"
 
@@ -101,9 +104,8 @@ start_backend() {
 
     # 检查端口是否被占用
     if lsof -Pi :8000 -sTCP:LISTEN -t >/dev/null; then
-        echo "⚠️  端口 8000 已被占用，正在尝试停止现有进程..."
-        pkill -f "uvicorn.*app.main:app" || true
-        sleep 2
+        echo "❌ 端口 8000 已被占用，请先运行 ./stop.sh 或检查占用进程"
+        exit 1
     fi
 
     # 启动后端（后台运行）
@@ -112,19 +114,20 @@ start_backend() {
     if [ -f ".longport.env" ]; then
         UVICORN_ENV_FILE=(--env-file .longport.env)
     fi
-    nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload "${UVICORN_ENV_FILE[@]}" > ../logs/backend.log 2>&1 &
+    nohup uvicorn app.main:app --host 127.0.0.1 --port 8000 "${UVICORN_ENV_FILE[@]}" > ../logs/backend.log 2>&1 &
     BACKEND_PID=$!
+    echo "$BACKEND_PID" > ../logs/backend.pid
 
     # 等待服务启动
     echo "⏳ 等待后端服务启动..."
     for i in {1..15}; do
-        if curl -s http://localhost:8000/health > /dev/null; then
+        if curl --fail --silent --show-error --max-time 2 http://localhost:8000/health > /dev/null; then
             echo "✅ 后端服务启动成功 (PID: $BACKEND_PID)"
             break
         fi
         if [ $i -eq 15 ]; then
             echo "❌ 后端服务启动超时"
-            kill $BACKEND_PID 2>/dev/null || true
+            kill "$BACKEND_PID" 2>/dev/null || true
             exit 1
         fi
         sleep 1
@@ -140,9 +143,8 @@ start_frontend() {
 
     # 检查端口是否被占用
     if lsof -Pi :5173 -sTCP:LISTEN -t >/dev/null; then
-        echo "⚠️  端口 5173 已被占用，正在尝试停止现有进程..."
-        pkill -f "vite.*dev" || true
-        sleep 2
+        echo "❌ 端口 5173 已被占用，请先运行 ./stop.sh 或检查占用进程"
+        exit 1
     fi
 
     # 设置后端地址
@@ -150,19 +152,20 @@ start_frontend() {
 
     # 启动前端（后台运行）
     echo "🔄 启动 Vite 开发服务器..."
-    nohup npm run dev > ../logs/frontend.log 2>&1 &
+    nohup ./node_modules/.bin/vite > ../logs/frontend.log 2>&1 &
     FRONTEND_PID=$!
+    echo "$FRONTEND_PID" > ../logs/frontend.pid
 
     # 等待服务启动
     echo "⏳ 等待前端服务启动..."
     for i in {1..15}; do
-        if curl -s http://localhost:5173 > /dev/null; then
+        if curl --fail --silent --show-error --max-time 2 http://localhost:5173 > /dev/null; then
             echo "✅ 前端服务启动成功 (PID: $FRONTEND_PID)"
             break
         fi
         if [ $i -eq 15 ]; then
             echo "❌ 前端服务启动超时"
-            kill $FRONTEND_PID 2>/dev/null || true
+            kill "$FRONTEND_PID" 2>/dev/null || true
             exit 1
         fi
         sleep 1
@@ -197,27 +200,28 @@ show_info() {
 
 # 优雅关闭函数
 cleanup() {
+    local exit_code=$?
+    trap - EXIT SIGINT SIGTERM
+    cd "$ROOT_DIR"
     echo ""
     echo "🛑 正在停止服务..."
 
     # 停止后端
-    if [ ! -z "$BACKEND_PID" ] && kill -0 $BACKEND_PID 2>/dev/null; then
+    if [ -n "${BACKEND_PID:-}" ] && kill -0 "$BACKEND_PID" 2>/dev/null; then
         echo "📊 停止后端服务 (PID: $BACKEND_PID)"
-        kill $BACKEND_PID
+        kill "$BACKEND_PID"
     fi
 
     # 停止前端
-    if [ ! -z "$FRONTEND_PID" ] && kill -0 $FRONTEND_PID 2>/dev/null; then
+    if [ -n "${FRONTEND_PID:-}" ] && kill -0 "$FRONTEND_PID" 2>/dev/null; then
         echo "🎨 停止前端服务 (PID: $FRONTEND_PID)"
-        kill $FRONTEND_PID
+        kill "$FRONTEND_PID"
     fi
 
-    # 强制清理残留进程
-    pkill -f "uvicorn.*app.main:app" 2>/dev/null || true
-    pkill -f "vite.*dev" 2>/dev/null || true
+    rm -f logs/backend.pid logs/frontend.pid
 
     echo "✅ 服务已停止"
-    exit 0
+    exit "$exit_code"
 }
 
 # 主执行流程
@@ -226,7 +230,7 @@ main() {
     mkdir -p logs
 
     # 设置信号处理
-    trap cleanup SIGINT SIGTERM
+    trap cleanup EXIT SIGINT SIGTERM
 
     # 执行检查和启动
     check_requirements
@@ -240,12 +244,12 @@ main() {
     echo "🔄 服务正在运行中... (按 Ctrl+C 停止)"
     while true; do
         # 检查进程是否还在运行
-        if ! kill -0 $BACKEND_PID 2>/dev/null; then
+        if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
             echo "❌ 后端进程异常退出"
             cleanup
         fi
 
-        if ! kill -0 $FRONTEND_PID 2>/dev/null; then
+        if ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
             echo "❌ 前端进程异常退出"
             cleanup
         fi

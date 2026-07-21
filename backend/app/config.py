@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     data_dir: Path = Path("data")
     duckdb_path: Path = Path("data/quant.db")
     encryption_key: Optional[str] = None
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -21,6 +22,9 @@ class Settings(BaseSettings):
     def get_fernet(self) -> Fernet:
         key = self.encryption_key or self._load_or_create_key()
         return Fernet(key)
+
+    def allowed_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     def _load_or_create_key(self) -> bytes:
         key_file = self.data_dir / "encryption.key"

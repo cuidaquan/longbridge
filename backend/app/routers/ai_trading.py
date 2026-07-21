@@ -2,7 +2,7 @@
 AI 自动交易 - API 路由
 """
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Optional
 import logging
 
@@ -21,6 +21,15 @@ from ..services import get_cached_candlesticks
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai-trading", tags=["ai_trading"])
+AI_API_KEY_MASK = "********"
+
+
+def _public_config(config: Optional[dict]) -> dict:
+    """Return a copy that is safe to serialize in API responses."""
+    public = dict(config or {})
+    if public.get("ai_api_key"):
+        public["ai_api_key"] = AI_API_KEY_MASK
+    return public
 
 
 # ============================================
@@ -29,21 +38,24 @@ router = APIRouter(prefix="/ai-trading", tags=["ai_trading"])
 
 class AiTradingConfigUpdate(BaseModel):
     """AI 交易配置更新模型"""
+    model_config = ConfigDict(extra="forbid")
+
     enabled: Optional[bool] = None
     symbols: Optional[List[str]] = None
-    check_interval_minutes: Optional[int] = None
+    check_interval_minutes: Optional[int] = Field(None, ge=1, le=1440)
     ai_model: Optional[str] = None
     ai_api_key: Optional[str] = None
-    ai_temperature: Optional[float] = None
-    min_confidence: Optional[float] = None
-    max_position_per_stock: Optional[float] = None
-    max_daily_trades: Optional[int] = None
-    max_loss_per_day: Optional[float] = None
+    ai_temperature: Optional[float] = Field(None, ge=0, le=2)
+    min_confidence: Optional[float] = Field(None, ge=0, le=1)
+    max_position_per_stock: Optional[float] = Field(None, gt=0)
+    max_daily_trades: Optional[int] = Field(None, ge=0, le=1000)
+    max_loss_per_day: Optional[float] = Field(None, gt=0)
     enable_stop_loss: Optional[bool] = None
-    default_stop_loss_percent: Optional[float] = None
+    default_stop_loss_percent: Optional[float] = Field(None, gt=0, le=100)
     enable_real_trading: Optional[bool] = None
     position_sizing_method: Optional[str] = None
-    fixed_amount_per_trade: Optional[float] = None
+    fixed_amount_per_trade: Optional[float] = Field(None, gt=0)
+    real_trading_confirmation: Optional[str] = None
 
 
 # ============================================
@@ -67,7 +79,7 @@ async def start_engine():
         return {
             "status": "started",
             "message": "AI Trading Engine started successfully",
-            "config": engine.config
+            "config": _public_config(engine.config),
         }
     except Exception as e:
         logger.error(f"Failed to start AI engine: {e}", exc_info=True)
@@ -140,7 +152,7 @@ async def get_engine_status():
             "today_trades": today_trades,
             "today_pnl": today_pnl,
             "current_positions": len(positions),
-            "config": config
+            "config": _public_config(config),
         }
     except Exception as e:
         logger.error(f"Failed to get engine status: {e}", exc_info=True)
@@ -176,13 +188,8 @@ async def get_config():
                 "fixed_amount_per_trade": 10000
             }
         
-        # 隐藏 API Key（只显示前几位）
-        if config.get('ai_api_key'):
-            key = config['ai_api_key']
-            if len(key) > 8:
-                config['ai_api_key'] = key[:4] + "..." + key[-4:]
-        
-        return config
+        # Always return a fixed mask so secret length/prefix/suffix are not exposed.
+        return _public_config(config)
         
     except Exception as e:
         logger.error(f"Failed to get config: {e}", exc_info=True)
@@ -197,7 +204,19 @@ async def update_config(config_update: AiTradingConfigUpdate):
         current_config = get_ai_trading_config() or {}
         
         # 更新配置（只更新提供的字段）
-        update_data = config_update.dict(exclude_unset=True)
+        update_data = config_update.model_dump(exclude_unset=True)
+        if update_data.get('ai_api_key') == AI_API_KEY_MASK:
+            update_data.pop('ai_api_key')
+        confirmation = update_data.pop('real_trading_confirmation', None)
+        enabling_real_trading = (
+            update_data.get('enable_real_trading') is True
+            and not current_config.get('enable_real_trading', False)
+        )
+        if enabling_real_trading and confirmation != "CONFIRM_REAL_TRADING":
+            raise HTTPException(
+                status_code=400,
+                detail="启用真实交易需要明确的二次确认",
+            )
         current_config.update(update_data)
         
         # 保存配置
@@ -219,6 +238,8 @@ async def update_config(config_update: AiTradingConfigUpdate):
             "restarted": need_restart
         }
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to update config: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -501,6 +522,3 @@ async def get_performance(days: int = 30):
     except Exception as e:
         logger.error(f"Failed to get performance: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-
-
-

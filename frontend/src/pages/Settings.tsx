@@ -514,7 +514,7 @@ export default function SettingsPage() {
                   </span>
                   <span className="text-right font-medium">{bar.close?.toFixed(2)}</span>
                   <span className="text-right text-slate-500">
-                    {(bar.volume / 1000).toFixed(0)}K
+                    {((bar.volume ?? 0) / 1000).toFixed(0)}K
                   </span>
                 </div>
               ))}

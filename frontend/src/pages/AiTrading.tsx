@@ -28,9 +28,7 @@ import {
 } from "../components/ui";
 import SimpleKLineChart from "../components/SimpleKLineChart";
 import AiAnalysisPanel from "../components/AiAnalysisPanel";
-import { resolveWsUrl } from "../api/client";
-
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+import { API_BASE, resolveWsUrl } from "../api/client";
 
 interface EngineStatus {
   running: boolean;
@@ -270,7 +268,21 @@ export default function AiTradingPage() {
         return;
       }
 
-      const configToSave = { ...config, symbols };
+      const enablingRealTrading = Boolean(config.enable_real_trading)
+        && !Boolean(engineStatus?.config?.enable_real_trading);
+      if (enablingRealTrading && !window.confirm(
+        "确认启用真实交易？保存后系统可能向券商发送真实订单。请确认账户、仓位和风控参数均已核对。"
+      )) {
+        return;
+      }
+
+      const configToSave = {
+        ...config,
+        symbols,
+        ...(enablingRealTrading
+          ? { real_trading_confirmation: "CONFIRM_REAL_TRADING" }
+          : {}),
+      };
       const response = await fetch(`${API_BASE}/ai-trading/config`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },

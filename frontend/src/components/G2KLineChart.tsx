@@ -4,6 +4,7 @@ import { ChartLoadingSpinner, SkeletonLoader } from './LoadingSpinner';
 
 interface KLineData {
   time: string;
+  ts?: string | number;
   open: number;
   high: number;
   low: number;
@@ -57,7 +58,7 @@ export default function G2KLineChart({
       container: containerRef.current,
       width,
       height,
-      padding: [20, 80, 60, 60],
+      padding: 40,
       theme: document.documentElement.classList.contains('dark') ? 'dark' : 'light'
     });
 
@@ -226,16 +227,17 @@ export default function G2KLineChart({
     });
 
     // 绘制K线图 - 使用 schema 几何标记
-    chart
+    const legacyChart = chart as any;
+    legacyChart
       .schema()
       .position('time*high*low*open*close')
       .color('type', (type: string) => {
         return type === 'up' ? '#10b981' : '#ef4444';
       })
       .shape('candle')
-      .tooltip('timeStr*open*high*low*close*volume', (timeStr, open, high, low, close, volume) => {
-        const changeRate = ((close - open) / open * 100).toFixed(2);
-        const changeValue = (close - open).toFixed(2);
+      .tooltip('timeStr*open*high*low*close*volume', (timeStr: string, open: number, high: number, low: number, close: number, volume: number) => {
+        const changeRate = (close - open) / open * 100;
+        const changeValue = close - open;
         return {
           title: timeStr,
           value: `开盘: ${open.toFixed(2)}<br/>` +
@@ -243,14 +245,14 @@ export default function G2KLineChart({
                  `最低: ${low.toFixed(2)}<br/>` +
                  `收盘: ${close.toFixed(2)}<br/>` +
                  `成交量: ${(volume / 1000000).toFixed(2)}M<br/>` +
-                 `涨跌: ${changeValue >= 0 ? '+' : ''}${changeValue}<br/>` +
-                 `涨跌幅: ${changeRate >= 0 ? '+' : ''}${changeRate}%`
+                 `涨跌: ${changeValue >= 0 ? '+' : ''}${changeValue.toFixed(2)}<br/>` +
+                 `涨跌幅: ${changeRate >= 0 ? '+' : ''}${changeRate.toFixed(2)}%`
         };
       });
 
     // 如果有交易信号，添加信号标记
     if (signalData.length > 0) {
-      chart.annotation().dataMarker({
+      legacyChart.annotation().dataMarker({
         data: signalData,
         position: (datum: any) => [datum.time, datum.price],
         point: {
@@ -354,7 +356,7 @@ export default function G2KLineChart({
           className="absolute inset-0 flex items-center justify-center"
           style={{ width: `${width}px`, height: `${height}px` }}
         >
-          <ChartLoadingSpinner stage={loadingStage} />
+          <ChartLoadingSpinner stage={loadingStage === 'complete' ? undefined : loadingStage} />
         </div>
       )}
 

@@ -97,7 +97,7 @@ export function CardHeader({
   );
 }
 
-type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "success";
+type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "success" | "warning";
 type ButtonSize = "sm" | "md" | "lg";
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -128,6 +128,8 @@ export function Button({
       "bg-gradient-to-r from-red-500 to-rose-600 text-white hover:from-red-600 hover:to-rose-700 shadow-lg shadow-red-500/25",
     success:
       "bg-gradient-to-r from-emerald-500 to-green-600 text-white hover:from-emerald-600 hover:to-green-700 shadow-lg shadow-emerald-500/25",
+    warning:
+      "bg-gradient-to-r from-amber-500 to-orange-600 text-white hover:from-amber-600 hover:to-orange-700 shadow-lg shadow-amber-500/25",
   };
 
   const sizeClasses = {
@@ -177,7 +179,7 @@ export function Button({
 interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label?: string;
   error?: string;
-  hint?: string;
+  hint?: ReactNode;
 }
 
 export function Input({
@@ -473,9 +475,10 @@ interface AlertProps {
   title?: string;
   children: ReactNode;
   onClose?: () => void;
+  className?: string;
 }
 
-export function Alert({ type, title, children, onClose }: AlertProps) {
+export function Alert({ type, title, children, onClose, className = "" }: AlertProps) {
   const styles = {
     info: "bg-cyan-50 dark:bg-cyan-900/20 border-cyan-200 dark:border-cyan-800 text-cyan-800 dark:text-cyan-200",
     success: "bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800 text-emerald-800 dark:text-emerald-200",
@@ -484,7 +487,7 @@ export function Alert({ type, title, children, onClose }: AlertProps) {
   };
 
   return (
-    <div className={`rounded-lg border p-4 ${styles[type]}`}>
+    <div className={`rounded-lg border p-4 ${styles[type]} ${className}`}>
       <div className="flex items-start justify-between">
         <div>
           {title && <p className="font-medium mb-1">{title}</p>}

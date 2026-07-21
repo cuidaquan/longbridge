@@ -2,6 +2,7 @@
 Longbridge API Trading Integration
 Handles real order placement and management through Longbridge OpenAPI
 """
+import asyncio
 import logging
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
@@ -125,7 +126,7 @@ class LongbridgeTradingAPI:
 
         return TradeContext(config)
 
-    async def place_order(self, order_request: OrderRequest) -> OrderResponse:
+    def _place_order_sync(self, order_request: OrderRequest) -> OrderResponse:
         """Place a trading order with retry mechanism"""
         import time
         from datetime import datetime
@@ -236,7 +237,10 @@ class LongbridgeTradingAPI:
         # Should not reach here, but just in case
         raise LongbridgeAPIError("Failed to place order after all retries")
 
-    async def cancel_order(self, order_id: str) -> bool:
+    async def place_order(self, order_request: OrderRequest) -> OrderResponse:
+        return await asyncio.to_thread(self._place_order_sync, order_request)
+
+    def _cancel_order_sync(self, order_id: str) -> bool:
         """Cancel an existing order"""
         try:
             ctx = self._get_trade_context()
@@ -258,7 +262,10 @@ class LongbridgeTradingAPI:
             except:
                 pass
 
-    async def get_order_status(self, order_id: str) -> Optional[OrderResponse]:
+    async def cancel_order(self, order_id: str) -> bool:
+        return await asyncio.to_thread(self._cancel_order_sync, order_id)
+
+    def _get_order_status_sync(self, order_id: str) -> Optional[OrderResponse]:
         """Get order status"""
         try:
             ctx = self._get_trade_context()
@@ -312,7 +319,10 @@ class LongbridgeTradingAPI:
             except:
                 pass
 
-    async def get_account_balance(self) -> Dict[str, Any]:
+    async def get_order_status(self, order_id: str) -> Optional[OrderResponse]:
+        return await asyncio.to_thread(self._get_order_status_sync, order_id)
+
+    def _get_account_balance_sync(self) -> Dict[str, Any]:
         """Get account balance information"""
         try:
             ctx = self._get_trade_context()
@@ -354,7 +364,10 @@ class LongbridgeTradingAPI:
             except:
                 pass
 
-    async def get_positions(self) -> List[Dict[str, Any]]:
+    async def get_account_balance(self) -> Dict[str, Any]:
+        return await asyncio.to_thread(self._get_account_balance_sync)
+
+    def _get_positions_sync(self) -> List[Dict[str, Any]]:
         """Get current positions"""
         try:
             ctx = self._get_trade_context()
@@ -399,6 +412,10 @@ class LongbridgeTradingAPI:
                 close_longport_context(ctx)
             except:
                 pass
+
+    async def get_positions(self) -> List[Dict[str, Any]]:
+        return await asyncio.to_thread(self._get_positions_sync)
+
 
 # Global trading API instance
 trading_api = None

@@ -110,7 +110,7 @@ export type PortfolioOverviewResponse = {
   account_balance?: Record<string, any>;
 };
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
+export const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
 export class APIError extends Error {
   status: number;

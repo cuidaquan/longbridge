@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { resolveWsUrl } from '../api/client';
+import { API_BASE, resolveWsUrl } from '../api/client';
 import G2KLineChart from '../components/G2KLineChart';
 import LoadingSpinner, { SkeletonLoader } from '../components/LoadingSpinner';
 import TestChart from '../components/TestChart';
 import SimpleKLineTest from '../components/SimpleKLineTest';
 import DirectKLineChart from '../components/DirectKLineChart';
-import { generateMockKLineData, generateMockTradingSignals, isValidKLineData, isStaticData, enhanceStaticData } from '../utils/mockData';
+import { isValidKLineData, isStaticData } from '../utils/mockData';
 
 interface RealtimeQuote {
   symbol: string;
@@ -65,6 +65,7 @@ export default function RealtimeChartPage() {
   const [signalsLoading, setSignalsLoading] = useState(false);
   const [tradingSignals, setTradingSignals] = useState<TradingSignal[]>([]);
   const [loadingProgress, setLoadingProgress] = useState(0);
+  const [dataError, setDataError] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const [chartData, setChartData] = useState<KLineData[]>([]);
@@ -80,7 +81,7 @@ export default function RealtimeChartPage() {
   // Ensure the selected symbol is subscribed on backend
   const ensureSubscribed = useCallback(async (symbol: string) => {
     try {
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const res = await fetch(`${base}/settings/symbols`);
       if (!res.ok) return;
       const data = await res.json();
@@ -123,7 +124,7 @@ export default function RealtimeChartPage() {
 
       setLoadingProgress(50);
 
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 10000);
 
@@ -148,7 +149,7 @@ export default function RealtimeChartPage() {
         });
       }
     } catch (error) {
-      if (error.name !== 'AbortError') {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) {
         console.error('Failed to load trading signals:', error);
       }
     } finally {
@@ -161,6 +162,7 @@ export default function RealtimeChartPage() {
   const loadHistoricalData = useCallback(async () => {
     setLoading(true);
     setLoadingProgress(5);
+    setDataError(null);
 
     try {
       const cacheKey = `history_${selectedSymbol}`;
@@ -169,25 +171,19 @@ export default function RealtimeChartPage() {
 
       setLoadingProgress(15);
 
-      if (cached && (now - cached.timestamp) < CACHE_TTL) {
+      if (cached && (now - cached.timestamp) < CACHE_TTL && isValidKLineData(cached.data)) {
         // 模拟缓存加载
         await new Promise(resolve => setTimeout(resolve, 300));
         setLoadingProgress(100);
 
-        let cachedProcessedData: any[];
-        if (!isValidKLineData(cached.data)) {
-          console.warn('缓存数据无效，使用模拟数据');
-          cachedProcessedData = generateMockKLineData(50, 650);
-        } else {
-          cachedProcessedData = cached.data.map((bar: any) => ({
-            time: bar.ts || bar.time,
-            open: bar.open,
-            high: bar.high,
-            low: bar.low,
-            close: bar.close,
-            volume: bar.volume || Math.floor(Math.random() * 100000 + 10000)
-          }));
-        }
+        const cachedProcessedData = cached.data.map((bar: any) => ({
+          time: bar.ts || bar.time,
+          open: bar.open,
+          high: bar.high,
+          low: bar.low,
+          close: bar.close,
+          volume: Number(bar.volume) || 0
+        }));
 
         setHistoricalData(cached.data);
         setChartData(cachedProcessedData);
@@ -196,9 +192,13 @@ export default function RealtimeChartPage() {
         return;
       }
 
+      if (cached) {
+        dataCache.current.delete(cacheKey);
+      }
+
       setLoadingProgress(40);
 
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const params = new URLSearchParams({
         symbol: selectedSymbol,
         limit: '200',
@@ -245,12 +245,10 @@ export default function RealtimeChartPage() {
         let processedData: any[] = [];
 
         if (!isValidKLineData(bars)) {
-          console.warn('原始API数据无效，使用模拟数据');
-          const mockData = generateMockKLineData(50, 650); // 以700.HK的650价格为基础
-          processedData = mockData;
-        } else if (isStaticData(bars)) {
-          console.warn('检测到静态数据，添加变化');
-          processedData = enhanceStaticData(bars);
+          setHistoricalData(bars);
+          setChartData([]);
+          setDataError('后端未返回有效的 K 线数据，请同步行情后重试。');
+          return;
         } else {
           // 异步处理数据转换
           processedData = await new Promise<any[]>(resolve => {
@@ -261,7 +259,7 @@ export default function RealtimeChartPage() {
                 high: bar.high,
                 low: bar.low,
                 close: bar.close,
-                volume: bar.volume || Math.floor(Math.random() * 100000 + 10000)
+                volume: Number(bar.volume) || 0
               }));
               resolve(result);
             };
@@ -283,11 +281,19 @@ export default function RealtimeChartPage() {
           data: bars,
           timestamp: now
         });
+      } else {
+        throw new Error(`历史行情请求失败 (${response.status})`);
       }
     } catch (error) {
-      if (error.name !== 'AbortError') {
+      if (!(error instanceof DOMException && error.name === 'AbortError')) {
         console.error('Failed to load historical data:', error);
       }
+      setChartData([]);
+      setDataError(
+        error instanceof DOMException && error.name === 'AbortError'
+          ? '历史行情请求超时，请稍后重试。'
+          : error instanceof Error ? error.message : '历史行情加载失败。'
+      );
     } finally {
       setLoading(false);
       setLoadingProgress(0);
@@ -301,16 +307,6 @@ export default function RealtimeChartPage() {
     loadHistoricalData();
     loadTradingSignals(selectedSymbol);
   }, [selectedSymbol, loadHistoricalData, loadTradingSignals]);
-
-  // 如果chartData有数据，但没有交易信号，生成一些模拟信号
-  useEffect(() => {
-    if (chartData.length > 0 && tradingSignals.length === 0 && !signalsLoading) {
-      console.log('生成模拟交易信号');
-      const mockSignals = generateMockTradingSignals(chartData, 8);
-      setTradingSignals(mockSignals);
-    }
-  }, [chartData, tradingSignals, signalsLoading]);
-
   // WebSocket connection for real-time data
   useEffect(() => {
     const connectWebSocket = () => {
@@ -463,6 +459,12 @@ export default function RealtimeChartPage() {
           </div>
         </div>
       </div>
+
+      {dataError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300">
+          {dataError}
+        </div>
+      )}
 
       {/* Symbol Selector */}
       <div className="card p-6">

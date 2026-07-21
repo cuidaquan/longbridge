@@ -1,5 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { init, dispose } from 'klinecharts';
+import {
+  CandleType,
+  LineType,
+  TooltipShowRule,
+  TooltipShowType,
+  init,
+  dispose,
+} from 'klinecharts';
 
 interface KLineData {
   time: number;
@@ -32,6 +39,7 @@ export default function KLineChart({
       setStatus('数据为空或容器未准备好');
       return;
     }
+    const chartContainer = chartRef.current;
 
     const initChart = async () => {
       try {
@@ -40,12 +48,15 @@ export default function KLineChart({
 
         // 清理之前的图表
         if (klineChart.current) {
-          dispose(chartRef.current!);
+          dispose(chartContainer);
           klineChart.current = null;
         }
 
         // 初始化KLineCharts
-        const chart = init(chartRef.current);
+        const chart = init(chartContainer);
+        if (!chart) {
+          throw new Error('KLineCharts 初始化失败');
+        }
         klineChart.current = chart;
 
         setStatus('转换数据格式...');
@@ -72,29 +83,25 @@ export default function KLineChart({
               show: true,
               size: 1,
               color: '#E9EDF3',
-              style: 'solid'
+              style: LineType.Solid
             },
             vertical: {
               show: true,
               size: 1,
               color: '#E9EDF3',
-              style: 'solid'
+              style: LineType.Solid
             }
           },
           candle: {
-            margin: {
-              top: 0.2,
-              bottom: 0.1
-            },
-            type: 'candle_solid',
+            type: CandleType.CandleSolid,
             bar: {
               upColor: '#10b981',
               downColor: '#ef4444',
               noChangeColor: '#999999'
             },
             tooltip: {
-              showRule: 'always',
-              showType: 'standard',
+              showRule: TooltipShowRule.Always,
+              showType: TooltipShowType.Standard,
               custom: [
                 { title: '时间', value: '{time}' },
                 { title: '开盘', value: '{open}' },
@@ -130,10 +137,6 @@ export default function KLineChart({
           yAxis: {
             show: true,
             size: 'auto',
-            position: 'right',
-            type: 'normal',
-            inside: false,
-            reverse: false,
             axisLine: {
               show: true,
               color: '#DDDDDD',
@@ -186,7 +189,7 @@ export default function KLineChart({
 
       } catch (error) {
         console.error('KLine图创建失败:', error);
-        setStatus(`创建失败: ${error.message}`);
+        setStatus(`创建失败: ${error instanceof Error ? error.message : String(error)}`);
         onLoading?.(false);
       }
     };

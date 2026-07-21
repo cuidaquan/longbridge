@@ -48,7 +48,7 @@ export default function SimpleG2Chart({ width = 800, height = 400 }: SimpleChart
       setStatus('配置图表...');
 
       // 简单的柱状图
-      chart.interval().position('name*value').color('name');
+      chart.interval().encode('x', 'name').encode('y', 'value').encode('color', 'name');
 
       setStatus('渲染图表...');
       console.log('开始渲染图表...');
@@ -63,7 +63,7 @@ export default function SimpleG2Chart({ width = 800, height = 400 }: SimpleChart
       };
     } catch (err) {
       console.error('G2图表创建失败:', err);
-      setError(`创建失败: ${err.message}`);
+      setError(`创建失败: ${err instanceof Error ? err.message : String(err)}`);
       setStatus('创建失败');
     }
   }, [width, height]);

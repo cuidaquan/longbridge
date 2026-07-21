@@ -3,33 +3,74 @@
 # Longbridge Quant Console 停止脚本
 # 使用方法：./stop.sh
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
 echo "🛑 停止 Longbridge Quant Console..."
 echo "================================================"
+
+terminate_pid() {
+    local pid="$1"
+    [ -z "$pid" ] && return
+    kill -0 "$pid" 2>/dev/null || return
+
+    local children
+    children=$(pgrep -P "$pid" 2>/dev/null || true)
+    kill "$pid" 2>/dev/null || true
+
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+    fi
+    for child in $children; do
+        if kill -0 "$child" 2>/dev/null; then
+            kill -9 "$child" 2>/dev/null || true
+        fi
+    done
+}
+
+stop_pid_file() {
+    local file="$1"
+    local expected="$2"
+    if [ -f "$file" ]; then
+        local pid
+        pid=$(cat "$file")
+        local command
+        command=$(ps -p "$pid" -o command= 2>/dev/null || true)
+        if [ -z "$command" ] || [[ "$command" != *"$expected"* ]]; then
+            echo "   忽略过期 PID 文件: $file"
+            rm -f "$file"
+            return 1
+        fi
+        echo "   停止进程 PID: $pid"
+        terminate_pid "$pid"
+        rm -f "$file"
+        return 0
+    fi
+    return 1
+}
 
 # 停止后端进程
 stop_backend() {
     echo "📊 停止后端服务..."
 
-    # 查找并停止 uvicorn 进程
-    BACKEND_PIDS=$(pgrep -f "uvicorn.*app.main:app")
-    if [ ! -z "$BACKEND_PIDS" ]; then
+    if stop_pid_file "logs/backend.pid" "uvicorn app.main:app"; then
+        echo "✅ 后端服务已停止"
+        return
+    fi
+
+    BACKEND_PIDS=$(pgrep -f "[u]vicorn app.main:app" || true)
+    if [ -n "$BACKEND_PIDS" ]; then
         for pid in $BACKEND_PIDS; do
             echo "   停止进程 PID: $pid"
-            kill $pid
+            terminate_pid "$pid"
         done
-
-        # 等待进程结束
-        sleep 2
-
-        # 强制杀死顽固进程
-        BACKEND_PIDS=$(pgrep -f "uvicorn.*app.main:app")
-        if [ ! -z "$BACKEND_PIDS" ]; then
-            echo "   强制停止顽固进程..."
-            for pid in $BACKEND_PIDS; do
-                kill -9 $pid 2>/dev/null || true
-            done
-        fi
-
         echo "✅ 后端服务已停止"
     else
         echo "ℹ️  后端服务未运行"
@@ -40,26 +81,17 @@ stop_backend() {
 stop_frontend() {
     echo "🎨 停止前端服务..."
 
-    # 查找并停止 vite 进程
-    FRONTEND_PIDS=$(pgrep -f "vite.*dev\|node.*vite")
-    if [ ! -z "$FRONTEND_PIDS" ]; then
+    if stop_pid_file "logs/frontend.pid" "node_modules/.bin/vite"; then
+        echo "✅ 前端服务已停止"
+        return
+    fi
+
+    FRONTEND_PIDS=$(pgrep -f "[n]ode .*node_modules/.bin/vite" || true)
+    if [ -n "$FRONTEND_PIDS" ]; then
         for pid in $FRONTEND_PIDS; do
             echo "   停止进程 PID: $pid"
-            kill $pid
+            terminate_pid "$pid"
         done
-
-        # 等待进程结束
-        sleep 2
-
-        # 强制杀死顽固进程
-        FRONTEND_PIDS=$(pgrep -f "vite.*dev\|node.*vite")
-        if [ ! -z "$FRONTEND_PIDS" ]; then
-            echo "   强制停止顽固进程..."
-            for pid in $FRONTEND_PIDS; do
-                kill -9 $pid 2>/dev/null || true
-            done
-        fi
-
         echo "✅ 前端服务已停止"
     else
         echo "ℹ️  前端服务未运行"

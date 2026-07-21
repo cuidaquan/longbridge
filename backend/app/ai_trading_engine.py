@@ -263,11 +263,12 @@ class AiTradingEngine:
             'data': {'message': f'🤖 DeepSeek分析中: {symbol}...'}
         })
         
-        analysis = self.analyzer.analyze_trading_opportunity(
-            symbol=symbol,
-            klines=klines,
-            current_positions=current_positions,
-            scenario="buy_focus"  # 🎯 AI交易专注寻找买入机会
+        analysis = await asyncio.to_thread(
+            self.analyzer.analyze_trading_opportunity,
+            symbol,
+            klines,
+            current_positions,
+            "buy_focus",
         )
         
         # 4. 保存分析记录
@@ -351,9 +352,11 @@ class AiTradingEngine:
             from .services import get_cached_candlesticks
             
             # 获取最近的数据
-            klines = get_cached_candlesticks(
-                symbol=symbol,
-                limit=count
+            klines = await asyncio.to_thread(
+                get_cached_candlesticks,
+                symbol,
+                "day",
+                count,
             )
             
             return klines
@@ -933,4 +936,3 @@ def get_ai_trading_engine() -> AiTradingEngine:
     if _ai_trading_engine is None:
         _ai_trading_engine = AiTradingEngine()
     return _ai_trading_engine
-

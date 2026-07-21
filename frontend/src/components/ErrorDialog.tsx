@@ -15,10 +15,12 @@ import {
   Chip,
   Stack,
 } from '@mui/material';
-import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
-import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
-import LaunchIcon from '@mui/icons-material/Launch';
-import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import {
+  ErrorOutline as ErrorOutlineIcon,
+  HelpOutline as HelpOutlineIcon,
+  Launch as LaunchIcon,
+  ContentCopy as ContentCopyIcon,
+} from '@mui/icons-material';
 import { APIError } from '../api/client';
 
 interface ErrorDialogProps {
@@ -152,7 +154,6 @@ export default function ErrorDialog({ open, error, onClose, title = '操作失�
     </Dialog>
   );
 }
-
 
 
 

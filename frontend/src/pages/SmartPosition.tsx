@@ -26,6 +26,7 @@ import {
   LoadingSpinner,
   Tabs,
 } from "../components/ui";
+import { API_BASE } from "../api/client";
 
 interface PositionCalculation {
   symbol: string;
@@ -120,7 +121,7 @@ export default function SmartPositionPage() {
 
   const loadPortfolioStatus = async () => {
     try {
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const response = await fetch(`${base}/position-manager/portfolio-status`);
       if (response.ok) {
         const data = await response.json();
@@ -133,7 +134,7 @@ export default function SmartPositionPage() {
 
   const loadAutoStatus = async () => {
     try {
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const response = await fetch(`${base}/position-manager/auto/status`);
       if (response.ok) {
         const data = await response.json();
@@ -152,7 +153,7 @@ export default function SmartPositionPage() {
 
   const loadAutoTrades = async () => {
     try {
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const response = await fetch(`${base}/position-manager/auto/trades?limit=20`);
       if (response.ok) {
         const data = await response.json();
@@ -179,7 +180,7 @@ export default function SmartPositionPage() {
       return;
     }
     try {
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const response = await fetch(`${base}/position-manager/auto/start`, { method: "POST" });
       if (response.ok) {
         const data = await response.json();
@@ -196,7 +197,7 @@ export default function SmartPositionPage() {
 
   const stopAutoManager = async () => {
     try {
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const response = await fetch(`${base}/position-manager/auto/stop`, { method: "POST" });
       if (response.ok) {
         const data = await response.json();
@@ -213,11 +214,24 @@ export default function SmartPositionPage() {
 
   const saveAutoConfig = async () => {
     try {
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
+      const enablingRealTrading = autoConfig.enable_real_trading
+        && !Boolean(autoStatus?.config?.enable_real_trading);
+      if (enablingRealTrading && !window.confirm(
+        "确认启用真实交易？自动仓位管理器将可能向券商发送真实订单。请确认账户、仓位和风控参数均已核对。"
+      )) {
+        return;
+      }
+
       const response = await fetch(`${base}/position-manager/auto/config`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(autoConfig),
+        body: JSON.stringify({
+          ...autoConfig,
+          ...(enablingRealTrading
+            ? { real_trading_confirmation: "CONFIRM_REAL_TRADING" }
+            : {}),
+        }),
       });
       if (response.ok) {
         await loadAutoStatus();
@@ -235,7 +249,7 @@ export default function SmartPositionPage() {
   const loadKlineData = async (symbol: string) => {
     setKlineLoading(true);
     try {
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const response = await fetch(`${base}/position-manager/klines/${symbol}?limit=100`);
       if (response.ok) {
         const data = await response.json();
@@ -264,7 +278,7 @@ export default function SmartPositionPage() {
     setLoading(true);
     setError(null);
     try {
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const response = await fetch(`${base}/position-manager/calculate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -295,7 +309,7 @@ export default function SmartPositionPage() {
     setLoading(true);
     setError(null);
     try {
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const symbols = batchForm.symbols
         .split(",")
         .map((s) => s.trim())

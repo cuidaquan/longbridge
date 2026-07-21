@@ -350,6 +350,13 @@ class QuoteStreamManager:
 
         while self._portfolio_running:
             try:
+                # 没有行情 WebSocket 监听者时无需请求券商持仓接口。
+                with self._lock:
+                    has_listeners = bool(self._queues)
+                if not has_listeners:
+                    time.sleep(1)
+                    continue
+
                 # Get portfolio overview including positions and account balance
                 portfolio_data = get_portfolio_overview()
 

@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { resolveWsUrl } from '../api/client';
 
 interface RealtimeQuote {
   symbol: string;
@@ -31,7 +32,7 @@ export default function RealtimeBasicPage() {
   // WebSocket connection for real-time data
   useEffect(() => {
     const connectWebSocket = () => {
-      const wsUrl = `ws://localhost:8000/ws/quotes`;
+      const wsUrl = resolveWsUrl('/ws/quotes');
 
       setConnectionStatus('connecting');
       const ws = new WebSocket(wsUrl);

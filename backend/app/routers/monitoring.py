@@ -1,20 +1,20 @@
 """
 API endpoints for position monitoring configuration
 """
-from fastapi import APIRouter, HTTPException
-from typing import Dict, List, Any, Optional
-from pydantic import BaseModel
+from __future__ import annotations
+
+import asyncio
+
+from fastapi import APIRouter, HTTPException, Query
+from typing import Dict, Any, Optional
 
 from ..models import (
     PositionMonitoringConfig,
     GlobalMonitoringSettings,
     MonitoringStatus,
-    StrategyMode,
-    MonitoringConfigResponse,
     UpdateMonitoringConfigRequest,
     BatchMonitoringUpdateRequest,
     GlobalMonitoringUpdateRequest,
-    PositionWithMonitoring
 )
 from ..repositories import (
     get_position_monitoring_config,
@@ -22,7 +22,6 @@ from ..repositories import (
     get_all_monitoring_configs,
     get_global_monitoring_settings,
     save_global_monitoring_settings,
-    get_active_monitoring_symbols,
     get_monitoring_events,
     get_monitoring_events_count
 )
@@ -57,33 +56,34 @@ def _load_global_settings_model() -> GlobalMonitoringSettings:
         return settings_data
     return GlobalMonitoringSettings(**settings_data)
 
-class MonitoringUpdate(BaseModel):
-    monitoring_status: Optional[MonitoringStatus] = None
-    strategy_mode: Optional[StrategyMode] = None
-    enabled_strategies: Optional[List[str]] = None
-    custom_stop_loss: Optional[float] = None
-    custom_take_profit: Optional[float] = None
-    custom_position_limit: Optional[float] = None
-    trailing_stop: Optional[float] = None
-    notes: Optional[str] = None
+def _merge_position_config(
+    symbol: str,
+    existing: PositionMonitoringConfig | Dict[str, Any] | None,
+    update: UpdateMonitoringConfigRequest,
+) -> PositionMonitoringConfig:
+    """Merge a validated partial update into a validated monitoring config."""
+    if isinstance(existing, PositionMonitoringConfig):
+        values = existing.model_dump()
+    elif isinstance(existing, dict):
+        values = PositionMonitoringConfig(**existing).model_dump()
+    else:
+        values = PositionMonitoringConfig(symbol=symbol).model_dump()
 
-class BatchMonitoringUpdate(BaseModel):
-    symbols: List[str]
-    monitoring_status: Optional[MonitoringStatus] = None
-    strategy_mode: Optional[StrategyMode] = None
-    enabled_strategies: Optional[List[str]] = None
+    values.update(update.model_dump(exclude_unset=True))
+    values["symbol"] = symbol
+    return PositionMonitoringConfig(**values)
 
 @router.get("/positions")
 async def get_monitored_positions() -> Dict[str, Any]:
     """Get all positions with their monitoring configuration"""
     try:
         # Get current positions
-        portfolio = get_portfolio_overview()
+        portfolio = await asyncio.to_thread(get_portfolio_overview)
         positions = portfolio.get('positions', [])
 
         # Get monitoring configs and global settings
-        configs = _load_config_map()
-        global_settings = _load_global_settings_model()
+        configs = await asyncio.to_thread(_load_config_map)
+        global_settings = await asyncio.to_thread(_load_global_settings_model)
 
         # Combine position and monitoring data
         monitored_positions = []
@@ -97,9 +97,13 @@ async def get_monitored_positions() -> Dict[str, Any]:
                 config = PositionMonitoringConfig(
                     symbol=symbol,
                     monitoring_status=(
-                        MonitoringStatus.PAUSED
+                        MonitoringStatus.DISABLED
                         if symbol in (global_settings.excluded_symbols or [])
-                        else MonitoringStatus.ENABLED
+                        else (
+                            MonitoringStatus.ENABLED
+                            if global_settings.global_enabled
+                            else MonitoringStatus.PAUSED
+                        )
                     ),
                 )
 
@@ -111,7 +115,8 @@ async def get_monitored_positions() -> Dict[str, Any]:
                 'current_price': position.get('last_price', 0),
                 'market_value': position.get('market_value', 0),
                 'pnl': position.get('pnl', 0),
-                'pnl_ratio': position.get('pnl_percent', 0),
+                # Portfolio service exposes percentage points; monitoring UI uses a ratio.
+                'pnl_ratio': float(position.get('pnl_percent', 0) or 0) / 100,
                 'monitoring_status': config.monitoring_status,
                 'strategy_mode': config.strategy_mode,
                 'enabled_strategies': config.enabled_strategies,
@@ -138,7 +143,7 @@ async def get_monitored_positions() -> Dict[str, Any]:
 async def get_position_monitoring(symbol: str) -> PositionMonitoringConfig:
     """Get monitoring configuration for a specific position"""
     try:
-        config = get_position_monitoring_config(symbol)
+        config = await asyncio.to_thread(get_position_monitoring_config, symbol)
         if config:
             return config
         else:
@@ -152,38 +157,15 @@ async def get_position_monitoring(symbol: str) -> PositionMonitoringConfig:
 @router.put("/position/{symbol}")
 async def update_position_monitoring(
     symbol: str,
-    update: MonitoringUpdate
+    update: UpdateMonitoringConfigRequest,
 ) -> Dict[str, str]:
     """Update monitoring configuration for a position"""
     try:
-        # Get existing config or create new one
-        existing = get_position_monitoring_config(symbol)
-        if isinstance(existing, PositionMonitoringConfig):
-            config = existing
-        elif isinstance(existing, dict):
-            config = PositionMonitoringConfig(**existing)
-        else:
-            config = PositionMonitoringConfig(symbol=symbol)
-
-        # Update fields
-        if update.monitoring_status is not None:
-            config.monitoring_status = update.monitoring_status
-        if update.strategy_mode is not None:
-            config.strategy_mode = update.strategy_mode
-        if update.enabled_strategies is not None:
-            config.enabled_strategies = update.enabled_strategies
-        if update.custom_stop_loss is not None:
-            config.stop_loss_ratio = update.custom_stop_loss
-        if update.custom_take_profit is not None:
-            config.take_profit_ratio = update.custom_take_profit
-        if update.custom_position_limit is not None:
-            config.max_position_ratio = update.custom_position_limit
-        # trailing_stop 字段当前模型未定义，忽略以保持兼容
-        if update.notes is not None:
-            config.notes = update.notes
+        existing = await asyncio.to_thread(get_position_monitoring_config, symbol)
+        config = _merge_position_config(symbol, existing, update)
 
         # Save to database
-        save_position_monitoring_config(config.model_dump())
+        await asyncio.to_thread(save_position_monitoring_config, config.model_dump())
 
         # Update in position monitor
         monitor = get_position_monitor()
@@ -198,29 +180,16 @@ async def update_position_monitoring(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/batch-update")
-async def batch_update_monitoring(update: BatchMonitoringUpdate) -> Dict[str, str]:
+async def batch_update_monitoring(update: BatchMonitoringUpdateRequest) -> Dict[str, str]:
     """Batch update monitoring settings for multiple positions"""
     try:
         updated = 0
         monitor = get_position_monitor()
 
         for symbol in update.symbols:
-            existing = get_position_monitoring_config(symbol)
-            if isinstance(existing, PositionMonitoringConfig):
-                config = existing
-            elif isinstance(existing, dict):
-                config = PositionMonitoringConfig(**existing)
-            else:
-                config = PositionMonitoringConfig(symbol=symbol)
-
-            if update.monitoring_status is not None:
-                config.monitoring_status = update.monitoring_status
-            if update.strategy_mode is not None:
-                config.strategy_mode = update.strategy_mode
-            if update.enabled_strategies is not None:
-                config.enabled_strategies = update.enabled_strategies
-
-            save_position_monitoring_config(config.model_dump())
+            existing = await asyncio.to_thread(get_position_monitoring_config, symbol)
+            config = _merge_position_config(symbol, existing, update.config)
+            await asyncio.to_thread(save_position_monitoring_config, config.model_dump())
             await monitor.update_position_config(symbol, config)
             updated += 1
 
@@ -234,21 +203,25 @@ async def batch_update_monitoring(update: BatchMonitoringUpdate) -> Dict[str, st
 async def get_global_settings() -> GlobalMonitoringSettings:
     """Get global monitoring settings"""
     try:
-        return _load_global_settings_model()
+        return await asyncio.to_thread(_load_global_settings_model)
 
     except Exception as e:
         logger.error(f"Error getting global settings: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.put("/global-settings")
-async def update_global_settings(settings: GlobalMonitoringSettings) -> Dict[str, str]:
+async def update_global_settings(settings: GlobalMonitoringUpdateRequest) -> Dict[str, str]:
     """Update global monitoring settings"""
     try:
-        save_global_monitoring_settings(settings.model_dump())
+        current = await asyncio.to_thread(_load_global_settings_model)
+        values = current.model_dump()
+        values.update(settings.model_dump(exclude_unset=True))
+        merged = GlobalMonitoringSettings(**values)
+        await asyncio.to_thread(save_global_monitoring_settings, merged.model_dump())
 
         # Update in position monitor
         monitor = get_position_monitor()
-        monitor.global_settings = settings
+        monitor.global_settings = merged
 
         return {"message": "Global settings updated successfully"}
 
@@ -262,15 +235,27 @@ async def update_global_settings(settings: GlobalMonitoringSettings) -> Dict[str
 async def enable_all_monitoring() -> Dict[str, str]:
     """Enable monitoring for all positions"""
     try:
-        configs = _load_config_map()
+        configs = await asyncio.to_thread(_load_config_map)
+        portfolio = await asyncio.to_thread(get_portfolio_overview)
+        global_settings = await asyncio.to_thread(_load_global_settings_model)
         monitor = get_position_monitor()
 
-        for symbol, config in configs.items():
+        symbols = set(configs)
+        symbols.update(
+            position["symbol"]
+            for position in portfolio.get("positions", [])
+            if position.get("symbol")
+        )
+        symbols.difference_update(global_settings.excluded_symbols or [])
+        for symbol in symbols:
+            config = configs.get(symbol, PositionMonitoringConfig(symbol=symbol))
             config.monitoring_status = MonitoringStatus.ENABLED
-            save_position_monitoring_config(config.model_dump())
+            await asyncio.to_thread(
+                save_position_monitoring_config, config.model_dump()
+            )
             await monitor.update_position_config(symbol, config)
 
-        return {"message": f"Enabled monitoring for {len(configs)} positions"}
+        return {"message": f"Enabled monitoring for {len(symbols)} positions"}
 
     except Exception as e:
         logger.error(f"Error enabling all monitoring: {e}")
@@ -280,15 +265,25 @@ async def enable_all_monitoring() -> Dict[str, str]:
 async def disable_all_monitoring() -> Dict[str, str]:
     """Disable monitoring for all positions"""
     try:
-        configs = _load_config_map()
+        configs = await asyncio.to_thread(_load_config_map)
+        portfolio = await asyncio.to_thread(get_portfolio_overview)
         monitor = get_position_monitor()
 
-        for symbol, config in configs.items():
+        symbols = set(configs)
+        symbols.update(
+            position["symbol"]
+            for position in portfolio.get("positions", [])
+            if position.get("symbol")
+        )
+        for symbol in symbols:
+            config = configs.get(symbol, PositionMonitoringConfig(symbol=symbol))
             config.monitoring_status = MonitoringStatus.PAUSED
-            save_position_monitoring_config(config.model_dump())
+            await asyncio.to_thread(
+                save_position_monitoring_config, config.model_dump()
+            )
             await monitor.update_position_config(symbol, config)
 
-        return {"message": f"Disabled monitoring for {len(configs)} positions"}
+        return {"message": f"Disabled monitoring for {len(symbols)} positions"}
 
     except Exception as e:
         logger.error(f"Error disabling all monitoring: {e}")
@@ -311,7 +306,7 @@ async def get_monitoring_status() -> Dict[str, Any]:
 async def exclude_from_monitoring(symbol: str) -> Dict[str, str]:
     """Exclude a position from monitoring permanently"""
     try:
-        existing = get_position_monitoring_config(symbol)
+        existing = await asyncio.to_thread(get_position_monitoring_config, symbol)
         if isinstance(existing, PositionMonitoringConfig):
             config = existing
         elif isinstance(existing, dict):
@@ -320,13 +315,15 @@ async def exclude_from_monitoring(symbol: str) -> Dict[str, str]:
             config = PositionMonitoringConfig(symbol=symbol)
         config.monitoring_status = MonitoringStatus.DISABLED
 
-        save_position_monitoring_config(config.model_dump())
+        await asyncio.to_thread(save_position_monitoring_config, config.model_dump())
 
         # Also add to global excluded list
-        global_settings = _load_global_settings_model()
+        global_settings = await asyncio.to_thread(_load_global_settings_model)
         if symbol not in (global_settings.excluded_symbols or []):
             global_settings.excluded_symbols.append(symbol)
-            save_global_monitoring_settings(global_settings.model_dump())
+            await asyncio.to_thread(
+                save_global_monitoring_settings, global_settings.model_dump()
+            )
 
         # Update in position monitor
         monitor = get_position_monitor()
@@ -344,7 +341,7 @@ async def exclude_from_monitoring(symbol: str) -> Dict[str, str]:
 async def include_in_monitoring(symbol: str) -> Dict[str, str]:
     """Include a previously excluded position back to monitoring"""
     try:
-        existing = get_position_monitoring_config(symbol)
+        existing = await asyncio.to_thread(get_position_monitoring_config, symbol)
         if isinstance(existing, PositionMonitoringConfig):
             config = existing
         elif isinstance(existing, dict):
@@ -353,13 +350,15 @@ async def include_in_monitoring(symbol: str) -> Dict[str, str]:
             config = PositionMonitoringConfig(symbol=symbol)
         config.monitoring_status = MonitoringStatus.ENABLED
 
-        save_position_monitoring_config(config.model_dump())
+        await asyncio.to_thread(save_position_monitoring_config, config.model_dump())
 
         # Remove from global excluded list
-        global_settings = _load_global_settings_model()
+        global_settings = await asyncio.to_thread(_load_global_settings_model)
         if symbol in (global_settings.excluded_symbols or []):
             global_settings.excluded_symbols.remove(symbol)
-            save_global_monitoring_settings(global_settings.model_dump())
+            await asyncio.to_thread(
+                save_global_monitoring_settings, global_settings.model_dump()
+            )
 
         # Update in position monitor
         monitor = get_position_monitor()
@@ -378,19 +377,24 @@ async def include_in_monitoring(symbol: str) -> Dict[str, str]:
 async def get_events(
     symbol: Optional[str] = None,
     event_type: Optional[str] = None,
-    page: int = 1,
-    page_size: int = 50
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
 ) -> Dict[str, Any]:
     """Get monitoring event history"""
     try:
         offset = (page - 1) * page_size
-        events = get_monitoring_events(
+        events = await asyncio.to_thread(
+            get_monitoring_events,
             symbol=symbol,
             event_type=event_type,
             limit=page_size,
-            offset=offset
+            offset=offset,
         )
-        total = get_monitoring_events_count(symbol=symbol, event_type=event_type)
+        total = await asyncio.to_thread(
+            get_monitoring_events_count,
+            symbol=symbol,
+            event_type=event_type,
+        )
         
         return {
             "events": events,

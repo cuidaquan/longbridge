@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 // Removed lightweight-charts - now using G2 for all charts
-import { resolveWsUrl } from '../api/client';
+import { API_BASE, resolveWsUrl } from '../api/client';
 import KLineChart from '../components/KLineChart';
 
 interface RealtimeQuote {
@@ -48,7 +48,7 @@ export default function RealtimeKLinePage() {
   // Removed chartReady state - now using G2 charts
 
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
   // Removed chartContainerRef - now using G2 charts instead
   // Removed chartRef - now using G2 instead of lightweight-charts
   // Removed series refs - now using G2 instead of lightweight-charts
@@ -82,7 +82,7 @@ export default function RealtimeKLinePage() {
   // Ensure the selected symbol is subscribed on backend
   const ensureSubscribed = useCallback(async (symbol: string) => {
     try {
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const res = await fetch(`${base}/settings/symbols`);
       if (!res.ok) return;
       const data = await res.json();
@@ -106,7 +106,7 @@ export default function RealtimeKLinePage() {
   useEffect(() => {
     const loadSymbols = async () => {
       try {
-        const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+        const base = API_BASE;
         const [resSymbols, resPortfolio] = await Promise.all([
           fetch(`${base}/settings/symbols`),
           fetch(`${base}/portfolio/overview`)
@@ -154,7 +154,7 @@ export default function RealtimeKLinePage() {
 
     setLoading(true);
     try {
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const params = new URLSearchParams({
         symbol: selectedSymbol,
         limit: '1000',
@@ -527,7 +527,7 @@ function RealKLineChart({ symbol }: { symbol: string }) {
       setError(null);
 
       try {
-        const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+        const base = API_BASE;
         const url = `${base}/quotes/history?symbol=${encodeURIComponent(symbol)}&limit=1000&period=min5&adjust_type=no_adjust`;
 
         console.log('获取K线数据:', url);
@@ -550,17 +550,13 @@ function RealKLineChart({ symbol }: { symbol: string }) {
           console.log('转换后KLine数据:', klineData.slice(0, 3));
           setData(klineData);
         } else {
-          // 如果API没有数据，生成模拟数据
-          console.log('API无数据，生成模拟数据');
-          const mockData = generateMockKLineData(50);
-          setData(mockData);
+          setData([]);
+          setError('后端未返回 K 线数据，请同步行情后重试');
         }
       } catch (error) {
         console.error('K线数据获取失败:', error);
-        setError(error.message);
-        // 失败时生成模拟数据
-        const mockData = generateMockKLineData(50);
-        setData(mockData);
+        setError(error instanceof Error ? error.message : '数据加载失败');
+        setData([]);
       } finally {
         setLoading(false);
       }
@@ -647,35 +643,3 @@ function RealKLineChart({ symbol }: { symbol: string }) {
 }
 
 // G2版本已移除，现在只使用KLineCharts
-
-// 生成模拟K线数据
-function generateMockKLineData(count: number) {
-  const data = [];
-  let price = 100 + Math.random() * 50; // 起始价格
-  const now = Date.now();
-
-  for (let i = 0; i < count; i++) {
-    const time = now - (count - i) * 5 * 60 * 1000; // 每5分钟一根K线
-
-    const open = price;
-    const volatility = 0.02; // 波动率2%
-    const change = (Math.random() - 0.5) * price * volatility;
-    const close = Math.max(1, open + change);
-
-    const high = Math.max(open, close) + Math.random() * Math.abs(change) * 0.3;
-    const low = Math.min(open, close) - Math.random() * Math.abs(change) * 0.3;
-
-    data.push({
-      time,
-      open: Number(open.toFixed(2)),
-      high: Number(high.toFixed(2)),
-      low: Number(Math.max(1, low).toFixed(2)),
-      close: Number(close.toFixed(2)),
-      volume: Math.floor(Math.random() * 1000000)
-    });
-
-    price = close; // 下一根K线的开盘价
-  }
-
-  return data;
-}

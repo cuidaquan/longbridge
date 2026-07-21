@@ -25,12 +25,26 @@ from ..services import verify_quote_access, sync_history_candlesticks
 from ..streaming import quote_stream_manager
 
 router = APIRouter(prefix="/settings", tags=["settings"])
+MASKED_SECRET = "********"
+
+
+def _masked_credentials(values: dict[str, str]) -> dict[str, str]:
+    return {key: MASKED_SECRET if value else "" for key, value in values.items()}
+
+
+def _resolve_masked_credentials(
+    incoming: dict[str, str | None], existing: dict[str, str]
+) -> dict[str, str]:
+    return {
+        key: existing.get(key, "") if value == MASKED_SECRET else (value or "")
+        for key, value in incoming.items()
+    }
 
 
 @router.get("/credentials", response_model=CredentialResponse)
 def get_credentials() -> CredentialResponse:
     creds = load_credentials()
-    return CredentialResponse(**creds)
+    return CredentialResponse(**_masked_credentials(creds))
 
 
 @router.put(
@@ -40,8 +54,9 @@ def get_credentials() -> CredentialResponse:
 )
 def update_credentials(payload: CredentialPayload) -> Response:
     """保存 Longbridge API 凭据"""
+    resolved = _resolve_masked_credentials(payload.model_dump(), load_credentials())
     # Validate input
-    if not payload.LONGPORT_APP_KEY or not payload.LONGPORT_APP_SECRET or not payload.LONGPORT_ACCESS_TOKEN:
+    if not all(resolved.get(key) for key in ("LONGPORT_APP_KEY", "LONGPORT_APP_SECRET", "LONGPORT_ACCESS_TOKEN")):
         raise HTTPException(
             status_code=400,
             detail={
@@ -50,13 +65,13 @@ def update_credentials(payload: CredentialPayload) -> Response:
                 "solution": "请确保 APP_KEY、APP_SECRET 和 ACCESS_TOKEN 都已填写",
                 "missing_fields": [
                     field for field in ["LONGPORT_APP_KEY", "LONGPORT_APP_SECRET", "LONGPORT_ACCESS_TOKEN"]
-                    if not getattr(payload, field, None)
+                    if not resolved.get(field)
                 ]
             }
         )
     
     try:
-        save_credentials(payload.model_dump())
+        save_credentials(resolved)
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -107,7 +122,7 @@ def update_symbols(payload: SymbolPayload, background_tasks: BackgroundTasks) ->
 def get_ai_credentials() -> AICredentialResponse:
     """获取 AI 凭据（DeepSeek API Key 等）"""
     creds = load_ai_credentials()
-    return AICredentialResponse(**creds)
+    return AICredentialResponse(**_masked_credentials(creds))
 
 
 @router.put(
@@ -117,8 +132,9 @@ def get_ai_credentials() -> AICredentialResponse:
 )
 def update_ai_credentials(payload: AICredentialPayload) -> Response:
     """保存 AI 凭据（DeepSeek API Key 等）"""
+    resolved = _resolve_masked_credentials(payload.model_dump(), load_ai_credentials())
     # Validate input
-    if not payload.DEEPSEEK_API_KEY:
+    if not resolved.get("DEEPSEEK_API_KEY"):
         raise HTTPException(
             status_code=400,
             detail={
@@ -129,7 +145,7 @@ def update_ai_credentials(payload: AICredentialPayload) -> Response:
         )
     
     try:
-        save_ai_credentials(payload.model_dump())
+        save_ai_credentials(resolved)
     except Exception as exc:
         raise HTTPException(
             status_code=500,

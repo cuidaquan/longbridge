@@ -175,7 +175,7 @@ call .venv\Scripts\activate.bat
 set "UVICORN_ENV_FILE="
 if exist ".longport.env" set "UVICORN_ENV_FILE=--env-file .longport.env"
 
-start /B cmd /c "uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload %UVICORN_ENV_FILE% > ..\logs\backend.log 2>&1"
+start /B cmd /c "uvicorn app.main:app --host 127.0.0.1 --port 8000 %UVICORN_ENV_FILE% > ..\logs\backend.log 2>&1"
 popd
 
 echo Waiting for backend...

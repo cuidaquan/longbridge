@@ -33,6 +33,7 @@ import TrendingUpIcon from '@mui/icons-material/TrendingUp';
 import TrendingDownIcon from '@mui/icons-material/TrendingDown';
 import AccountBalanceIcon from '@mui/icons-material/AccountBalanceWalletOutlined';
 import AddIcon from '@mui/icons-material/Add';
+import { API_BASE, resolveWsUrl } from '../api/client';
 import DeleteIcon from '@mui/icons-material/Delete';
 import MenuItem from '@mui/material/MenuItem';
 import Select from '@mui/material/Select';
@@ -91,7 +92,7 @@ export default function StrategyControlPage() {
   // Load strategies
   const loadStrategies = async () => {
     try {
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const response = await fetch(`${base}/strategies/`);
       if (response.ok) {
         const data = await response.json();
@@ -110,7 +111,7 @@ export default function StrategyControlPage() {
   // Load positions
   const loadPositions = async () => {
     try {
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const response = await fetch(`${base}/strategies/positions/all`);
       if (response.ok) {
         const data = await response.json();
@@ -124,7 +125,7 @@ export default function StrategyControlPage() {
   // Load strategy status
   const loadStatus = async () => {
     try {
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const response = await fetch(`${base}/strategies/status`);
       if (response.ok) {
         const data = await response.json();
@@ -138,7 +139,7 @@ export default function StrategyControlPage() {
   // Toggle strategy
   const toggleStrategy = async (strategyId: string, enabled: boolean) => {
     try {
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const endpoint = enabled ? 'enable' : 'disable';
       const response = await fetch(`${base}/strategies/${strategyId}/${endpoint}`, {
         method: 'POST',
@@ -156,7 +157,7 @@ export default function StrategyControlPage() {
   // Reload strategies from config
   const reloadStrategies = async () => {
     try {
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const response = await fetch(`${base}/strategies/reload`, {
         method: 'POST',
       });
@@ -173,7 +174,7 @@ export default function StrategyControlPage() {
   // Update strategy settings
   const updateStrategy = async (strategyId: string, updates: any) => {
     try {
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const response = await fetch(`${base}/strategies/${strategyId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -192,7 +193,7 @@ export default function StrategyControlPage() {
   // Create new strategy
   const createStrategy = async () => {
     try {
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const symbols = newStrategy.symbols
         .split(',')
         .map((s) => s.trim())
@@ -235,7 +236,7 @@ export default function StrategyControlPage() {
     }
 
     try {
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const response = await fetch(`${base}/strategies/${strategyId}`, {
         method: 'DELETE',
       });
@@ -254,7 +255,7 @@ export default function StrategyControlPage() {
 
   // WebSocket connection for real-time updates
   useEffect(() => {
-    const wsUrl = `ws://localhost:8000/strategies/ws`;
+    const wsUrl = resolveWsUrl('/strategies/ws');
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {

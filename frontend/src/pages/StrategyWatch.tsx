@@ -22,6 +22,7 @@ import {
   EmptyState,
 } from "../components/ui";
 import RealTimeKLineChart from "../components/RealTimeKLineChart";
+import { API_BASE } from "../api/client";
 
 interface StrategySignal {
   symbol: string;
@@ -54,7 +55,7 @@ export default function StrategyWatchPage() {
   const loadWatchlistSignals = async () => {
     try {
       setLoading(true);
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const response = await fetch(`${base}/strategies/advanced/watchlist/signals`);
 
       if (response.ok) {

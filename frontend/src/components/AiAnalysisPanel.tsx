@@ -12,12 +12,14 @@ import {
   IconButton,
   Collapse,
 } from '@mui/material';
-import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
-import ExpandLessIcon from '@mui/icons-material/ExpandLess';
-import SmartToyIcon from '@mui/icons-material/SmartToy';
-import TrendingUpIcon from '@mui/icons-material/TrendingUp';
-import TrendingDownIcon from '@mui/icons-material/TrendingDown';
-import RemoveIcon from '@mui/icons-material/Remove';
+import {
+  ExpandMore as ExpandMoreIcon,
+  ExpandLess as ExpandLessIcon,
+  SmartToy as SmartToyIcon,
+  TrendingUp as TrendingUpIcon,
+  TrendingDown as TrendingDownIcon,
+  Remove as RemoveIcon,
+} from '@mui/icons-material';
 
 interface AnalysisMessage {
   id: number;
@@ -63,7 +65,11 @@ export default function AiAnalysisPanel({
 
   // WebSocket 连接
   useEffect(() => {
+    let disposed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
     const connectWs = () => {
+      if (disposed) return;
       ws.current = new WebSocket(wsUrl);
 
       ws.current.onopen = () => {
@@ -111,14 +117,19 @@ export default function AiAnalysisPanel({
       };
 
       ws.current.onclose = () => {
-        console.log('🔌 WebSocket closed, reconnecting in 3s...');
-        setTimeout(connectWs, 3000);
+        if (!disposed) {
+          console.log('🔌 WebSocket closed, reconnecting in 3s...');
+          reconnectTimer = setTimeout(connectWs, 3000);
+        }
       };
     };
 
     connectWs();
 
     return () => {
+      disposed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws.current) ws.current.onclose = null;
       ws.current?.close();
     };
   }, [wsUrl, maxMessages]);
@@ -375,5 +386,3 @@ export default function AiAnalysisPanel({
     </Box>
   );
 }
-
-

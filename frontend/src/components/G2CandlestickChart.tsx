@@ -34,6 +34,8 @@ export default function G2CandlestickChart({
       setStatus('数据为空或容器未准备好');
       return;
     }
+    const chartContainer = containerRef.current;
+    const volumeContainer = volumeContainerRef.current;
 
     const cleanup = () => {
       if (chartRef.current) {
@@ -75,7 +77,7 @@ export default function G2CandlestickChart({
 
         // 创建K线图 - 使用官方API
         const kChart = new Chart({
-          container: containerRef.current,
+          container: chartContainer,
           autoFit: true,
           height: height - 150, // 为成交量图留空间
         });
@@ -128,7 +130,7 @@ export default function G2CandlestickChart({
 
         // 成交量图
         const volumeChart = new Chart({
-          container: volumeContainerRef.current,
+          container: volumeContainer,
           autoFit: true,
           height: 120,
         });
@@ -170,7 +172,7 @@ export default function G2CandlestickChart({
 
       } catch (error) {
         console.error('K线图创建失败:', error);
-        setStatus(`创建失败: ${error.message}`);
+        setStatus(`创建失败: ${error instanceof Error ? error.message : String(error)}`);
         onLoading?.(false);
       }
     };

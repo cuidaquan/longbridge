@@ -4,27 +4,25 @@ Monitors all positions and applies strategies based on individual configuration
 """
 import asyncio
 import logging
-from typing import Dict, List, Optional, Set
-from datetime import datetime, time
+from typing import Dict, List, Optional
+from datetime import datetime, time, timezone
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 from .models import (
     PositionMonitoringConfig,
     GlobalMonitoringSettings,
     MonitoringStatus,
     StrategyMode,
-    PositionWithMonitoring
 )
 from .repositories import (
     get_position_monitoring_config,
     get_all_monitoring_configs,
     get_global_monitoring_settings,
-    save_position_monitoring_config,
-    get_active_monitoring_symbols,
     save_monitoring_event
 )
 from .strategy_engine import get_strategy_engine, MarketData
-from .services import get_portfolio_overview, get_positions
+from .services import get_portfolio_overview
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +30,7 @@ logger = logging.getLogger(__name__)
 class MonitoredPosition:
     """Enhanced position with monitoring state"""
     symbol: str
-    quantity: int
+    quantity: float
     avg_cost: float
     current_price: float
     market_value: float
@@ -62,14 +60,28 @@ class PositionMonitor:
         """Initialize monitoring system with current positions"""
         try:
             # Load global settings
-            settings_data = get_global_monitoring_settings()
+            settings_data = await asyncio.to_thread(get_global_monitoring_settings)
             if isinstance(settings_data, dict):
                 self.global_settings = GlobalMonitoringSettings(**settings_data)
             else:
                 self.global_settings = settings_data
 
             # Load all monitoring configs
-            configs = get_all_monitoring_configs()
+            raw_configs = await asyncio.to_thread(get_all_monitoring_configs)
+            configs: Dict[str, PositionMonitoringConfig] = {}
+            for raw_config in raw_configs:
+                try:
+                    config = (
+                        raw_config
+                        if isinstance(raw_config, PositionMonitoringConfig)
+                        else PositionMonitoringConfig(**raw_config)
+                    )
+                    configs[config.symbol] = config
+                except Exception:
+                    logger.warning(
+                        "Skipping invalid monitoring config during initialization: %r",
+                        raw_config,
+                    )
 
             # Get current positions from portfolio
             positions = await self.get_current_positions()
@@ -87,30 +99,29 @@ class PositionMonitor:
                 if symbol in configs:
                     config = configs[symbol]
                 else:
-                    # Create default config for new position
-                    if getattr(self.global_settings, "auto_monitor_new_positions", False):
-                        config = PositionMonitoringConfig(
-                            symbol=symbol,
-                            monitoring_status=MonitoringStatus.ACTIVE,
-                            strategy_mode=getattr(self.global_settings, "default_strategy_mode", StrategyMode.BALANCED),
-                            enabled_strategies=getattr(self.global_settings, "default_enabled_strategies", [])
-                        )
-                        save_position_monitoring_config(config)
-                    else:
-                        config = PositionMonitoringConfig(
-                            symbol=symbol,
-                            monitoring_status=MonitoringStatus.PAUSED
-                        )
+                    config = PositionMonitoringConfig(
+                        symbol=symbol,
+                        monitoring_status=(
+                            MonitoringStatus.ENABLED
+                            if self.global_settings.global_enabled
+                            else MonitoringStatus.PAUSED
+                        ),
+                    )
 
                 # Create monitored position
                 monitored_pos = MonitoredPosition(
                     symbol=symbol,
                     quantity=position.get('qty', position.get('quantity', 0)),
                     avg_cost=position.get('avg_price', position.get('avg_cost', 0)),
-                    current_price=position.get('current_price', 0),
+                    current_price=position.get(
+                        'current_price', position.get('last_price', 0)
+                    ),
                     market_value=position.get('market_value', 0),
                     pnl=position.get('pnl', 0),
-                    pnl_ratio=position.get('pnl_ratio', 0),
+                    pnl_ratio=position.get(
+                        'pnl_ratio',
+                        float(position.get('pnl_percent', 0) or 0) / 100,
+                    ),
                     monitoring_config=config,
                     last_check=datetime.now()
                 )
@@ -159,33 +170,31 @@ class PositionMonitor:
             position = self.monitored_positions[symbol]
 
             # Skip if not actively monitored
-            if position.monitoring_config.monitoring_status != MonitoringStatus.ACTIVE:
+            if position.monitoring_config.monitoring_status != MonitoringStatus.ENABLED:
+                return
+
+            if not self.global_settings.global_enabled or self.global_settings.emergency_stop:
                 return
 
             # Check trading time restrictions
             if not self.is_trading_time_valid(position.monitoring_config):
                 return
 
-            # Check expiry
-            if position.monitoring_config.expiry_date:
-                if datetime.now() > position.monitoring_config.expiry_date:
-                    position.monitoring_config.monitoring_status = MonitoringStatus.EXCLUDED
-                    save_position_monitoring_config(position.monitoring_config)
-                    return
-
             # Update current price and P&L
             current_price = quote_data.get('last_done', quote_data.get('close', 0))
+            if current_price is None or current_price <= 0:
+                return
             position.current_price = current_price
             position.pnl = (current_price - position.avg_cost) * position.quantity
-            position.pnl_ratio = (current_price - position.avg_cost) / position.avg_cost
+            position.pnl_ratio = (
+                (current_price - position.avg_cost) / position.avg_cost
+                if position.avg_cost > 0
+                else 0
+            )
             position.market_value = current_price * position.quantity
 
-            # Check price thresholds
-            if not self.check_price_thresholds(position):
-                return
-
-            # Check volume requirements
-            if not self.check_volume_requirements(position, quote_data.get('volume', 0)):
+            if not position.monitoring_config.enabled_strategies:
+                position.last_check = datetime.now()
                 return
 
             # Apply risk management checks
@@ -200,53 +209,59 @@ class PositionMonitor:
     async def check_new_position(self, symbol: str):
         """Check if there's a new position to monitor"""
         try:
+            if symbol in (self.global_settings.excluded_symbols or []):
+                return
+
             positions = await self.get_current_positions()
             for pos in positions:
                 if pos['symbol'] == symbol and symbol not in self.monitored_positions:
-                    # New position detected
-                    if getattr(self.global_settings, "auto_monitor_new_positions", False):
+                    existing = await asyncio.to_thread(
+                        get_position_monitoring_config, symbol
+                    )
+                    if isinstance(existing, PositionMonitoringConfig):
+                        config = existing
+                    elif isinstance(existing, dict):
+                        config = PositionMonitoringConfig(**existing)
+                    else:
                         config = PositionMonitoringConfig(
                             symbol=symbol,
-                            monitoring_status=MonitoringStatus.ACTIVE,
-                            strategy_mode=getattr(self.global_settings, "default_strategy_mode", StrategyMode.BALANCED),
-                            enabled_strategies=getattr(self.global_settings, "default_enabled_strategies", [])
-                        )
-                        save_position_monitoring_config(config)
-
-                        monitored_pos = MonitoredPosition(
-                            symbol=symbol,
-                            quantity=pos.get('qty', pos.get('quantity', 0)),
-                            avg_cost=pos.get('avg_price', pos.get('avg_cost', 0)),
-                            current_price=pos.get('current_price', 0),
-                            market_value=pos.get('market_value', 0),
-                            pnl=pos.get('pnl', 0),
-                            pnl_ratio=pos.get('pnl_ratio', 0),
-                            monitoring_config=config,
-                            last_check=datetime.now()
+                            monitoring_status=(
+                                MonitoringStatus.ENABLED
+                                if self.global_settings.global_enabled
+                                else MonitoringStatus.PAUSED
+                            ),
                         )
 
-                        self.monitored_positions[symbol] = monitored_pos
-                        logger.info(f"Added new position to monitoring: {symbol}")
+                    monitored_pos = MonitoredPosition(
+                        symbol=symbol,
+                        quantity=pos.get('qty', pos.get('quantity', 0)),
+                        avg_cost=pos.get('avg_price', pos.get('avg_cost', 0)),
+                        current_price=pos.get(
+                            'current_price', pos.get('last_price', 0)
+                        ),
+                        market_value=pos.get('market_value', 0),
+                        pnl=pos.get('pnl', 0),
+                        pnl_ratio=pos.get(
+                            'pnl_ratio',
+                            float(pos.get('pnl_percent', 0) or 0) / 100,
+                        ),
+                        monitoring_config=config,
+                        last_check=datetime.now(),
+                    )
+
+                    self.monitored_positions[symbol] = monitored_pos
+                    logger.info(f"Added new position to monitoring: {symbol}")
+                    return
 
         except Exception as e:
             logger.error(f"Error checking new position {symbol}: {e}")
 
     def is_trading_time_valid(self, config: PositionMonitoringConfig) -> bool:
         """Check if current time is within trading hours"""
-        now = datetime.now()
+        if not self.global_settings.market_hours_only:
+            return True
 
-        # Check custom time restrictions
-        if config.monitoring_start_time and config.monitoring_end_time:
-            start = time.fromisoformat(config.monitoring_start_time)
-            end = time.fromisoformat(config.monitoring_end_time)
-            current_time = now.time()
-
-            if start <= end:
-                if not (start <= current_time <= end):
-                    return False
-            else:  # Handles overnight periods
-                if not (current_time >= start or current_time <= end):
-                    return False
+        now = datetime.now(timezone.utc)
 
         # Check market hours based on symbol
         symbol = config.symbol
@@ -263,65 +278,45 @@ class PositionMonitor:
 
     def is_hk_market_hours(self, dt: datetime) -> bool:
         """Check if within HK market hours (9:30-16:00 HKT)"""
-        # Simplified - should consider holidays and time zones
-        market_open = time(9, 30)
-        market_close = time(16, 0)
-        return market_open <= dt.time() <= market_close
+        local = dt.astimezone(ZoneInfo("Asia/Hong_Kong"))
+        if local.weekday() >= 5:
+            return False
+        current = local.time().replace(tzinfo=None)
+        return (
+            time(9, 30) <= current <= time(12, 0)
+            or time(13, 0) <= current <= time(16, 0)
+        )
 
     def is_us_market_hours(self, dt: datetime) -> bool:
         """Check if within US market hours (9:30-16:00 EST/EDT)"""
-        # Simplified - should consider holidays and time zones
-        # Assuming we're in HKT, US market is 21:30-04:00 HKT
-        current_time = dt.time()
-        return (current_time >= time(21, 30) or current_time <= time(4, 0))
-
-    def check_price_thresholds(self, position: MonitoredPosition) -> bool:
-        """Check if price is within configured thresholds"""
-        config = position.monitoring_config
-
-        if config.min_price and position.current_price < config.min_price:
+        local = dt.astimezone(ZoneInfo("America/New_York"))
+        if local.weekday() >= 5:
             return False
-
-        if config.max_price and position.current_price > config.max_price:
-            return False
-
-        return True
-
-    def check_volume_requirements(self, position: MonitoredPosition, volume: float) -> bool:
-        """Check if volume meets requirements"""
-        config = position.monitoring_config
-
-        if config.min_volume and volume < config.min_volume:
-            return False
-
-        return True
+        current = local.time().replace(tzinfo=None)
+        return time(9, 30) <= current <= time(16, 0)
 
     async def check_risk_limits(self, position: MonitoredPosition) -> bool:
         """Check global and position-specific risk limits"""
-        # Check daily loss limit
-        if self.daily_loss >= self.global_settings.max_daily_loss:
-            logger.warning(f"Daily loss limit reached: {self.daily_loss:.2%}")
+        if self.daily_trades >= self.global_settings.max_daily_trades:
+            logger.warning("Daily trade limit reached: %s", self.daily_trades)
             return False
 
         # Check position size limit
         config = position.monitoring_config
-        position_limit = config.custom_position_limit or self.global_settings.max_position_size
+        position_limit = min(
+            config.max_position_ratio,
+            self.global_settings.max_total_exposure,
+        )
 
         # Get total portfolio value
-        portfolio = get_portfolio_overview()
-        total_value = portfolio.get('totals', {}).get('total_value', 1000000)  # Default 1M
+        portfolio = await asyncio.to_thread(get_portfolio_overview)
+        totals = portfolio.get('totals', {})
+        total_value = totals.get('market_value') or totals.get('cost') or 0
 
-        position_ratio = position.market_value / total_value
-        if position_ratio > position_limit:
+        position_ratio = position.market_value / total_value if total_value > 0 else 0
+        if total_value > 0 and position_ratio > position_limit:
             logger.warning(f"Position size limit exceeded for {position.symbol}: {position_ratio:.2%}")
             return False
-
-        # Check if high volatility pause is enabled
-        if self.global_settings.pause_on_high_volatility:
-            # Simple volatility check - can be enhanced
-            if abs(position.pnl_ratio) > 0.10:  # 10% move
-                logger.info(f"High volatility detected for {position.symbol}, pausing")
-                return False
 
         return True
 
@@ -401,9 +396,9 @@ class PositionMonitor:
         config = position.monitoring_config
 
         return {
-            'stop_loss': config.custom_stop_loss or self.global_settings.global_stop_loss,
-            'take_profit': config.custom_take_profit or self.global_settings.global_take_profit,
-            'trailing_stop': config.trailing_stop,
+            'stop_loss': config.stop_loss_ratio,
+            'take_profit': config.take_profit_ratio,
+            'trailing_stop': None,
             'position_size': position.quantity
         }
 
@@ -584,7 +579,6 @@ class PositionMonitor:
         async with self._lock:
             if symbol in self.monitored_positions:
                 self.monitored_positions[symbol].monitoring_config = config
-                save_position_monitoring_config(config)
                 logger.info(f"Updated monitoring config for {symbol}")
             else:
                 logger.warning(f"Position {symbol} not found in monitored positions")
@@ -594,7 +588,7 @@ class PositionMonitor:
         async with self._lock:
             active_positions = [
                 p for p in self.monitored_positions.values()
-                if p.monitoring_config.monitoring_status == MonitoringStatus.ACTIVE
+                if p.monitoring_config.monitoring_status == MonitoringStatus.ENABLED
             ]
 
             return {
@@ -624,13 +618,20 @@ class PositionMonitor:
     async def start_monitoring(self):
         """Start monitoring loop"""
         self.is_running = True
+        # 先让健康检查和基础 API 就绪，再访问券商持仓接口。
+        await asyncio.sleep(6)
+        if not self.is_running:
+            return
         await self.initialize()
 
         while self.is_running:
             try:
+                # initialize() 已完成首次加载，避免启动后立即重复请求券商接口
+                await asyncio.sleep(30)
+                if not self.is_running:
+                    break
                 # Periodic position refresh
                 await self.refresh_positions()
-                await asyncio.sleep(30)  # Refresh every 30 seconds
 
             except Exception as e:
                 logger.error(f"Error in monitoring loop: {e}")

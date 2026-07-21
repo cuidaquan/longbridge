@@ -2,10 +2,11 @@
 智能仓位管理 API
 根据资金和持仓自动计算买卖数量，生成策略
 """
+import asyncio
 import logging
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..services import get_positions, get_account_balance
 from ..position_calculator import (
@@ -59,6 +60,23 @@ class BatchPositionCalculation(BaseModel):
     recommendation: CalculatePositionResponse
     create_strategy: bool
 
+
+class AutoPositionConfigUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: Optional[bool] = None
+    check_interval_minutes: Optional[int] = Field(None, ge=1, le=1440)
+    use_ai_analysis: Optional[bool] = None
+    min_ai_confidence: Optional[float] = Field(None, ge=0, le=1)
+    auto_stop_loss_percent: Optional[float] = Field(None, ge=-100, le=0)
+    auto_take_profit_percent: Optional[float] = Field(None, ge=0, le=1000)
+    auto_rebalance_percent: Optional[float] = Field(None, ge=-100, le=0)
+    max_position_value: Optional[float] = Field(None, gt=0)
+    position_allocation: Optional[float] = Field(None, gt=0, le=1)
+    sell_ratio: Optional[float] = Field(None, gt=0, le=1)
+    enable_real_trading: Optional[bool] = None
+    real_trading_confirmation: Optional[str] = None
+
 @router.post("/calculate", response_model=CalculatePositionResponse)
 async def calculate_position(request: CalculatePositionRequest) -> CalculatePositionResponse:
     """
@@ -67,8 +85,8 @@ async def calculate_position(request: CalculatePositionRequest) -> CalculatePosi
     """
     try:
         # 获取账户余额和持仓
-        account_balance = get_account_balance()
-        current_positions = get_positions()
+        account_balance = await asyncio.to_thread(get_account_balance)
+        current_positions = await asyncio.to_thread(get_positions)
         
         # 创建计算器
         calculator = get_position_calculator(
@@ -77,7 +95,7 @@ async def calculate_position(request: CalculatePositionRequest) -> CalculatePosi
         )
         
         # 获取当前价格
-        prices = fetch_latest_prices([request.symbol])
+        prices = await asyncio.to_thread(fetch_latest_prices, [request.symbol])
         current_price = prices.get(request.symbol, 0) if prices else 0
         
         if current_price <= 0:
@@ -150,8 +168,8 @@ async def create_auto_strategy(request: AutoStrategyRequest) -> List[BatchPositi
     """
     try:
         # 获取账户余额和持仓
-        account_balance = get_account_balance()
-        current_positions = get_positions()
+        account_balance = await asyncio.to_thread(get_account_balance)
+        current_positions = await asyncio.to_thread(get_positions)
         
         # 创建计算器
         calculator = get_position_calculator(
@@ -160,7 +178,7 @@ async def create_auto_strategy(request: AutoStrategyRequest) -> List[BatchPositi
         )
         
         # 获取所有股票的当前价格
-        prices = fetch_latest_prices(request.symbols)
+        prices = await asyncio.to_thread(fetch_latest_prices, request.symbols)
         
         results = []
         engine = get_strategy_engine()
@@ -272,8 +290,8 @@ async def get_portfolio_status() -> Dict[str, Any]:
     返回当前资金、持仓和配置建议
     """
     try:
-        account_balance = get_account_balance()
-        current_positions = get_positions()
+        account_balance = await asyncio.to_thread(get_account_balance)
+        current_positions = await asyncio.to_thread(get_positions)
         
         calculator = get_position_calculator(
             account_balance=account_balance,
@@ -423,7 +441,7 @@ async def get_auto_manager_status():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.put("/auto/config")
-async def update_auto_config(config_update: Dict[str, Any]):
+async def update_auto_config(config_update: AutoPositionConfigUpdate):
     """更新自动仓位管理配置"""
     try:
         from ..db import get_connection
@@ -448,18 +466,30 @@ async def update_auto_config(config_update: Dict[str, Any]):
                 )
             """)
             
-            # 检查是否存在
-            exists = conn.execute("SELECT id FROM auto_position_config WHERE id = 1").fetchone()
+            # 检查是否存在并读取当前真实交易开关
+            existing_row = conn.execute(
+                "SELECT id, enable_real_trading FROM auto_position_config WHERE id = 1"
+            ).fetchone()
+            update_data = config_update.model_dump(exclude_unset=True)
+            confirmation = update_data.pop('real_trading_confirmation', None)
+            current_real_trading = bool(existing_row[1]) if existing_row else False
+            if (
+                update_data.get('enable_real_trading') is True
+                and not current_real_trading
+                and confirmation != "CONFIRM_REAL_TRADING"
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="启用真实交易需要明确的二次确认",
+                )
             
-            if exists:
+            if existing_row:
                 # 更新
                 update_fields = []
                 update_values = []
-                for key, value in config_update.items():
-                    # 排除 id 和 updated_at，因为 updated_at 会自动设置
-                    if key not in ('id', 'updated_at'):
-                        update_fields.append(f"{key} = ?")
-                        update_values.append(value)
+                for key, value in update_data.items():
+                    update_fields.append(f"{key} = ?")
+                    update_values.append(value)
                 
                 if update_fields:
                     update_values.append(1)  # id
@@ -469,8 +499,8 @@ async def update_auto_config(config_update: Dict[str, Any]):
                     )
             else:
                 # 插入
-                fields = ['id'] + list(config_update.keys())
-                values = [1] + list(config_update.values())
+                fields = ['id'] + list(update_data.keys())
+                values = [1] + list(update_data.values())
                 placeholders = ','.join(['?'] * len(fields))
                 conn.execute(
                     f"INSERT INTO auto_position_config ({','.join(fields)}) VALUES ({placeholders})",
@@ -488,6 +518,8 @@ async def update_auto_config(config_update: Dict[str, Any]):
             "status": "success",
             "message": "配置已更新"
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"更新配置失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -542,9 +574,10 @@ async def get_position_klines(
     try:
         from ..services import get_cached_candlesticks
         
-        klines = get_cached_candlesticks(
+        klines = await asyncio.to_thread(
+            get_cached_candlesticks,
             symbol=symbol,
-            limit=limit
+            limit=limit,
         )
         
         if not klines:
@@ -615,6 +648,3 @@ def _get_default_conditions(strategy_type: str) -> Dict[str, List[Dict]]:
     }
     
     return templates.get(strategy_type, templates["ma_crossover"])
-
-
-

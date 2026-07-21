@@ -168,7 +168,7 @@ export function debounce<T extends (...args: any[]) => any>(
   func: T,
   delay: number
 ): (...args: Parameters<T>) => void {
-  let timeoutId: NodeJS.Timeout;
+  let timeoutId: ReturnType<typeof setTimeout>;
 
   return (...args: Parameters<T>) => {
     clearTimeout(timeoutId);
@@ -247,7 +247,9 @@ export function formatTimeWithCache(timestamp: number | string, locale = 'zh-CN'
   // 限制缓存大小
   if (timeFormatCache.size > 1000) {
     const firstKey = timeFormatCache.keys().next().value;
-    timeFormatCache.delete(firstKey);
+    if (firstKey !== undefined) {
+      timeFormatCache.delete(firstKey);
+    }
   }
 
   return formatted;

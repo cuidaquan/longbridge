@@ -33,11 +33,20 @@ settings = get_settings()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=settings.allowed_origins(),
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def reject_untrusted_browser_origins(request: Request, call_next):
+    """Prevent cross-site browser requests from changing local trading state."""
+    origin = request.headers.get("origin")
+    if origin and origin not in settings.allowed_origins():
+        return JSONResponse(status_code=403, content={"detail": "Origin not allowed"})
+    return await call_next(request)
 
 # 全局异常处理器，确保所有错误响应都包含 CORS 头
 @app.exception_handler(Exception)
@@ -45,13 +54,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.error(f"全局异常: {type(exc).__name__}: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"detail": str(exc)},
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Credentials": "true",
-            "Access-Control-Allow-Methods": "*",
-            "Access-Control-Allow-Headers": "*",
-        }
+        content={"detail": "Internal server error"},
     )
 
 app.include_router(settings_router.router)
@@ -83,6 +86,14 @@ if not stock_picker_logger.handlers:
     stock_picker_logger.addHandler(handler)
 
 logger = logging.getLogger(__name__)
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _start_background_task(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 
 async def _auto_sync_position_data() -> None:
@@ -93,8 +104,8 @@ async def _auto_sync_position_data() -> None:
     from .services import get_portfolio_overview, sync_history_candlesticks
     from .repositories import load_symbols
     
-    # 等待3秒，确保其他服务已启动
-    await asyncio.sleep(3)
+    # 与持仓监控初始化错峰，避免启动时并发请求券商接口
+    await asyncio.sleep(12)
     
     logger.info("auto-sync: starting position data sync")
     
@@ -102,7 +113,7 @@ async def _auto_sync_position_data() -> None:
         # 1. 获取持仓股票
         position_symbols = set()
         try:
-            portfolio = get_portfolio_overview()
+            portfolio = await asyncio.to_thread(get_portfolio_overview)
             if portfolio and portfolio.get('positions'):
                 position_symbols = {pos['symbol'] for pos in portfolio['positions']}
                 logger.info(f"auto-sync: found {len(position_symbols)} position symbols")
@@ -112,7 +123,7 @@ async def _auto_sync_position_data() -> None:
         # 2. 获取手工配置的股票
         manual_symbols = set()
         try:
-            manual_symbols = set(load_symbols())
+            manual_symbols = set(await asyncio.to_thread(load_symbols))
             logger.info(f"auto-sync: found {len(manual_symbols)} manual symbols")
         except Exception as e:
             logger.warning(f"auto-sync: failed to load symbols: {e}")
@@ -132,11 +143,13 @@ async def _auto_sync_position_data() -> None:
         
         for symbol in all_symbols:
             try:
-                result = sync_history_candlesticks(
-                    symbols=[symbol],  # 接受列表参数
-                    period="day",
-                    adjust_type="forward_adjust",
-                    count=100  # 最近100个交易日
+                result = await asyncio.to_thread(
+                    sync_history_candlesticks,
+                    [symbol],
+                    "day",
+                    "forward_adjust",
+                    100,
+                    False,
                 )
                 
                 synced = result.get('synced_count', 0)
@@ -166,16 +179,21 @@ async def on_startup() -> None:
     loop = asyncio.get_running_loop()
     quote_stream_manager.attach_loop(loop)
     logger.info("startup: loop attached %s", loop)
-    quote_stream_manager.ensure_started()
-    logger.info("startup: ensure_started finished")
+    async def start_quote_stream_after_health_ready() -> None:
+        await asyncio.sleep(3)
+        quote_stream_manager.ensure_started()
+        logger.info("startup: quote stream started")
+
+    _start_background_task(start_quote_stream_after_health_ready())
+    logger.info("startup: quote stream scheduled")
 
     # Initialize position monitor
     monitor = get_position_monitor()
-    asyncio.create_task(monitor.start_monitoring())
+    _start_background_task(monitor.start_monitoring())
     logger.info("startup: position monitor started")
     
     # Auto-sync position historical data
-    asyncio.create_task(_auto_sync_position_data())
+    _start_background_task(_auto_sync_position_data())
     logger.info("startup: auto-sync task scheduled")
     
     # Initialize AI Trading Engine (if enabled)
@@ -188,11 +206,14 @@ async def on_startup() -> None:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    await quote_stream_manager.stop()
-
-    # Stop position monitor
     monitor = get_position_monitor()
     await monitor.stop_monitoring()
+    for task in list(_background_tasks):
+        task.cancel()
+    if _background_tasks:
+        await asyncio.gather(*list(_background_tasks), return_exceptions=True)
+
+    await quote_stream_manager.stop()
     
     # Stop AI trading engine
     ai_engine = get_ai_trading_engine()
@@ -203,49 +224,6 @@ async def on_shutdown() -> None:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
-
-
-@app.get("/admin/reset-ai-table")
-def reset_ai_analysis_table():
-    """临时端点：重置 ai_analysis_log 表"""
-    from .db import get_connection
-    try:
-        with get_connection() as conn:
-            conn.execute("DROP TABLE IF EXISTS quant.ai_analysis_log")
-            conn.execute("DROP SEQUENCE IF EXISTS quant.ai_analysis_log_seq")
-            logger.info("✅ Dropped ai_analysis_log table and sequence")
-            
-            # 手动创建表
-            conn.execute("""
-                CREATE TABLE quant.ai_analysis_log (
-                    id INTEGER PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    analysis_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    kline_snapshot TEXT,
-                    indicators TEXT,
-                    current_price DOUBLE,
-                    ai_model TEXT,
-                    ai_prompt TEXT,
-                    ai_response TEXT,
-                    action TEXT,
-                    confidence DOUBLE,
-                    reasoning TEXT,
-                    entry_price_min DOUBLE,
-                    entry_price_max DOUBLE,
-                    stop_loss_price DOUBLE,
-                    take_profit_price DOUBLE,
-                    risk_level TEXT,
-                    triggered_trade BOOLEAN DEFAULT false,
-                    trade_id INTEGER,
-                    skip_reason TEXT
-                )
-            """)
-            logger.info("✅ Created ai_analysis_log table with auto-increment ID")
-            
-        return {"status": "ok", "message": "ai_analysis_log table reset successfully"}
-    except Exception as e:
-        logger.error(f"Failed to reset table: {e}")
-        return {"status": "error", "message": str(e)}
 
 
 @app.websocket("/ws/quotes")
@@ -302,16 +280,16 @@ async def ai_trading_websocket(websocket: WebSocket) -> None:
     engine = get_ai_trading_engine()
     queue = engine.add_listener()
     
-    # 发送欢迎消息
-    welcome_msg = {
-        'type': 'connected',
-        'message': 'Connected to AI Trading Engine',
-        'running': engine.is_running(),
-        'timestamp': datetime.now().isoformat()
-    }
-    await websocket.send_text(json.dumps(welcome_msg, default=json_serializer))
-    
     try:
+        # 发送欢迎消息也必须在清理保护范围内，客户端若提前断开仍会移除监听器
+        welcome_msg = {
+            'type': 'connected',
+            'message': 'Connected to AI Trading Engine',
+            'running': engine.is_running(),
+            'timestamp': datetime.now().isoformat()
+        }
+        await websocket.send_text(json.dumps(welcome_msg, default=json_serializer))
+
         while True:
             payload = await queue.get()
             json_str = json.dumps(payload, default=json_serializer)

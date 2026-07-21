@@ -5,7 +5,7 @@ import {
   TrendingUp,
   TrendingDown,
 } from "@mui/icons-material";
-import { init, dispose } from "klinecharts";
+import { CandleType, init, dispose } from "klinecharts";
 import {
   PageHeader,
   Card,
@@ -17,6 +17,7 @@ import {
   LoadingSpinner,
   EmptyState,
 } from "../components/ui";
+import { API_BASE } from "../api/client";
 
 interface Position {
   symbol: string;
@@ -62,7 +63,7 @@ export default function PositionKLinesPage() {
   const loadPositions = async () => {
     try {
       setLoading(true);
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const response = await fetch(`${base}/portfolio/overview`);
 
       if (response.ok) {
@@ -87,7 +88,7 @@ export default function PositionKLinesPage() {
 
     try {
       setChartLoading(true);
-      const base = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const response = await fetch(
         `${base}/quotes/history?symbol=${symbol}&period=${period}&limit=200`
       );
@@ -113,7 +114,7 @@ export default function PositionKLinesPage() {
     const chart = init(chartRef.current, {
       styles: {
         candle: {
-          type: "candle_solid",
+          type: CandleType.CandleSolid,
           bar: {
             upColor: "#10b981",
             downColor: "#ef4444",

@@ -1,12 +1,14 @@
-import SettingsPage from "./pages/Settings";
-import PositionMonitoringPage from "./pages/PositionMonitoring";
-import StrategyWatchPage from "./pages/StrategyWatch";
-import PositionKLinesPage from "./pages/PositionKLines";
-import SmartPositionPage from "./pages/SmartPosition";
-import AiTradingPage from "./pages/AiTrading";
-import StockPickerPage from "./pages/StockPicker";
-import SectorRotationPage from "./pages/SectorRotation";
+import { lazy, Suspense } from "react";
 import Layout, { TabType } from "./components/Layout";
+
+const SettingsPage = lazy(() => import("./pages/Settings"));
+const PositionMonitoringPage = lazy(() => import("./pages/PositionMonitoring"));
+const StrategyWatchPage = lazy(() => import("./pages/StrategyWatch"));
+const PositionKLinesPage = lazy(() => import("./pages/PositionKLines"));
+const SmartPositionPage = lazy(() => import("./pages/SmartPosition"));
+const AiTradingPage = lazy(() => import("./pages/AiTrading"));
+const StockPickerPage = lazy(() => import("./pages/StockPicker"));
+const SectorRotationPage = lazy(() => import("./pages/SectorRotation"));
 
 function renderPage(activeTab: TabType) {
   switch (activeTab) {
@@ -32,5 +34,19 @@ function renderPage(activeTab: TabType) {
 }
 
 export default function App() {
-  return <Layout>{(activeTab) => renderPage(activeTab)}</Layout>;
+  return (
+    <Layout>
+      {(activeTab) => (
+        <Suspense
+          fallback={(
+            <div className="flex min-h-64 items-center justify-center text-slate-500">
+              页面加载中…
+            </div>
+          )}
+        >
+          {renderPage(activeTab)}
+        </Suspense>
+      )}
+    </Layout>
+  );
 }

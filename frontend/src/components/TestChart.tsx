@@ -45,7 +45,7 @@ export default function TestChart() {
       };
     } catch (error) {
       console.error('TestChart 错误:', error);
-      setStatus(`错误: ${error.message}`);
+      setStatus(`错误: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, []);
 

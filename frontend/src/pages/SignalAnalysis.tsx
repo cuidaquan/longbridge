@@ -31,14 +31,15 @@ import {
   IconButton,
   Tooltip,
 } from '@mui/material';
+import { API_BASE } from '../api/client';
 // Using emoji icons to avoid MUI icons build issues
-const TrendingUpIcon = () => <span>📈</span>;
-const TrendingDownIcon = () => <span>📉</span>;
+const TrendingUpIcon = (props: React.HTMLAttributes<HTMLSpanElement>) => <span {...props}>📈</span>;
+const TrendingDownIcon = (props: React.HTMLAttributes<HTMLSpanElement>) => <span {...props}>📉</span>;
 const AnalyticsIcon = () => <span>📊</span>;
 const SearchIcon = () => <span>🔍</span>;
 const InfoIcon = () => <span>ℹ️</span>;
 const RefreshIcon = () => <span>🔄</span>;
-const ShowChartIcon = () => <span>📊</span>;
+const ShowChartIcon = (props: React.HTMLAttributes<HTMLSpanElement>) => <span {...props}>📊</span>;
 
 interface SignalFactor {
   [key: string]: number;
@@ -112,7 +113,7 @@ export default function SignalAnalysisPage() {
   const loadMarketOverview = async () => {
     try {
       setLoading(true);
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const response = await fetch(`${base}/signals/market_overview`);
 
       if (response.ok) {
@@ -133,7 +134,7 @@ export default function SignalAnalysisPage() {
     try {
       setLoading(true);
       setError(null);
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const response = await fetch(`${base}/signals/portfolio/positions`);
 
       if (response.ok) {
@@ -156,7 +157,7 @@ export default function SignalAnalysisPage() {
     try {
       setLoading(true);
       setError(null);
-      const base = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+      const base = API_BASE;
       const response = await fetch(`${base}/signals/analyze/${symbol.trim().toUpperCase()}?signal_type=both`);
 
       if (response.ok) {
@@ -181,7 +182,7 @@ export default function SignalAnalysisPage() {
   };
 
   const getStrengthColor = (strength: string) => {
-    const colors = {
+    const colors: Record<string, string> = {
       'VERY_STRONG': 'success',
       'STRONG': 'info',
       'NEUTRAL': 'default',
@@ -226,7 +227,7 @@ export default function SignalAnalysisPage() {
   );
 
   const getFactorName = (factor: string) => {
-    const factorNames = {
+    const factorNames: Record<string, string> = {
       'trend_alignment': '趋势一致性',
       'momentum': '动量指标',
       'mean_reversion': '均值回归',
@@ -257,7 +258,7 @@ export default function SignalAnalysisPage() {
               </Typography>
             </Box>
             <Box display="flex" gap={2} alignItems="center">
-              <ShowChartIcon sx={{ fontSize: 48, opacity: 0.8 }} />
+              <ShowChartIcon style={{ fontSize: 48, opacity: 0.8 }} />
               <IconButton color="inherit" onClick={loadMarketOverview}>
                 <RefreshIcon />
               </IconButton>
@@ -341,7 +342,7 @@ export default function SignalAnalysisPage() {
                 <Card>
                   <CardContent>
                     <Typography variant="h6" gutterBottom display="flex" alignItems="center">
-                      <TrendingUpIcon color="success" sx={{ mr: 1 }} />
+                      <TrendingUpIcon style={{ marginRight: 8 }} />
                       顶级买入机会
                     </Typography>
                     <TableContainer>
@@ -389,7 +390,7 @@ export default function SignalAnalysisPage() {
                 <Card>
                   <CardContent>
                     <Typography variant="h6" gutterBottom display="flex" alignItems="center">
-                      <TrendingDownIcon color="error" sx={{ mr: 1 }} />
+                      <TrendingDownIcon style={{ marginRight: 8 }} />
                       顶级卖出信号
                     </Typography>
                     <TableContainer>

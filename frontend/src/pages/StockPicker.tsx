@@ -40,6 +40,7 @@ import {
   type PoolsResponse,
   type AnalysisResponse,
 } from '../api/stockPicker';
+import { API_BASE } from '../api/client';
 
 export default function StockPicker() {
   const [pools, setPools] = useState<PoolsResponse>({ long_pool: [], short_pool: [] });
@@ -87,7 +88,6 @@ export default function StockPicker() {
     setShowLogs(true);
     setAnalysisProgress({ current: '', total: 0, completed: 0, status: 'idle' });
 
-    const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
     const eventSource = new EventSource(`${API_BASE}/api/stock-picker/analysis/progress`);
 
     eventSource.onmessage = (event) => {

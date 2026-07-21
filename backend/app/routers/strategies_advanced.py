@@ -2,6 +2,8 @@
 Advanced Trading Strategies API
 提供买低卖高和 EMA 等高级策略
 """
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -34,9 +36,8 @@ async def analyze_buy_low_sell_high(
     """
     try:
         # 获取历史数据
-        bars = get_cached_candlesticks(
-            symbol=symbol,
-            limit=limit
+        bars = await asyncio.to_thread(
+            get_cached_candlesticks, symbol=symbol, limit=limit
         )
         
         if not bars:
@@ -106,9 +107,8 @@ async def analyze_ema_crossover(
     """
     try:
         # 获取历史数据
-        bars = get_cached_candlesticks(
-            symbol=symbol,
-            limit=limit
+        bars = await asyncio.to_thread(
+            get_cached_candlesticks, symbol=symbol, limit=limit
         )
         
         if not bars:
@@ -189,9 +189,8 @@ async def analyze_multi_strategy(
     """
     try:
         # 获取历史数据
-        bars = get_cached_candlesticks(
-            symbol=symbol,
-            limit=limit
+        bars = await asyncio.to_thread(
+            get_cached_candlesticks, symbol=symbol, limit=limit
         )
         
         if not bars:
@@ -257,13 +256,13 @@ async def get_watchlist_signals() -> Dict[str, Any]:
         from ..services import get_portfolio_overview
         
         # 1. 获取持仓股票
-        portfolio = get_portfolio_overview()
+        portfolio = await asyncio.to_thread(get_portfolio_overview)
         position_symbols = set()
         if portfolio and portfolio.get('positions'):
             position_symbols = {pos['symbol'] for pos in portfolio['positions']}
         
         # 2. 获取手工配置的股票
-        manual_symbols = set(load_symbols())
+        manual_symbols = set(await asyncio.to_thread(load_symbols))
         
         # 3. 合并去重（持仓优先）
         all_symbols = list(position_symbols) + [s for s in manual_symbols if s not in position_symbols]
@@ -280,9 +279,8 @@ async def get_watchlist_signals() -> Dict[str, Any]:
         for symbol in all_symbols:
             try:
                 # 获取数据
-                bars = get_cached_candlesticks(
-                    symbol=symbol,
-                    limit=100
+                bars = await asyncio.to_thread(
+                    get_cached_candlesticks, symbol=symbol, limit=100
                 )
                 
                 if not bars or len(bars) < 30:
@@ -406,4 +404,3 @@ def _generate_recommendation(consensus: Dict[str, Any]) -> str:
         return f"{strength}建议买入 {agreement_desc}，置信度 {int(confidence * 100)}%"
     else:
         return f"{strength}建议卖出 {agreement_desc}，置信度 {int(confidence * 100)}%"
-

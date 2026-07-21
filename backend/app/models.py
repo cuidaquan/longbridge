@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class CredentialPayload(BaseModel):
@@ -222,26 +222,32 @@ class MonitoringConfigResponse(BaseModel):
 
 
 class UpdateMonitoringConfigRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     monitoring_status: Optional[MonitoringStatus] = None
     strategy_mode: Optional[StrategyMode] = None
     enabled_strategies: Optional[List[str]] = None
-    max_position_ratio: Optional[float] = None
-    stop_loss_ratio: Optional[float] = None
-    take_profit_ratio: Optional[float] = None
-    cooldown_minutes: Optional[int] = None
+    max_position_ratio: Optional[float] = Field(None, ge=0.01, le=1.0)
+    stop_loss_ratio: Optional[float] = Field(None, ge=0.01, le=0.3)
+    take_profit_ratio: Optional[float] = Field(None, ge=0.02, le=1.0)
+    cooldown_minutes: Optional[int] = Field(None, ge=1, le=1440)
     notes: Optional[str] = None
 
 
 class BatchMonitoringUpdateRequest(BaseModel):
-    symbols: List[str]
+    model_config = ConfigDict(extra="forbid")
+
+    symbols: List[str] = Field(min_length=1, max_length=200)
     config: UpdateMonitoringConfigRequest
 
 
 class GlobalMonitoringUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     global_enabled: Optional[bool] = None
     market_hours_only: Optional[bool] = None
-    max_daily_trades: Optional[int] = None
-    max_total_exposure: Optional[float] = None
+    max_daily_trades: Optional[int] = Field(None, ge=1, le=100)
+    max_total_exposure: Optional[float] = Field(None, ge=0.1, le=1.0)
     emergency_stop: Optional[bool] = None
     risk_level: Optional[str] = None
     notifications_enabled: Optional[bool] = None

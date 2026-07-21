@@ -2,6 +2,8 @@
 智能买卖点分析API
 提供最佳买卖点分析和建议
 """
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Query
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
@@ -16,6 +18,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/signals", tags=["signal_analysis"])
 
+
+@router.get("/analyze/batch")
+async def analyze_batch_signals(
+    symbols: str = Query(..., description="Comma-separated symbol list"),
+    signal_type: str = Query("buy", description="Signal type: buy or sell"),
+    min_confidence: float = Query(0.6, description="Minimum confidence threshold")
+) -> List[Dict[str, Any]]:
+    """批量分析多个股票的信号。静态路径必须先于 symbol 动态路径注册。"""
+    return await _analyze_batch_signals(symbols, signal_type, min_confidence)
+
+
 @router.get("/analyze/{symbol}")
 async def analyze_symbol_signals(
     symbol: str,
@@ -25,7 +38,9 @@ async def analyze_symbol_signals(
     """分析指定股票的买卖点信号"""
     try:
         # Get historical data
-        candlesticks = get_cached_candlesticks(symbol, limit=lookback_days * 24)  # Assuming hourly data
+        candlesticks = await asyncio.to_thread(
+            get_cached_candlesticks, symbol, limit=lookback_days * 24
+        )  # Assuming hourly data
 
         if not candlesticks:
             raise HTTPException(status_code=404, detail=f"No data found for symbol {symbol}")
@@ -139,8 +154,7 @@ async def analyze_symbol_signals(
         logger.error(f"Error analyzing signals for {symbol}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/analyze/batch")
-async def analyze_batch_signals(
+async def _analyze_batch_signals(
     symbols: str = Query(..., description="Comma-separated symbol list"),
     signal_type: str = Query("buy", description="Signal type: buy or sell"),
     min_confidence: float = Query(0.6, description="Minimum confidence threshold")
@@ -183,7 +197,7 @@ async def get_market_overview() -> Dict[str, Any]:
     try:
         # Get actual positions
         from ..services import get_positions
-        positions = get_positions()
+        positions = await asyncio.to_thread(get_positions)
 
         # Get configured symbols for monitoring
         symbols = load_symbols()
@@ -380,7 +394,7 @@ async def analyze_portfolio_positions() -> Dict[str, Any]:
     """基于实际持仓分析所有持仓的买卖信号"""
     try:
         from ..services import get_positions
-        positions = get_positions()
+        positions = await asyncio.to_thread(get_positions)
 
         if not positions:
             return {

@@ -16,7 +16,7 @@ import {
   CircularProgress,
 } from '@mui/material';
 import { createChart, IChartApi, ISeriesApi, Time } from 'lightweight-charts';
-import { StatusSnackbar } from '../components/StatusSnackbar';
+import StatusSnackbar from '../components/StatusSnackbar';
 import { getCandlesticks, syncCandlesticks } from '../api/quotes';
 
 interface CandlestickData {

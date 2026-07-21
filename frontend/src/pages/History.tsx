@@ -9,6 +9,7 @@ import {
   CartesianGrid,
   Line,
 } from "recharts";
+import { API_BASE } from "../api/client";
 
 type BarItem = {
   time: string;
@@ -57,7 +58,7 @@ async function fetchHistory(params: {
     period: params.period,
     adjust_type: params.adjust_type,
   });
-  const base = (import.meta as any).env?.VITE_API_BASE || "http://localhost:8000";
+  const base = API_BASE;
   const resp = await fetch(`${base}/quotes/history?${qs.toString()}`);
   if (!resp.ok) {
     const t = await resp.text();
@@ -115,7 +116,7 @@ function CustomTooltip({ active, payload, label }: any) {
 
 function CandleShape(props: any) {
   const { x = 0, width = 6, payload, yAxis } = props;
-  if (!payload || !yAxis) return null;
+  if (!payload || !yAxis) return <g />;
 
   const o = payload.open;
   const c = payload.close;
@@ -180,7 +181,7 @@ export default function HistoryPage() {
     setLoading(true);
     setError("");
     try {
-      const base = (import.meta as any).env?.VITE_API_BASE || "http://localhost:8000";
+      const base = API_BASE;
       const body = {
         symbols: [symbol],
         period,

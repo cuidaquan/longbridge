@@ -236,6 +236,13 @@ async def get_strategy_status() -> Dict[str, Any]:
         logger.error(f"Error getting strategy status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@router.get("/signals")
+async def get_trading_signals(symbol: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
+    """返回交易信号。静态路径必须先于 strategy_id 动态路径注册。"""
+    return await _get_trading_signals(symbol, limit)
+
+
 @router.get("/{strategy_id}")
 async def get_strategy(strategy_id: str) -> Dict[str, Any]:
     """Get detailed information about a specific strategy"""
@@ -261,8 +268,7 @@ async def get_strategy(strategy_id: str) -> Dict[str, Any]:
         logger.error(f"Error getting strategy {strategy_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/signals")
-async def get_trading_signals(symbol: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
+async def _get_trading_signals(symbol: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
     """Get trading signals for analysis and chart display"""
     try:
         engine = get_strategy_engine()

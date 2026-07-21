@@ -3,7 +3,7 @@
  * 支持板块、因子、主题 ETF 分析
  */
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
+import { API_BASE } from "./client";
 
 // ========== 类型定义 ==========
 
