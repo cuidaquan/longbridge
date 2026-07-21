@@ -467,12 +467,18 @@ class AutoPositionManager:
                     )
                 """)
                 
+                next_id_row = conn.execute(
+                    "SELECT COALESCE(MAX(id), 0) + 1 FROM auto_position_trades"
+                ).fetchone()
+                next_id = int(next_id_row[0]) if next_id_row else 1
+
                 # 插入记录
                 conn.execute("""
                     INSERT INTO auto_position_trades 
-                    (action, symbol, quantity, price, total_value, reason, status, order_id, error_message)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, action, symbol, quantity, price, total_value, reason, status, order_id, error_message)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
+                    next_id,
                     action,
                     symbol,
                     quantity,

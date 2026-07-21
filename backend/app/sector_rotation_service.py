@@ -12,6 +12,7 @@ import asyncio
 
 from .db import get_connection
 from .repositories import load_ai_credentials
+from .services import get_cached_candlesticks, sync_history_candlesticks
 from .eodhd_client import (
     EODHDClient,
     SECTOR_ETFS,
@@ -58,8 +59,7 @@ class SectorRotationService:
             {"success": [...], "failed": [...]}
         """
         client = self._get_client()
-        if not client:
-            return {"error": "未配置 EODHD API Key", "success": [], "failed": []}
+        source = "eodhd" if client else "longport"
 
         try:
             results = {"success": [], "failed": []}
@@ -85,8 +85,25 @@ class SectorRotationService:
                 try:
                     logger.info(f"📥 [{idx}/{total}] 正在同步 {symbol}...")
 
-                    # 获取 ETF 历史数据
-                    data = client.get_etf_eod(symbol, days)
+                    # EODHD 未配置时使用现有 LongPort 行情凭据作为回退。
+                    if client:
+                        data = client.get_etf_eod(symbol, days)
+                    else:
+                        longport_symbol = f"{symbol}.US"
+                        await asyncio.to_thread(
+                            sync_history_candlesticks,
+                            [longport_symbol],
+                            "day",
+                            "no_adjust",
+                            min(days + 1, 1000),
+                        )
+                        cached = await asyncio.to_thread(
+                            get_cached_candlesticks,
+                            longport_symbol,
+                            "day",
+                            min(days + 1, 1000),
+                        )
+                        data = [self._longport_bar_to_etf_data(bar) for bar in cached]
                     if not data:
                         logger.warning(f"⚠️ [{idx}/{total}] {symbol} 无数据返回")
                         results["failed"].append(symbol)
@@ -116,10 +133,37 @@ class SectorRotationService:
                     logger.error(f"❌ [{idx}/{total}] 同步 {symbol} 失败: {e}")
                     results["failed"].append(symbol)
 
+            results["source"] = source
             logger.info(f"📊 同步完成: {len(results['success'])} 成功, {len(results['failed'])} 失败")
+            if not results["success"] and not client:
+                return {
+                    "error": "未配置 EODHD API Key，且 LongPort 行情回退同步失败，请检查 LongPort 凭据和美股行情权限",
+                    **results,
+                }
             return results
         finally:
-            client.close()
+            if client:
+                client.close()
+
+    @staticmethod
+    def _longport_bar_to_etf_data(bar: Dict) -> Dict:
+        """把 LongPort 缓存 K 线转换为板块指标计算所需格式。"""
+        timestamp = bar.get("ts")
+        if isinstance(timestamp, datetime):
+            date_value = timestamp.date().isoformat()
+        elif timestamp is None:
+            date_value = None
+        else:
+            date_value = str(timestamp).split("T", 1)[0].split(" ", 1)[0]
+
+        return {
+            "date": date_value,
+            "open": bar.get("open"),
+            "high": bar.get("high"),
+            "low": bar.get("low"),
+            "close": bar.get("close"),
+            "volume": bar.get("volume"),
+        }
 
     def _process_etf_data(self, symbol: str, data: List[Dict]) -> List[Dict]:
         """处理 ETF 数据，计算各种指标"""
@@ -385,13 +429,14 @@ class SectorRotationService:
         返回:
             {dates: [...], data: {date: {symbol: {...}}}, sectors: [...]}
         """
+        cutoff_date = (datetime.now() - timedelta(days=days)).date()
         with get_connection() as conn:
-            results = conn.execute(f"""
+            results = conn.execute("""
                 SELECT symbol, date, change_5d, close
                 FROM sector_performance
-                WHERE date >= date('now', '-{days} days')
+                WHERE date >= ?
                 ORDER BY date
-            """).fetchall()
+            """, (cutoff_date,)).fetchall()
 
         # 按日期和板块组织数据
         trend_data = {}
@@ -827,9 +872,10 @@ class SectorRotationService:
                 recommendation: str
             }
         """
+        cutoff_date = (datetime.now() - timedelta(days=lookback_days)).date()
         with get_connection() as conn:
             # 获取历史因子数据
-            results = conn.execute(f"""
+            results = conn.execute("""
                 SELECT
                     sp.factor_name,
                     sp.date,
@@ -837,10 +883,10 @@ class SectorRotationService:
                     sp.change_5d
                 FROM sector_performance sp
                 WHERE sp.etf_type = 'factor'
-                  AND sp.date >= date('now', '-{lookback_days} days')
+                  AND sp.date >= ?
                   AND sp.factor_name IS NOT NULL
                 ORDER BY sp.date
-            """).fetchall()
+            """, (cutoff_date,)).fetchall()
 
         if not results:
             return {
@@ -884,10 +930,10 @@ class SectorRotationService:
 
             factor_momentum[factor_name] = {
                 "name_cn": FACTOR_NAMES_CN.get(factor_name, factor_name),
-                "recent_avg": round(recent, 2),
-                "momentum": round(momentum, 2),
-                "trend_slope": round(slope, 3),
-                "is_strengthening": momentum > 0.5 and slope > 0
+                "recent_avg": round(float(recent), 2),
+                "momentum": round(float(momentum), 2),
+                "trend_slope": round(float(slope), 3),
+                "is_strengthening": bool(momentum > 0.5 and slope > 0)
             }
 
         # 确定主导因子
@@ -950,7 +996,7 @@ class SectorRotationService:
             conn.execute("""
                 INSERT INTO factor_rotation_signals
                 (date, dominant_factor, rotation_signal, factor_momentum, recommendation)
-                VALUES (date('now'), ?, ?, ?, ?)
+                VALUES (CURRENT_DATE, ?, ?, ?, ?)
                 ON CONFLICT(date) DO UPDATE SET
                     dominant_factor = excluded.dominant_factor,
                     rotation_signal = excluded.rotation_signal,

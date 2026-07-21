@@ -22,6 +22,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/position-manager", tags=["position-manager"])
 
+
+def _latest_price(prices: Dict[str, Any], symbol: str) -> float:
+    """Extract a numeric price from the repository's latest-price snapshot."""
+    snapshot = prices.get(symbol.upper(), prices.get(symbol, 0)) if prices else 0
+    if isinstance(snapshot, dict):
+        snapshot = snapshot.get("price", 0)
+    try:
+        return float(snapshot or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
 class CalculatePositionRequest(BaseModel):
     """计算仓位请求"""
     symbol: str
@@ -96,7 +107,7 @@ async def calculate_position(request: CalculatePositionRequest) -> CalculatePosi
         
         # 获取当前价格
         prices = await asyncio.to_thread(fetch_latest_prices, [request.symbol])
-        current_price = prices.get(request.symbol, 0) if prices else 0
+        current_price = _latest_price(prices, request.symbol)
         
         if current_price <= 0:
             raise HTTPException(
@@ -184,7 +195,7 @@ async def create_auto_strategy(request: AutoStrategyRequest) -> List[BatchPositi
         engine = get_strategy_engine()
         
         for symbol in request.symbols:
-            current_price = prices.get(symbol, 0) if prices else 0
+            current_price = _latest_price(prices, symbol)
             
             if current_price <= 0:
                 logger.warning(f"无法获取 {symbol} 的价格，跳过")
@@ -510,9 +521,10 @@ async def update_auto_config(config_update: AutoPositionConfigUpdate):
         # 如果正在运行，需要重启
         manager = get_auto_position_manager()
         if manager.is_running():
-            logger.info("配置已更新，重启管理器...")
+            logger.info("配置已更新，停止管理器以应用新配置...")
             await manager.stop()
-            await manager.start()
+            if update_data.get('enabled') is not False:
+                await manager.start()
         
         return {
             "status": "success",

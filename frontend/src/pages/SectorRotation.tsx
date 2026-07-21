@@ -56,6 +56,11 @@ import FinvizHeatmap, {
 } from "../components/FinvizHeatmap";
 
 type ViewMode = "sector" | "factor" | "finviz" | "holdings";
+type ETFHoldingsState = {
+  holdings: ETFHolding[];
+  sector_weights: Record<string, number>;
+  error?: string;
+};
 
 export default function SectorRotation() {
   const [viewMode, setViewMode] = useState<ViewMode>("sector");
@@ -68,7 +73,7 @@ export default function SectorRotation() {
   const [factors, setFactors] = useState<FactorInfo[]>([]);
   const [factorRotation, setFactorRotation] = useState<FactorRotationType | null>(null);
   const [etfPerformance, setEtfPerformance] = useState<ETFPerformance[]>([]);
-  const [etfHoldings, setEtfHoldings] = useState<Record<string, { holdings: ETFHolding[]; sector_weights: Record<string, number> }>>({});
+  const [etfHoldings, setEtfHoldings] = useState<Record<string, ETFHoldingsState>>({});
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncingHoldings, setSyncingHoldings] = useState(false);
@@ -137,11 +142,17 @@ export default function SectorRotation() {
     }
   }, []);
 
-  const loadETFHoldings = async (symbol: string) => {
-    if (etfHoldings[symbol]) {
+  const loadETFHoldings = async (symbol: string, force = false) => {
+    if (etfHoldings[symbol] && !force) {
       // 已经加载过
       return;
     }
+    setError(null);
+    setEtfHoldings((prev) => {
+      const next = { ...prev };
+      delete next[symbol];
+      return next;
+    });
     try {
       const res = await getETFHoldings(symbol);
       setEtfHoldings((prev) => ({
@@ -152,7 +163,12 @@ export default function SectorRotation() {
         },
       }));
     } catch (err) {
-      console.error(`加载 ${symbol} 持仓失败:`, err);
+      const message = err instanceof Error ? err.message : `加载 ${symbol} 持仓失败`;
+      setEtfHoldings((prev) => ({
+        ...prev,
+        [symbol]: { holdings: [], sector_weights: {}, error: message },
+      }));
+      setError(message);
     }
   };
 
@@ -648,6 +664,18 @@ export default function SectorRotation() {
                         <div className="p-4 border-t border-slate-200 dark:border-slate-700">
                           {!holdings ? (
                             <LoadingSpinner size="sm" text="加载持仓数据..." />
+                          ) : holdings.error ? (
+                            <div className="flex flex-col items-center gap-3 py-4">
+                              <p className="text-sm text-red-600 dark:text-red-400">{holdings.error}</p>
+                              <Button
+                                size="sm"
+                                variant="secondary"
+                                onClick={() => loadETFHoldings(sector.symbol, true)}
+                                icon={<Refresh className="w-4 h-4" />}
+                              >
+                                重试
+                              </Button>
+                            </div>
                           ) : holdings.holdings.length === 0 ? (
                             <p className="text-sm text-slate-500 text-center py-4">
                               暂无持仓数据，请先点击「同步持仓」获取

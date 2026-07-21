@@ -18,10 +18,10 @@ export interface Stock {
 export interface ScoreBreakdown {
   trend: number;
   momentum: number;
+  support_resistance?: number;
   volume: number;
   volatility: number;
   pattern: number;
-  news?: number;
 }
 
 export interface Score {

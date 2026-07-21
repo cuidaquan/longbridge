@@ -35,7 +35,7 @@ async def sync_sector_data(request: SyncRequest = None):
     """
     同步 ETF 数据
 
-    从 EODHD API 获取 ETF 历史数据并保存到数据库
+    优先从 EODHD 获取 ETF 历史数据；未配置时回退到 LongPort 行情
     支持类型:
     - sector: 板块 ETF (11个)
     - index: 指数 ETF (9个)
@@ -57,6 +57,7 @@ async def sync_sector_data(request: SyncRequest = None):
         "status": "ok",
         "etf_type": request.etf_type,
         "message": f"同步完成: {len(result['success'])} 成功, {len(result['failed'])} 失败",
+        "source": result.get("source", "eodhd"),
         "success": result["success"],
         "failed": result["failed"]
     }

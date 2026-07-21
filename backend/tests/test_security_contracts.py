@@ -157,7 +157,12 @@ class SecurityContractTest(unittest.TestCase):
 
     def test_ai_key_mask_does_not_overwrite_saved_secret(self) -> None:
         saved_config = Mock()
-        existing = {"ai_api_key": "secret-api-key", "enabled": False}
+        existing = {
+            "id": 1,
+            "updated_at": "2026-07-21T00:00:00",
+            "ai_api_key": "secret-api-key",
+            "enabled": False,
+        }
         with (
             patch(
                 "app.routers.ai_trading.get_ai_trading_config",
@@ -184,6 +189,8 @@ class SecurityContractTest(unittest.TestCase):
         self.assertEqual(200, read_response.status_code)
         self.assertEqual(200, status_response.status_code)
         self.assertEqual("********", read_response.json()["ai_api_key"])
+        self.assertNotIn("id", read_response.json())
+        self.assertNotIn("updated_at", read_response.json())
         self.assertEqual(
             "********", status_response.json()["config"]["ai_api_key"]
         )
@@ -192,8 +199,39 @@ class SecurityContractTest(unittest.TestCase):
         )
         self.assertEqual(200, write_response.status_code)
         saved_config.assert_called_once_with(
-            {"ai_api_key": "secret-api-key", "enabled": True}
+            {
+                "id": 1,
+                "updated_at": "2026-07-21T00:00:00",
+                "ai_api_key": "secret-api-key",
+                "enabled": True,
+            }
         )
+
+    def test_disabling_running_ai_engine_does_not_restart_it(self) -> None:
+        engine = Mock()
+        engine.is_running.return_value = True
+        engine.stop = AsyncMock()
+        engine.start = AsyncMock()
+
+        with (
+            patch(
+                "app.routers.ai_trading.get_ai_trading_config",
+                return_value={"enabled": True},
+            ),
+            patch("app.routers.ai_trading.update_ai_trading_config"),
+            patch(
+                "app.routers.ai_trading.get_ai_trading_engine",
+                return_value=engine,
+            ),
+        ):
+            response = self.client.put(
+                "/ai-trading/config",
+                json={"enabled": False},
+            )
+
+        self.assertEqual(200, response.status_code, response.text)
+        engine.stop.assert_awaited_once()
+        engine.start.assert_not_awaited()
 
     def test_auto_position_config_rejects_unknown_fields(self) -> None:
         response = self.client.put(

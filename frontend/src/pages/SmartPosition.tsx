@@ -1,7 +1,7 @@
 /**
  * 智能仓位管理页面 - 现代化重构版
  */
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Calculate,
   AutoMode,
@@ -63,6 +63,47 @@ interface AutoConfig {
   enable_real_trading: boolean;
 }
 
+const defaultAutoConfig: AutoConfig = {
+  enabled: false,
+  check_interval_minutes: 30,
+  use_ai_analysis: true,
+  min_ai_confidence: 0.7,
+  auto_stop_loss_percent: -5,
+  auto_take_profit_percent: 15,
+  auto_rebalance_percent: -10,
+  max_position_value: 50000,
+  position_allocation: 0.05,
+  sell_ratio: 1,
+  enable_real_trading: false,
+};
+
+function normalizeAutoConfig(value: Partial<AutoConfig> | null | undefined): AutoConfig {
+  return {
+    enabled: Boolean(value?.enabled),
+    check_interval_minutes: Number(value?.check_interval_minutes ?? defaultAutoConfig.check_interval_minutes),
+    use_ai_analysis: value?.use_ai_analysis ?? defaultAutoConfig.use_ai_analysis,
+    min_ai_confidence: Number(value?.min_ai_confidence ?? defaultAutoConfig.min_ai_confidence),
+    auto_stop_loss_percent: Number(value?.auto_stop_loss_percent ?? defaultAutoConfig.auto_stop_loss_percent),
+    auto_take_profit_percent: Number(value?.auto_take_profit_percent ?? defaultAutoConfig.auto_take_profit_percent),
+    auto_rebalance_percent: Number(value?.auto_rebalance_percent ?? defaultAutoConfig.auto_rebalance_percent),
+    max_position_value: Number(value?.max_position_value ?? defaultAutoConfig.max_position_value),
+    position_allocation: Number(value?.position_allocation ?? defaultAutoConfig.position_allocation),
+    sell_ratio: Number(value?.sell_ratio ?? defaultAutoConfig.sell_ratio),
+    enable_real_trading: Boolean(value?.enable_real_trading),
+  };
+}
+
+function apiErrorMessage(detail: unknown, fallback: string): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => (item && typeof item === "object" && "msg" in item ? String(item.msg) : ""))
+      .filter(Boolean);
+    if (messages.length > 0) return messages.join("；");
+  }
+  return fallback;
+}
+
 export default function SmartPositionPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -76,19 +117,9 @@ export default function SmartPositionPage() {
   const [autoStatus, setAutoStatus] = useState<any>(null);
   const [autoTrades, setAutoTrades] = useState<any[]>([]);
   const [showAutoConfig, setShowAutoConfig] = useState(false);
-  const [autoConfig, setAutoConfig] = useState<AutoConfig>({
-    enabled: false,
-    check_interval_minutes: 30,
-    use_ai_analysis: true,
-    min_ai_confidence: 0.7,
-    auto_stop_loss_percent: -5.0,
-    auto_take_profit_percent: 15.0,
-    auto_rebalance_percent: -10.0,
-    max_position_value: 50000,
-    position_allocation: 0.05,
-    sell_ratio: 1.0,
-    enable_real_trading: false,
-  });
+  const autoStatusRequestId = useRef(0);
+  const showAutoConfigRef = useRef(false);
+  const [autoConfig, setAutoConfig] = useState<AutoConfig>(defaultAutoConfig);
 
   // K线图相关
   const [showKlineDialog, setShowKlineDialog] = useState(false);
@@ -133,14 +164,18 @@ export default function SmartPositionPage() {
   };
 
   const loadAutoStatus = async () => {
+    const requestId = ++autoStatusRequestId.current;
     try {
       const base = API_BASE;
       const response = await fetch(`${base}/position-manager/auto/status`);
       if (response.ok) {
         const data = await response.json();
+        if (requestId !== autoStatusRequestId.current) {
+          return;
+        }
         setAutoStatus(data);
-        if (data.config) {
-          setAutoConfig(data.config);
+        if (data.config && !showAutoConfigRef.current) {
+          setAutoConfig(normalizeAutoConfig(data.config));
         }
         if (data.recent_logs && data.recent_logs.length > 0) {
           setRunningLogs(data.recent_logs.slice(-20));
@@ -188,7 +223,7 @@ export default function SmartPositionPage() {
         loadAutoStatus();
       } else {
         const err = await response.json();
-        setError(err.detail || "启动失败");
+        setError(apiErrorMessage(err.detail, "启动失败"));
       }
     } catch (e) {
       setError(`启动失败: ${e}`);
@@ -205,7 +240,7 @@ export default function SmartPositionPage() {
         loadAutoStatus();
       } else {
         const err = await response.json();
-        setError(err.detail || "停止失败");
+        setError(apiErrorMessage(err.detail, "停止失败"));
       }
     } catch (e) {
       setError(`停止失败: ${e}`);
@@ -227,7 +262,7 @@ export default function SmartPositionPage() {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...autoConfig,
+          ...normalizeAutoConfig(autoConfig),
           ...(enablingRealTrading
             ? { real_trading_confirmation: "CONFIRM_REAL_TRADING" }
             : {}),
@@ -239,7 +274,7 @@ export default function SmartPositionPage() {
         setSuccess("配置已保存");
       } else {
         const err = await response.json();
-        setError(err.detail || "保存失败");
+        setError(apiErrorMessage(err.detail, "保存失败"));
       }
     } catch (e) {
       setError(`保存失败: ${e}`);
@@ -292,7 +327,7 @@ export default function SmartPositionPage() {
         }
       } else {
         const err = await response.json();
-        setError(err.detail || "计算失败");
+        setError(apiErrorMessage(err.detail, "计算失败"));
       }
     } catch (e) {
       setError("计算失败");
@@ -331,7 +366,7 @@ export default function SmartPositionPage() {
         setSuccess(`已生成 ${data.length} 个策略`);
       } else {
         const err = await response.json();
-        setError(err.detail || "生成失败");
+        setError(apiErrorMessage(err.detail, "生成失败"));
       }
     } catch (e) {
       setError("生成失败");
@@ -339,6 +374,10 @@ export default function SmartPositionPage() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    showAutoConfigRef.current = showAutoConfig;
+  }, [showAutoConfig]);
 
   useEffect(() => {
     loadPortfolioStatus();
@@ -641,7 +680,10 @@ export default function SmartPositionPage() {
             {calculation ? (
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
-                  <ResultItem label="操作" value={calculation.action === "buy" ? "买入" : "卖出"} />
+                  <ResultItem
+                    label="操作"
+                    value={calculation.action === "buy" ? "买入" : calculation.action === "sell" ? "卖出" : "持有"}
+                  />
                   <ResultItem label="数量" value={`${calculation.quantity} 股`} highlight />
                   <ResultItem label="预估价格" value={`$${calculation.estimated_price.toFixed(2)}`} />
                   <ResultItem label="预估成本" value={`$${Math.abs(calculation.estimated_cost).toFixed(2)}`} />

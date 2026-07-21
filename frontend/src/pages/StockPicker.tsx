@@ -130,7 +130,7 @@ export default function StockPicker() {
     try {
       await removeStock(id);
       setSuccess('删除成功');
-      loadPools();
+      await Promise.all([loadPools(), loadAnalysis()]);
     } catch (err) {
       setError(err instanceof Error ? err.message : '删除失败');
     }
@@ -254,6 +254,7 @@ export default function StockPicker() {
             icon={<Analytics className="w-5 h-5" />}
             action={
               <button
+                aria-label="关闭分析进度"
                 onClick={() => setShowLogs(false)}
                 className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded"
               >
@@ -463,6 +464,7 @@ function StockItem({
           </div>
         </div>
         <button
+          aria-label={`删除 ${analysis.symbol}`}
           onClick={onRemove}
           className="p-1 text-slate-400 hover:text-red-500 transition-colors"
         >
@@ -521,12 +523,12 @@ function StockItem({
           <div>
             <p className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">评分细节</p>
             <div className="space-y-2">
-              <ScoreRow label="波动" value={analysis.score.breakdown.volatility} max={25} />
-              <ScoreRow label="新闻" value={analysis.score.breakdown.news || 0} max={20} />
-              <ScoreRow label="动量" value={analysis.score.breakdown.momentum} max={18} />
-              <ScoreRow label="趋势" value={analysis.score.breakdown.trend} max={15} />
-              <ScoreRow label="量能" value={analysis.score.breakdown.volume} max={12} />
-              <ScoreRow label="形态" value={analysis.score.breakdown.pattern} max={10} />
+              <ScoreRow label="趋势" value={analysis.score.breakdown.trend} max={25} />
+              <ScoreRow label="动量" value={analysis.score.breakdown.momentum} max={20} />
+              <ScoreRow label="支撑阻力" value={analysis.score.breakdown.support_resistance || 0} max={15} />
+              <ScoreRow label="量能" value={analysis.score.breakdown.volume} max={15} />
+              <ScoreRow label="形态" value={analysis.score.breakdown.pattern} max={15} />
+              <ScoreRow label="波动" value={analysis.score.breakdown.volatility} max={10} />
             </div>
           </div>
 
@@ -550,10 +552,10 @@ function StockItem({
 
 // 评分行
 function ScoreRow({ label, value, max }: { label: string; value: number; max: number }) {
-  const percentage = (value / max) * 100;
+  const percentage = Math.min(100, Math.max(0, (value / max) * 100));
   return (
     <div className="flex items-center gap-3">
-      <span className="text-xs text-slate-500 w-10">{label}</span>
+      <span className="text-xs text-slate-500 w-14">{label}</span>
       <div className="flex-1 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
         <div
           className="h-full bg-cyan-500 rounded-full transition-all"
@@ -658,7 +660,7 @@ function AddStockDialog({
           <h3 className="text-xl font-bold text-slate-900 dark:text-white">
             添加到{type === 'LONG' ? '做多' : '做空'}池
           </h3>
-          <button onClick={onClose} className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded">
+          <button aria-label="关闭添加弹窗" onClick={onClose} className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded">
             <Close className="w-5 h-5 text-slate-500" />
           </button>
         </div>

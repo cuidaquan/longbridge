@@ -1174,8 +1174,9 @@ class StockPickerService:
                     score_trend, score_momentum, score_volume, 
                     score_volatility, score_pattern,
                     ai_action, ai_confidence, ai_reasoning,
-                    signals, recommendation_score, recommendation_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    signals, recommendation_score, recommendation_reason,
+                    score_support_resistance
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs['pool_id'],
                 kwargs['symbol'],
@@ -1195,7 +1196,8 @@ class StockPickerService:
                 json.dumps(analysis.get('reasoning', []), ensure_ascii=False),
                 json.dumps(score.get('signals', []), ensure_ascii=False),
                 kwargs['recommendation_score'],
-                kwargs['recommendation_reason']
+                kwargs['recommendation_reason'],
+                breakdown.get('support_resistance', 0)
             ))
         
         return {
@@ -1218,8 +1220,31 @@ class StockPickerService:
         with get_connection() as conn:
             # 获取最新的分析结果 - 只返回当前股票池中的股票
             query = """
-                SELECT 
-                    a.*,
+                SELECT
+                    a.id,
+                    a.pool_id,
+                    a.symbol,
+                    a.pool_type,
+                    a.analysis_time,
+                    a.current_price,
+                    a.price_change_1d,
+                    a.price_change_5d,
+                    a.score_total,
+                    a.score_grade,
+                    a.score_trend,
+                    a.score_momentum,
+                    a.score_volume,
+                    a.score_volatility,
+                    a.score_pattern,
+                    a.ai_action,
+                    a.ai_confidence,
+                    a.ai_reasoning,
+                    a.indicators,
+                    a.signals,
+                    a.recommendation_score,
+                    a.recommendation_reason,
+                    a.klines_snapshot,
+                    a.score_support_resistance,
                     p.name,
                     p.added_reason
                 FROM stock_picker_analysis a
@@ -1279,7 +1304,8 @@ class StockPickerService:
                             'momentum': row[11],
                             'volume': row[12],
                             'volatility': row[13],
-                            'pattern': row[14]
+                            'pattern': row[14],
+                            'support_resistance': row[23] or 0
                         }
                     },
                     'ai_decision': {
@@ -1290,8 +1316,8 @@ class StockPickerService:
                     'signals': json.loads(row[19]) if row[19] else [],
                     'recommendation_score': row[20],
                     'recommendation_reason': row[21],
-                    'name': row[23],
-                    'added_reason': row[24]
+                    'name': row[24],
+                    'added_reason': row[25]
                 }
                 
                 if data['pool_type'] == 'LONG':
@@ -1321,4 +1347,3 @@ def get_stock_picker_service() -> StockPickerService:
     if _stock_picker_service is None:
         _stock_picker_service = StockPickerService()
     return _stock_picker_service
-

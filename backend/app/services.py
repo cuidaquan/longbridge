@@ -172,11 +172,11 @@ def sync_history_candlesticks(
     return results
 
 
-def _fetch_candlesticks_from_db(symbol: str, limit: int) -> List[Dict[str, float]]:
+def _fetch_candlesticks_from_db(symbol: str, period: str, limit: int) -> List[Dict[str, float]]:
     with get_connection() as conn:
         rows = conn.execute(
-            "SELECT ts, open, high, low, close, volume, turnover FROM ohlc WHERE symbol = ? ORDER BY ts DESC LIMIT ?",
-            [symbol, limit],
+            "SELECT ts, open, high, low, close, volume, turnover FROM ohlc WHERE symbol = ? AND period = ? ORDER BY ts DESC LIMIT ?",
+            [symbol, period, limit],
         ).fetchall()
     return [
         {
@@ -200,22 +200,25 @@ def get_cached_candlesticks(symbol: str, period: str = "day", limit: int = 200) 
         bars = _repo_fetch_candlesticks(symbol, period, limit)
         if bars:
             return bars
-        # If no OHLC cached yet, try building minute bars from ticks
-        tick_bars = fetch_bars_from_ticks(symbol, min(limit, 500))
-        if tick_bars:
-            return tick_bars
+        # Tick aggregation produces one-minute bars and must not be mislabeled
+        # as a different requested period.
+        if period.lower() == "min1":
+            tick_bars = fetch_bars_from_ticks(symbol, min(limit, 500))
+            if tick_bars:
+                return tick_bars
         return []
 
     global _candlestick_fallback_warned
     if not _candlestick_fallback_warned:
         logger.warning("fetch_candlesticks not exported by app.repositories; using direct DuckDB fallback")
         _candlestick_fallback_warned = True
-    bars = _fetch_candlesticks_from_db(symbol, limit)
+    bars = _fetch_candlesticks_from_db(symbol, period, limit)
     if bars:
         return bars
-    tick_bars = fetch_bars_from_ticks(symbol, min(limit, 500))
-    if tick_bars:
-        return tick_bars
+    if period.lower() == "min1":
+        tick_bars = fetch_bars_from_ticks(symbol, min(limit, 500))
+        if tick_bars:
+            return tick_bars
     return []
 
 

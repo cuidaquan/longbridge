@@ -64,6 +64,20 @@ interface AiPosition {
   open_time: string;
 }
 
+function apiErrorMessage(detail: unknown, fallback: string): string {
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object" && "message" in detail) {
+    return String(detail.message);
+  }
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => (item && typeof item === "object" && "msg" in item ? String(item.msg) : ""))
+      .filter(Boolean);
+    if (messages.length > 0) return messages.join("；");
+  }
+  return fallback;
+}
+
 export default function AiTradingPage() {
   const [activeTab, setActiveTab] = useState("trades");
   const [mainKlineSymbol, setMainKlineSymbol] = useState("");
@@ -207,7 +221,7 @@ export default function AiTradingPage() {
         setSuccess(data.message || "AI 交易引擎启动成功");
       } else {
         const err = await response.json();
-        setError(err.detail?.message || err.detail || "启动失败");
+        setError(apiErrorMessage(err.detail, "启动失败"));
       }
     } catch (e) {
       setError(`启动失败: ${e}`);
@@ -239,7 +253,7 @@ export default function AiTradingPage() {
         setSuccess(data.result?.message || "分析触发成功");
       } else {
         const err = await response.json();
-        setError(err.detail || "触发失败");
+        setError(apiErrorMessage(err.detail, "触发失败"));
       }
     } catch (e) {
       setError(`触发失败: ${e}`);
@@ -294,46 +308,50 @@ export default function AiTradingPage() {
       });
 
       if (response.ok) {
-        const updatedConfig = await response.json();
-        setConfig(updatedConfig);
+        await response.json();
+        setConfig(configToSave);
         setShowConfig(false);
 
         // 同步K线
         setSuccess("正在同步K线数据...");
-        await syncKlinesForSymbols(symbols);
+        const synced = await syncKlinesForSymbols(symbols);
         await loadEngineStatus(false);
-        setSuccess("配置已保存并同步K线！");
+        if (synced) {
+          setSuccess("配置已保存并同步K线！");
+        }
       } else {
         const err = await response.json();
-        setError(err.detail || "保存失败");
+        setError(apiErrorMessage(err.detail, "保存失败"));
       }
     } catch (e) {
       setError(`保存失败: ${e}`);
     }
   };
 
-  const syncKlinesForSymbols = async (symbols: string[]) => {
-    try {
-      await Promise.all(
-        symbols.map(async (symbol) => {
-          const requests = [
-            { symbols: [symbol], period: "min1", count: 300 },
-            { symbols: [symbol], period: "day", count: 60 },
-          ];
-          await Promise.all(
-            requests.map((req) =>
-              fetch(`${API_BASE}/quotes/history/sync`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(req),
-              })
-            )
-          );
-        })
-      );
-    } catch (e) {
-      console.error("K线同步失败:", e);
+  const syncKlinesForSymbols = async (symbols: string[]): Promise<boolean> => {
+    const failed: string[] = [];
+    for (const symbol of symbols) {
+      for (const request of [
+        { symbols: [symbol], period: "min1", count: 300 },
+        { symbols: [symbol], period: "day", count: 60 },
+      ]) {
+        try {
+          const response = await fetch(`${API_BASE}/quotes/history/sync`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(request),
+          });
+          if (!response.ok) failed.push(`${symbol}/${request.period}`);
+        } catch {
+          failed.push(`${symbol}/${request.period}`);
+        }
+      }
     }
+    if (failed.length > 0) {
+      setError(`配置已保存，但以下 K 线同步失败：${failed.join("、")}`);
+      return false;
+    }
+    return true;
   };
 
   const deletePosition = async (symbol: string) => {
@@ -346,7 +364,7 @@ export default function AiTradingPage() {
         await loadEngineStatus(false);
       } else {
         const err = await response.json();
-        setError(err.detail || "删除失败");
+        setError(apiErrorMessage(err.detail, "删除失败"));
       }
     } catch (e) {
       setError(`删除失败: ${e}`);
@@ -364,7 +382,7 @@ export default function AiTradingPage() {
         await loadEngineStatus(false);
       } else {
         const err = await response.json();
-        setError(err.detail || "清空失败");
+        setError(apiErrorMessage(err.detail, "清空失败"));
       }
     } catch (e) {
       setError(`清空失败: ${e}`);
@@ -427,7 +445,11 @@ export default function AiTradingPage() {
       )}
 
       {!engineStatus?.running && (
-        <Alert type="warning">AI 交易未启用。请点击「配置」设置 DeepSeek API Key 和监控股票池。</Alert>
+        <Alert type="warning">
+          {engineStatus?.enabled_in_config
+            ? "AI 交易已启用配置，但引擎当前已停止。点击「启动」恢复自动交易。"
+            : "AI 交易未启用。请点击「配置」设置 DeepSeek API Key 和监控股票池。"}
+        </Alert>
       )}
 
       {/* 监控股票选择 */}
@@ -476,7 +498,12 @@ export default function AiTradingPage() {
                       ))}
                     </select>
                   )}
-                  <Button size="sm" variant="ghost" onClick={() => mainKlineSymbol && loadMainKline(mainKlineSymbol)}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-label="刷新K线"
+                    onClick={() => mainKlineSymbol && loadMainKline(mainKlineSymbol)}
+                  >
                     <Refresh className="w-4 h-4" />
                   </Button>
                 </div>
@@ -707,14 +734,27 @@ export default function AiTradingPage() {
                       const response = await fetch(`${API_BASE}/portfolio/positions`);
                       if (response.ok) {
                         const data = await response.json();
-                        const positionSymbols = (data.positions || []).map((p: any) => p.symbol);
+                        const positionSymbols = (data.positions || [])
+                          .map((p: any) => String(p.symbol || "").trim().toUpperCase())
+                          .filter(Boolean);
                         if (positionSymbols.length > 0) {
-                          const current = symbolsInput.trim();
-                          setSymbolsInput(current ? `${current}, ${positionSymbols.join(", ")}` : positionSymbols.join(", "));
-                          setSuccess(`已添加 ${positionSymbols.length} 只持仓股票`);
+                          const currentSymbols = symbolsInput
+                            .split(/[,，;\s\n]+/)
+                            .map((symbol) => symbol.trim().toUpperCase())
+                            .filter(Boolean);
+                          const mergedSymbols = Array.from(new Set([...currentSymbols, ...positionSymbols]));
+                          const addedCount = mergedSymbols.length - new Set(currentSymbols).size;
+                          setSymbolsInput(mergedSymbols.join(", "));
+                          setSuccess(
+                            addedCount > 0
+                              ? `已添加 ${addedCount} 只持仓股票`
+                              : "全部持仓股票已在监控池中"
+                          );
                         } else {
                           setError("当前没有持仓");
                         }
+                      } else {
+                        setError("获取持仓失败");
                       }
                     } catch (e) {
                       setError("获取持仓失败");

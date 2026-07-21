@@ -4,7 +4,7 @@ import {
   TrendingUp as TrendingUpIcon,
   TrendingDown as TrendingDownIcon,
 } from '@mui/icons-material';
-import { resolveWsUrl } from '../api/client';
+import { API_BASE, resolveWsUrl } from '../api/client';
 
 interface KLineData {
   timestamp: number;
@@ -37,6 +37,62 @@ export default function RealTimeKLineChart({
 
   // 连接 WebSocket 接收实时数据
   useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setKlineData([]);
+    setCurrentPrice(0);
+    setPriceChange(0);
+
+    const loadHistory = async () => {
+      for (const period of ['min1', 'day']) {
+        try {
+          const params = new URLSearchParams({
+            symbol,
+            period,
+            limit: String(maxDataPoints),
+          });
+          const response = await fetch(`${API_BASE}/quotes/history?${params.toString()}`);
+          if (!response.ok) continue;
+
+          const payload = await response.json();
+          const bars = (Array.isArray(payload.bars) ? payload.bars : [])
+            .map((bar: any): KLineData => ({
+              timestamp: new Date(bar.ts).getTime(),
+              open: Number(bar.open),
+              high: Number(bar.high),
+              low: Number(bar.low),
+              close: Number(bar.close),
+              volume: Number(bar.volume) || 0,
+            }))
+            .filter((bar: KLineData) =>
+              Number.isFinite(bar.timestamp)
+              && Number.isFinite(bar.open)
+              && Number.isFinite(bar.high)
+              && Number.isFinite(bar.low)
+              && Number.isFinite(bar.close)
+            )
+            .sort((a: KLineData, b: KLineData) => a.timestamp - b.timestamp)
+            .slice(-maxDataPoints);
+
+          if (bars.length > 0) {
+            if (cancelled) return;
+            const firstPrice = bars[0].close;
+            const latestPrice = bars[bars.length - 1].close;
+            setKlineData(bars);
+            setCurrentPrice(latestPrice);
+            setPriceChange(firstPrice > 0 ? ((latestPrice - firstPrice) / firstPrice) * 100 : 0);
+            setLoading(false);
+            return;
+          }
+        } catch (error) {
+          console.error(`加载 ${symbol} ${period} K 线失败:`, error);
+        }
+      }
+      if (!cancelled) setLoading(false);
+    };
+
+    loadHistory();
+
     const wsUrl = resolveWsUrl('/ws/quotes');
     const ws = new WebSocket(wsUrl);
 
@@ -52,33 +108,28 @@ export default function RealTimeKLineChart({
         if (data.type === 'quote' && data.symbol === symbol) {
           const newPrice = data.last_done || data.close;
           if (newPrice) {
-            setCurrentPrice(newPrice);
-            
+            const numericPrice = Number(newPrice);
+            if (!Number.isFinite(numericPrice)) return;
+            setCurrentPrice(numericPrice);
+
             // 更新 K 线数据（简化版：每次更新都作为一个新数据点）
             setKlineData((prev) => {
               const newData: KLineData = {
                 timestamp: Date.now(),
-                open: prev.length > 0 ? prev[prev.length - 1].close : newPrice,
-                high: newPrice,
-                low: newPrice,
-                close: newPrice,
+                open: prev.length > 0 ? prev[prev.length - 1].close : numericPrice,
+                high: numericPrice,
+                low: numericPrice,
+                close: numericPrice,
                 volume: data.volume || 0
               };
-              
+
               const updated = [...prev, newData];
-              // 限制数据点数量
-              if (updated.length > maxDataPoints) {
-                return updated.slice(updated.length - maxDataPoints);
-              }
-              return updated;
+              const limited = updated.slice(-maxDataPoints);
+              const firstPrice = limited[0]?.close;
+              setPriceChange(firstPrice > 0 ? ((numericPrice - firstPrice) / firstPrice) * 100 : 0);
+              return limited;
             });
-            
-            // 计算涨跌
-            if (klineData.length > 0) {
-              const change = ((newPrice - klineData[0].close) / klineData[0].close) * 100;
-              setPriceChange(change);
-            }
-            
+
             setLoading(false);
           }
         }
@@ -88,8 +139,10 @@ export default function RealTimeKLineChart({
     };
 
     ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      setLoading(false);
+      if (!cancelled) {
+        console.error('WebSocket error:', error);
+        setLoading(false);
+      }
     };
 
     ws.onclose = () => {
@@ -99,7 +152,12 @@ export default function RealTimeKLineChart({
     wsRef.current = ws;
 
     return () => {
+      cancelled = true;
       if (ws) {
+        ws.onopen = null;
+        ws.onmessage = null;
+        ws.onerror = null;
+        ws.onclose = null;
         ws.close();
       }
     };
@@ -123,11 +181,15 @@ export default function RealTimeKLineChart({
 
     // 计算价格范围
     const prices = klineData.flatMap(d => [d.high, d.low]);
-    const maxPrice = Math.max(...prices);
-    const minPrice = Math.min(...prices);
+    const rawMaxPrice = Math.max(...prices);
+    const rawMinPrice = Math.min(...prices);
+    const rawPriceRange = rawMaxPrice - rawMinPrice;
+    const flatPricePadding = Math.max(Math.abs(rawMaxPrice) * 0.01, 0.01);
+    const maxPrice = rawPriceRange === 0 ? rawMaxPrice + flatPricePadding / 2 : rawMaxPrice;
+    const minPrice = rawPriceRange === 0 ? rawMinPrice - flatPricePadding / 2 : rawMinPrice;
     const priceRange = maxPrice - minPrice;
 
-    const maxVolume = Math.max(...klineData.map(d => d.volume));
+    const maxVolume = Math.max(1, ...klineData.map(d => d.volume));
 
     // 绘制网格线
     ctx.strokeStyle = '#e0e0e0';
@@ -255,8 +317,6 @@ export default function RealTimeKLineChart({
     </Box>
   );
 }
-
-
 
 
 

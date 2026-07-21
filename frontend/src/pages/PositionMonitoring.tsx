@@ -192,13 +192,23 @@ export default function PositionMonitoringPage() {
   const updateGlobalSettings = async (settings: GlobalSettings) => {
     try {
       const base = API_BASE;
+      const settingsToSave: GlobalSettings = {
+        global_enabled: settings.global_enabled,
+        market_hours_only: settings.market_hours_only,
+        max_daily_trades: settings.max_daily_trades,
+        max_total_exposure: settings.max_total_exposure,
+        emergency_stop: settings.emergency_stop,
+        risk_level: settings.risk_level,
+        notifications_enabled: settings.notifications_enabled,
+        excluded_symbols: settings.excluded_symbols,
+      };
       const response = await fetch(`${base}/monitoring/global-settings`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(settings),
+        body: JSON.stringify(settingsToSave),
       });
       if (response.ok) {
-        setGlobalSettings(settings);
+        setGlobalSettings(settingsToSave);
         setShowSettings(false);
         setSuccess("全局设置已保存");
       } else {
@@ -394,6 +404,7 @@ export default function PositionMonitoringPage() {
                 <th className="text-left py-3 px-4">
                   <input
                     type="checkbox"
+                    aria-label="选择全部持仓"
                     checked={selectedPositions.size === positions.length && positions.length > 0}
                     onChange={(e) => {
                       if (e.target.checked) {
@@ -438,6 +449,7 @@ export default function PositionMonitoringPage() {
                     <td className="py-3 px-4">
                       <input
                         type="checkbox"
+                        aria-label={`选择 ${position.symbol}`}
                         checked={isSelected}
                         onChange={(e) => {
                           const newSelected = new Set(selectedPositions);
@@ -468,6 +480,7 @@ export default function PositionMonitoringPage() {
                     </td>
                     <td className="py-3 px-4 text-center">
                       <button
+                        aria-label={`${isActive ? "暂停" : "启用"} ${position.symbol} 监控`}
                         onClick={() => toggleMonitoring(position.symbol, !isActive)}
                         disabled={isExcluded}
                         className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
@@ -540,15 +553,15 @@ export default function PositionMonitoringPage() {
                     </td>
                     <td className="py-3 px-4 text-center">
                       <div className="flex items-center justify-center gap-1">
-                        <Button size="sm" variant="ghost" onClick={() => setEditPosition(position)}>
+                        <Button aria-label={`编辑 ${position.symbol} 监控设置`} size="sm" variant="ghost" onClick={() => setEditPosition(position)}>
                           <Settings className="w-4 h-4" />
                         </Button>
                         {isExcluded ? (
-                          <Button size="sm" variant="ghost" onClick={() => includePosition(position.symbol)}>
+                          <Button aria-label={`重新纳入 ${position.symbol} 监控`} size="sm" variant="ghost" onClick={() => includePosition(position.symbol)}>
                             <Visibility className="w-4 h-4 text-emerald-500" />
                           </Button>
                         ) : (
-                          <Button size="sm" variant="ghost" onClick={() => excludePosition(position.symbol)}>
+                          <Button aria-label={`排除 ${position.symbol} 监控`} size="sm" variant="ghost" onClick={() => excludePosition(position.symbol)}>
                             <Block className="w-4 h-4 text-red-500" />
                           </Button>
                         )}
@@ -832,11 +845,11 @@ function Dialog({
   const sizeClasses = { md: "max-w-md", lg: "max-w-2xl" };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+    <div role="dialog" aria-modal="true" aria-label={title} className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className={`bg-white dark:bg-slate-800 rounded-xl shadow-2xl w-full ${sizeClasses[size]} max-h-[90vh] overflow-y-auto`}>
         <div className="flex items-center justify-between p-4 border-b border-slate-200 dark:border-slate-700">
           <h3 className="text-lg font-bold text-slate-900 dark:text-white">{title}</h3>
-          <button onClick={onClose} className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
+          <button aria-label={`关闭${title}`} onClick={onClose} className="p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg transition-colors">
             <Close className="w-5 h-5 text-slate-500" />
           </button>
         </div>

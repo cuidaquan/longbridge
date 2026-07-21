@@ -167,6 +167,25 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     # 添加 period 列到 ohlc 表
     _ensure_column(conn, "ohlc", "period", "TEXT NOT NULL DEFAULT 'day'")
 
+    # Backfill the V2 dimension for existing long-pool analyses where it is derivable.
+    _ensure_column(conn, "stock_picker_analysis", "score_support_resistance", "DOUBLE")
+    conn.execute("""
+        UPDATE stock_picker_analysis
+        SET score_support_resistance = GREATEST(
+            0,
+            LEAST(
+                15,
+                COALESCE(score_total, 0)
+                - COALESCE(score_trend, 0)
+                - COALESCE(score_momentum, 0)
+                - COALESCE(score_volume, 0)
+                - COALESCE(score_volatility, 0)
+                - COALESCE(score_pattern, 0)
+            )
+        )
+        WHERE score_support_resistance IS NULL AND pool_type = 'LONG'
+    """)
+
     # 添加 enable_real_trading 列到 ai_trading_config 表
     _ensure_column(conn, "ai_trading_config", "enable_real_trading", "BOOLEAN DEFAULT false")
 
@@ -350,7 +369,8 @@ CREATE TABLE IF NOT EXISTS stock_picker_analysis (
     signals TEXT,
     recommendation_score DOUBLE,
     recommendation_reason TEXT,
-    klines_snapshot TEXT
+    klines_snapshot TEXT,
+    score_support_resistance DOUBLE
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_pool ON stock_picker_analysis(pool_id);
 CREATE INDEX IF NOT EXISTS idx_analysis_time ON stock_picker_analysis(analysis_time);

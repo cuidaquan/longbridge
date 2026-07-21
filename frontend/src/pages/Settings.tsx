@@ -128,6 +128,13 @@ export default function SettingsPage() {
         .filter(Boolean),
     [symbols]
   );
+  const previewHistoryBars = useMemo(
+    () =>
+      [...historyBars]
+        .sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime())
+        .slice(0, 20),
+    [historyBars]
+  );
 
   const handleCredChange =
     (key: keyof Credentials) => (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -380,7 +387,7 @@ export default function SettingsPage() {
                 value={aiCredentials.EODHD_API_KEY || ""}
                 onChange={handleAICredChange("EODHD_API_KEY")}
                 placeholder="输入 EODHD API Key（可选）"
-                hint="用于板块轮动分析，免费 20 次/天"
+                hint="可选；板块行情可回退 LongPort，成分股筛选和 ETF 持仓需要此配置"
               />
             </div>
             <div className="pt-2">
@@ -497,9 +504,9 @@ export default function SettingsPage() {
                 <span className="text-right">收盘</span>
                 <span className="text-right">成交量</span>
               </div>
-              {historyBars.slice(0, 20).map((bar, idx) => (
+              {previewHistoryBars.map((bar) => (
                 <div
-                  key={idx}
+                  key={bar.ts}
                   className="grid grid-cols-6 gap-2 py-1.5 text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded transition-colors"
                 >
                   <span className="text-cyan-600 dark:text-cyan-400">

@@ -43,7 +43,6 @@ interface StrategySignal {
 
 export default function StrategyWatchPage() {
   const [watchlistSignals, setWatchlistSignals] = useState<StrategySignal[]>([]);
-  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [tabValue, setTabValue] = useState("overview");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -230,7 +229,6 @@ export default function StrategyWatchPage() {
                         size="sm"
                         variant="ghost"
                         onClick={() => {
-                          setSelectedSymbol(item.symbol);
                           setTabValue("kline");
                           setExpandedSymbols(new Set([item.symbol]));
                         }}
@@ -266,7 +264,7 @@ export default function StrategyWatchPage() {
             </div>
           ) : (
             watchlistSignals.map((item) => {
-              const isExpanded = expandedSymbols.has(item.symbol) || selectedSymbol === item.symbol;
+              const isExpanded = expandedSymbols.has(item.symbol);
               return (
                 <Card key={item.symbol} padding="none" className="overflow-hidden">
                   <button

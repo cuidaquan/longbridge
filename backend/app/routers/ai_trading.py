@@ -22,11 +22,32 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ai-trading", tags=["ai_trading"])
 AI_API_KEY_MASK = "********"
+AI_CONFIG_PUBLIC_FIELDS = {
+    "enabled",
+    "symbols",
+    "check_interval_minutes",
+    "ai_model",
+    "ai_api_key",
+    "ai_temperature",
+    "min_confidence",
+    "max_position_per_stock",
+    "max_daily_trades",
+    "max_loss_per_day",
+    "enable_stop_loss",
+    "default_stop_loss_percent",
+    "enable_real_trading",
+    "position_sizing_method",
+    "fixed_amount_per_trade",
+}
 
 
 def _public_config(config: Optional[dict]) -> dict:
     """Return a copy that is safe to serialize in API responses."""
-    public = dict(config or {})
+    public = {
+        key: value
+        for key, value in (config or {}).items()
+        if key in AI_CONFIG_PUBLIC_FIELDS
+    }
     if public.get("ai_api_key"):
         public["ai_api_key"] = AI_API_KEY_MASK
     return public
@@ -227,15 +248,18 @@ async def update_config(config_update: AiTradingConfigUpdate):
         need_restart = engine.is_running()
         
         if need_restart:
-            logger.info("配置已更新，重启引擎...")
+            logger.info("配置已更新，停止引擎以应用新配置...")
             await engine.stop()
-            await engine.start()
+            if current_config.get("enabled", False):
+                await engine.start()
+
+        restarted = need_restart and bool(current_config.get("enabled", False))
         
         return {
             "status": "success",
             "message": "Configuration updated",
             "need_restart": need_restart,
-            "restarted": need_restart
+            "restarted": restarted
         }
         
     except HTTPException:

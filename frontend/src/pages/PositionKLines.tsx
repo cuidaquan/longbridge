@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import {
   CandlestickChart,
   Refresh,
@@ -42,10 +42,10 @@ const PERIOD_OPTIONS = [
   { value: "day", label: "日线" },
   { value: "week", label: "周线" },
   { value: "month", label: "月线" },
-  { value: "min_1", label: "1分钟" },
-  { value: "min_5", label: "5分钟" },
-  { value: "min_15", label: "15分钟" },
-  { value: "min_60", label: "60分钟" },
+  { value: "min1", label: "1分钟" },
+  { value: "min5", label: "5分钟" },
+  { value: "min15", label: "15分钟" },
+  { value: "min60", label: "60分钟" },
 ];
 
 export default function PositionKLinesPage() {
@@ -88,6 +88,7 @@ export default function PositionKLinesPage() {
 
     try {
       setChartLoading(true);
+      setCandlesticks([]);
       const base = API_BASE;
       const response = await fetch(
         `${base}/quotes/history?symbol=${symbol}&period=${period}&limit=200`
@@ -98,20 +99,24 @@ export default function PositionKLinesPage() {
         setCandlesticks(data.bars || []);
         setError(null);
       } else {
+        setCandlesticks([]);
         setError(`加载 ${symbol} K线失败`);
       }
     } catch (e: any) {
+      setCandlesticks([]);
       setError(e.message || "网络错误");
     } finally {
       setChartLoading(false);
     }
   };
 
-  // 初始化图表
+  // 数据就绪且容器可见后再初始化，避免在首次加载态创建零尺寸图表。
   useEffect(() => {
-    if (!chartRef.current) return;
+    if (!chartRef.current || chartLoading || candlesticks.length === 0) return;
 
-    const chart = init(chartRef.current, {
+    const chartContainer = chartRef.current;
+
+    const chart = init(chartContainer, {
       styles: {
         candle: {
           type: CandleType.CandleSolid,
@@ -132,19 +137,9 @@ export default function PositionKLinesPage() {
       },
     });
 
+    if (!chart) return;
+
     chartInstance.current = chart;
-
-    return () => {
-      if (chartInstance.current) {
-        dispose(chartRef.current!);
-        chartInstance.current = null;
-      }
-    };
-  }, []);
-
-  // 更新图表数据
-  useEffect(() => {
-    if (!chartInstance.current || candlesticks.length === 0) return;
 
     try {
       const klineData = candlesticks.map((bar) => ({
@@ -157,11 +152,18 @@ export default function PositionKLinesPage() {
       }));
 
       klineData.sort((a, b) => a.timestamp - b.timestamp);
-      chartInstance.current.applyNewData(klineData);
+      chart.applyNewData(klineData);
     } catch (error) {
       console.error("Error updating chart data:", error);
     }
-  }, [candlesticks]);
+
+    return () => {
+      dispose(chartContainer);
+      if (chartInstance.current === chart) {
+        chartInstance.current = null;
+      }
+    };
+  }, [candlesticks, chartLoading]);
 
   useEffect(() => {
     loadPositions();
@@ -174,6 +176,16 @@ export default function PositionKLinesPage() {
   }, [selectedSymbol, period]);
 
   const selectedPosition = positions.find((p) => p.symbol === selectedSymbol);
+  const candlestickDateRange = useMemo(() => {
+    const timestamps = candlesticks
+      .map((bar) => new Date(bar.ts).getTime())
+      .filter(Number.isFinite);
+    if (timestamps.length === 0) return null;
+    return {
+      earliest: new Date(Math.min(...timestamps)).toLocaleDateString(),
+      latest: new Date(Math.max(...timestamps)).toLocaleDateString(),
+    };
+  }, [candlesticks]);
 
   const handleRefresh = () => {
     loadPositions();
@@ -227,10 +239,12 @@ export default function PositionKLinesPage() {
               <CardHeader title="持仓列表" />
               <div className="space-y-2 max-h-[600px] overflow-y-auto">
                 {positions.map((pos) => (
-                  <div
+                  <button
+                    type="button"
                     key={pos.symbol}
                     onClick={() => setSelectedSymbol(pos.symbol)}
-                    className={`p-3 rounded-lg cursor-pointer transition-all ${
+                    aria-pressed={selectedSymbol === pos.symbol}
+                    className={`w-full p-3 rounded-lg cursor-pointer text-left transition-all ${
                       selectedSymbol === pos.symbol
                         ? "bg-cyan-50 dark:bg-cyan-900/20 border-2 border-cyan-500"
                         : "bg-slate-50 dark:bg-slate-800/50 border-2 border-transparent hover:bg-slate-100 dark:hover:bg-slate-800"
@@ -262,7 +276,7 @@ export default function PositionKLinesPage() {
                         {(pos.pnl_percent || 0).toFixed(2)}%
                       </span>
                     </div>
-                  </div>
+                  </button>
                 ))}
               </div>
             </Card>
@@ -320,11 +334,10 @@ export default function PositionKLinesPage() {
                 className={`w-full h-[500px] ${chartLoading || candlesticks.length === 0 ? "hidden" : "block"}`}
               />
 
-              {candlesticks.length > 0 && (
+              {candlesticks.length > 0 && candlestickDateRange && (
                 <div className="mt-4 text-sm text-slate-500 dark:text-slate-400">
                   共 {candlesticks.length} 根K线 | 最早:{" "}
-                  {new Date(candlesticks[candlesticks.length - 1]?.ts).toLocaleDateString()} | 最新:{" "}
-                  {new Date(candlesticks[0]?.ts).toLocaleDateString()}
+                  {candlestickDateRange.earliest} | 最新: {candlestickDateRange.latest}
                 </div>
               )}
             </Card>
