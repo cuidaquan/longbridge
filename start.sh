@@ -108,7 +108,11 @@ start_backend() {
 
     # 启动后端（后台运行）
     echo "🔄 启动 FastAPI 服务器..."
-    nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload > ../logs/backend.log 2>&1 &
+    UVICORN_ENV_FILE=()
+    if [ -f ".longport.env" ]; then
+        UVICORN_ENV_FILE=(--env-file .longport.env)
+    fi
+    nohup uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload "${UVICORN_ENV_FILE[@]}" > ../logs/backend.log 2>&1 &
     BACKEND_PID=$!
 
     # 等待服务启动

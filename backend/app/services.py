@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 from .db import get_connection
 from .exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
+from .longport_compat import close_longport_context
 from .repositories import (
     fetch_latest_prices,
     load_credentials,
@@ -65,7 +66,7 @@ def _quote_context(creds: Dict[str, str]):
         yield ctx
     finally:  # pragma: no branch
         try:
-            ctx.close()
+            close_longport_context(ctx)
         except Exception:  # noqa: S110 - best effort cleanup
             pass
 
@@ -256,7 +257,7 @@ def get_positions() -> List[Dict[str, object]]:
         raise LongbridgeAPIError(f"获取持仓信息失败: {exc}") from exc
     finally:  # ensure context close
         try:
-            ctx.close()
+            close_longport_context(ctx)
         except Exception:  # noqa: S110 - cleanup best effort
             pass
 
@@ -505,7 +506,7 @@ def get_account_balance() -> Dict[str, object]:
         raise LongbridgeAPIError(f"获取账户资金失败: {exc}") from exc
     finally:
         try:
-            ctx.close()
+            close_longport_context(ctx)
         except Exception:
             pass
 

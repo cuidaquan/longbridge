@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 from .exceptions import LongbridgeDependencyMissing
+from .longport_compat import close_longport_context
 from .repositories import load_credentials, load_symbols, store_tick_event
 from .services import get_portfolio_overview
 from .strategy_engine import get_strategy_engine, MarketData
@@ -289,7 +290,7 @@ class QuoteStreamManager:
 
             try:
                 # Subscribe to quotes only (K-line data not available in current API)
-                ctx.subscribe(symbols, [SubType.Quote], is_first_push=True)
+                ctx.subscribe(symbols, [SubType.Quote])
                 current_symbols = set(symbols)
                 with self._lock:
                     self._current_symbols = set(current_symbols)
@@ -297,7 +298,7 @@ class QuoteStreamManager:
             except Exception as exc:
                 self._update_status("error", f"订阅失败: {exc}")
                 logger.exception("Subscribe failed", exc_info=exc)
-                ctx.close()
+                close_longport_context(ctx)
                 time.sleep(5.0)
                 continue
 
@@ -318,7 +319,7 @@ class QuoteStreamManager:
                         if to_remove:
                             ctx.unsubscribe(to_remove, [SubType.Quote])
                         if to_add:
-                            ctx.subscribe(to_add, [SubType.Quote], is_first_push=True)
+                            ctx.subscribe(to_add, [SubType.Quote])
                         current_symbols = new_symbols
                         with self._lock:
                             self._current_symbols = set(current_symbols)
@@ -332,7 +333,7 @@ class QuoteStreamManager:
                 # passive wait
 
             try:
-                ctx.close()
+                close_longport_context(ctx)
             except Exception:  # noqa: S110 - cleanup
                 pass
 

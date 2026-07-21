@@ -10,6 +10,7 @@ from enum import Enum
 
 from .repositories import load_credentials
 from .exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
+from .longport_compat import close_longport_context
 
 logger = logging.getLogger(__name__)
 
@@ -217,7 +218,7 @@ class LongbridgeTradingAPI:
                 finally:
                     try:
                         if ctx:
-                            ctx.close()
+                            close_longport_context(ctx)
                     except:
                         pass
                     
@@ -253,7 +254,7 @@ class LongbridgeTradingAPI:
             return False
         finally:
             try:
-                ctx.close()
+                close_longport_context(ctx)
             except:
                 pass
 
@@ -307,7 +308,7 @@ class LongbridgeTradingAPI:
             return None
         finally:
             try:
-                ctx.close()
+                close_longport_context(ctx)
             except:
                 pass
 
@@ -349,7 +350,7 @@ class LongbridgeTradingAPI:
             return {}
         finally:
             try:
-                ctx.close()
+                close_longport_context(ctx)
             except:
                 pass
 
@@ -395,7 +396,7 @@ class LongbridgeTradingAPI:
             return []
         finally:
             try:
-                ctx.close()
+                close_longport_context(ctx)
             except:
                 pass
 
