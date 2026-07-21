@@ -14,3 +14,5 @@ Requires-Dist: cryptography>=42
 Requires-Dist: pydantic-settings>=2.2
 Requires-Dist: python-dotenv>=1.0
 Requires-Dist: numpy>=1.24.0
+Requires-Dist: pandas>=2.0.0
+Requires-Dist: longport<5,>=4.3

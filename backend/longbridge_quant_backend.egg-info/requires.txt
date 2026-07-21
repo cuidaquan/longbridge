@@ -8,6 +8,8 @@ cryptography>=42
 pydantic-settings>=2.2
 python-dotenv>=1.0
 numpy>=1.24.0
+pandas>=2.0.0
+longport<5,>=4.3
 
 [:sys_platform != "win32"]
 uvloop>=0.20.0
