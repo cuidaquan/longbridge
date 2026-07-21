@@ -5,10 +5,23 @@ interface LayoutProps {
   children: (activeTab: TabType) => ReactNode;
 }
 
+const VALID_TABS = new Set<TabType>([
+  "ai-trading",
+  "smart-position",
+  "stock-picker",
+  "sector-rotation",
+  "strategy-watch",
+  "monitoring",
+  "position-klines",
+  "settings",
+]);
+
 export default function Layout({ children }: LayoutProps) {
   const [activeTab, setActiveTab] = useState<TabType>(() => {
     const saved = localStorage.getItem("activeTab");
-    return (saved as TabType) || "ai-trading";
+    return saved && VALID_TABS.has(saved as TabType)
+      ? (saved as TabType)
+      : "ai-trading";
   });
 
   const [darkMode, setDarkMode] = useState(() => {
@@ -33,20 +46,7 @@ export default function Layout({ children }: LayoutProps) {
   }, [darkMode]);
 
   useEffect(() => {
-    const handleStorageChange = () => {
-      setSidebarCollapsed(localStorage.getItem("sidebarCollapsed") === "true");
-    };
-    window.addEventListener("storage", handleStorageChange);
-    const interval = setInterval(() => {
-      const current = localStorage.getItem("sidebarCollapsed") === "true";
-      if (current !== sidebarCollapsed) {
-        setSidebarCollapsed(current);
-      }
-    }, 100);
-    return () => {
-      window.removeEventListener("storage", handleStorageChange);
-      clearInterval(interval);
-    };
+    localStorage.setItem("sidebarCollapsed", String(sidebarCollapsed));
   }, [sidebarCollapsed]);
 
   const toggleDarkMode = () => {
@@ -60,6 +60,8 @@ export default function Layout({ children }: LayoutProps) {
         onTabChange={setActiveTab}
         darkMode={darkMode}
         onToggleDarkMode={toggleDarkMode}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={() => setSidebarCollapsed((value) => !value)}
       />
 
       {/* Main Content */}

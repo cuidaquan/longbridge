@@ -6,10 +6,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
+from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
 from starlette.routing import Match
 
-from app.main import app
+from app.main import app, _stream_websocket_queue
 from app import services
 from app.models import GlobalMonitoringSettings, MonitoringStatus
 from app.position_monitor import PositionMonitor
@@ -39,6 +40,17 @@ class _FakeConnection:
         return (1, self.real_trading_enabled)
 
 
+class _DisconnectingWebSocket:
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    async def receive(self):
+        return {"type": "websocket.disconnect", "code": 1000}
+
+    async def send_text(self, value: str) -> None:
+        self.sent.append(value)
+
+
 class SecurityContractTest(unittest.TestCase):
     def setUp(self) -> None:
         self.client = TestClient(app)
@@ -53,6 +65,20 @@ class SecurityContractTest(unittest.TestCase):
 
         self.assertEqual(403, blocked.status_code)
         self.assertEqual(200, allowed.status_code)
+
+    def test_websocket_queue_stream_detects_idle_client_disconnect(self) -> None:
+        websocket = _DisconnectingWebSocket()
+
+        async def run_stream() -> None:
+            with self.assertRaises(WebSocketDisconnect):
+                await _stream_websocket_queue(
+                    websocket,
+                    asyncio.Queue(),
+                    str,
+                )
+
+        asyncio.run(run_stream())
+        self.assertEqual([], websocket.sent)
 
     def test_credential_reads_never_return_saved_secrets(self) -> None:
         longport = {

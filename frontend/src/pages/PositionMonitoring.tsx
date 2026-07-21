@@ -281,7 +281,14 @@ export default function PositionMonitoringPage() {
       clearInterval(interval);
       shouldReconnect.current = false;
       if (reconnectTimeout.current) clearTimeout(reconnectTimeout.current);
-      if (wsRef.current) wsRef.current.close();
+      if (wsRef.current) {
+        wsRef.current.onopen = null;
+        wsRef.current.onmessage = null;
+        wsRef.current.onerror = null;
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+        wsRef.current = null;
+      }
       Object.values(priceFlashTimeouts.current).forEach(clearTimeout);
     };
   }, [connectWebSocket]);

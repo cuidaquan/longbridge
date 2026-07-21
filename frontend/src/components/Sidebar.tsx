@@ -1,4 +1,3 @@
-import { useState, useEffect } from "react";
 import {
   SmartToy,
   Calculate,
@@ -72,6 +71,8 @@ interface SidebarProps {
   onTabChange: (tab: TabType) => void;
   darkMode: boolean;
   onToggleDarkMode: () => void;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 }
 
 export default function Sidebar({
@@ -79,22 +80,16 @@ export default function Sidebar({
   onTabChange,
   darkMode,
   onToggleDarkMode,
+  collapsed,
+  onToggleCollapsed,
 }: SidebarProps) {
-  const [collapsed, setCollapsed] = useState(() => {
-    const saved = localStorage.getItem("sidebarCollapsed");
-    return saved === "true";
-  });
-
-  useEffect(() => {
-    localStorage.setItem("sidebarCollapsed", String(collapsed));
-  }, [collapsed]);
-
   const renderNavItem = (item: NavItem) => {
     const isActive = activeTab === item.id;
     const button = (
       <button
         key={item.id}
         onClick={() => onTabChange(item.id)}
+        aria-current={isActive ? "page" : undefined}
         className={`
           w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium
           transition-all duration-200 relative group
@@ -197,7 +192,7 @@ export default function Sidebar({
           disableHoverListener={!collapsed}
         >
           <button
-            onClick={() => setCollapsed(!collapsed)}
+            onClick={onToggleCollapsed}
             className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium
               text-slate-400 hover:text-slate-200 hover:bg-slate-700/30 transition-all duration-200"
           >

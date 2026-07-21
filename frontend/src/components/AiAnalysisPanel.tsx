@@ -70,13 +70,14 @@ export default function AiAnalysisPanel({
 
     const connectWs = () => {
       if (disposed) return;
-      ws.current = new WebSocket(wsUrl);
+      const socket = new WebSocket(wsUrl);
+      ws.current = socket;
 
-      ws.current.onopen = () => {
+      socket.onopen = () => {
         console.log('✅ AI Analysis WebSocket connected');
       };
 
-      ws.current.onmessage = (event) => {
+      socket.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
           
@@ -112,11 +113,13 @@ export default function AiAnalysisPanel({
         }
       };
 
-      ws.current.onerror = (error) => {
-        console.error('❌ WebSocket error:', error);
+      socket.onerror = (error) => {
+        if (!disposed) {
+          console.error('❌ WebSocket error:', error);
+        }
       };
 
-      ws.current.onclose = () => {
+      socket.onclose = () => {
         if (!disposed) {
           console.log('🔌 WebSocket closed, reconnecting in 3s...');
           reconnectTimer = setTimeout(connectWs, 3000);
@@ -129,8 +132,15 @@ export default function AiAnalysisPanel({
     return () => {
       disposed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (ws.current) ws.current.onclose = null;
-      ws.current?.close();
+      const socket = ws.current;
+      if (socket) {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        socket.close();
+        ws.current = null;
+      }
     };
   }, [wsUrl, maxMessages]);
 

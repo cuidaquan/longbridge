@@ -178,6 +178,10 @@ export default function AiTradingPage() {
     }, 60000);
 
     return () => {
+      ws.onopen = null;
+      ws.onmessage = null;
+      ws.onerror = null;
+      ws.onclose = null;
       ws.close();
       clearInterval(interval);
     };

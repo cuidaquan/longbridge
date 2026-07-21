@@ -1,8 +1,8 @@
 from __future__ import annotations
-import logging
-
 
 import asyncio
+import json
+import logging
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -226,9 +226,42 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+async def _stream_websocket_queue(
+    websocket: WebSocket,
+    queue: asyncio.Queue,
+    json_serializer,
+) -> None:
+    """Forward queue messages while independently watching for client disconnects."""
+    receive_task = asyncio.create_task(websocket.receive())
+    queue_task = asyncio.create_task(queue.get())
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {receive_task, queue_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if receive_task in done:
+                event = receive_task.result()
+                if event["type"] == "websocket.disconnect":
+                    raise WebSocketDisconnect(event.get("code", 1000))
+                receive_task = asyncio.create_task(websocket.receive())
+
+            if queue_task in done:
+                payload = queue_task.result()
+                await websocket.send_text(
+                    json.dumps(payload, default=json_serializer)
+                )
+                queue_task = asyncio.create_task(queue.get())
+    finally:
+        for task in (receive_task, queue_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(receive_task, queue_task, return_exceptions=True)
+
+
 @app.websocket("/ws/quotes")
 async def quotes_websocket(websocket: WebSocket) -> None:
-    import json
     from datetime import datetime
 
     def json_serializer(obj):
@@ -246,11 +279,7 @@ async def quotes_websocket(websocket: WebSocket) -> None:
     await websocket.accept()
     queue = quote_stream_manager.add_listener()
     try:
-        while True:
-            payload = await queue.get()
-            # Use custom serializer to handle datetime objects
-            json_str = json.dumps(payload, default=json_serializer)
-            await websocket.send_text(json_str)
+        await _stream_websocket_queue(websocket, queue, json_serializer)
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -262,7 +291,6 @@ async def quotes_websocket(websocket: WebSocket) -> None:
 @app.websocket("/ws/ai-trading")
 async def ai_trading_websocket(websocket: WebSocket) -> None:
     """AI 交易实时推送 WebSocket"""
-    import json
     from datetime import datetime
     from .ai_trading_engine import get_ai_trading_engine
 
@@ -290,10 +318,7 @@ async def ai_trading_websocket(websocket: WebSocket) -> None:
         }
         await websocket.send_text(json.dumps(welcome_msg, default=json_serializer))
 
-        while True:
-            payload = await queue.get()
-            json_str = json.dumps(payload, default=json_serializer)
-            await websocket.send_text(json_str)
+        await _stream_websocket_queue(websocket, queue, json_serializer)
     except WebSocketDisconnect:
         logger.info("📡 AI trading WebSocket disconnected")
     except Exception as e:
