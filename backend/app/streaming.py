@@ -218,10 +218,10 @@ class QuoteStreamManager:
                 time.sleep(10.0)
                 continue
 
-            config = Config(
-                app_key=creds.get("LONGPORT_APP_KEY", ""),
-                app_secret=creds.get("LONGPORT_APP_SECRET", ""),
-                access_token=creds.get("LONGPORT_ACCESS_TOKEN", ""),
+            config = Config.from_apikey(
+                creds.get("LONGPORT_APP_KEY", ""),
+                creds.get("LONGPORT_APP_SECRET", ""),
+                creds.get("LONGPORT_ACCESS_TOKEN", ""),
             )
 
             try:

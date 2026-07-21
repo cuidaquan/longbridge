@@ -116,10 +116,10 @@ class LongbridgeTradingAPI:
         if not self.credentials:
             raise LongbridgeAPIError("Trading credentials not configured")
 
-        config = Config(
-            app_key=self.credentials["LONGPORT_APP_KEY"],
-            app_secret=self.credentials["LONGPORT_APP_SECRET"],
-            access_token=self.credentials["LONGPORT_ACCESS_TOKEN"],
+        config = Config.from_apikey(
+            self.credentials["LONGPORT_APP_KEY"],
+            self.credentials["LONGPORT_APP_SECRET"],
+            self.credentials["LONGPORT_ACCESS_TOKEN"],
         )
 
         return TradeContext(config)

@@ -55,10 +55,10 @@ def _quote_context(creds: Dict[str, str]):
             "未找到 longport Python SDK，请先运行 `pip install longport`。"
         ) from exc
 
-    config = Config(
-        app_key=creds.get("LONGPORT_APP_KEY", ""),
-        app_secret=creds.get("LONGPORT_APP_SECRET", ""),
-        access_token=creds.get("LONGPORT_ACCESS_TOKEN", ""),
+    config = Config.from_apikey(
+        creds.get("LONGPORT_APP_KEY", ""),
+        creds.get("LONGPORT_APP_SECRET", ""),
+        creds.get("LONGPORT_ACCESS_TOKEN", ""),
     )
     ctx = QuoteContext(config)
     try:
@@ -223,10 +223,10 @@ def _build_longport_config(creds: Dict[str, str]):
             "未找到 longport Python SDK，请先运行 `pip install longport`。"
         ) from exc
 
-    return Config(
-        app_key=creds["LONGPORT_APP_KEY"],
-        app_secret=creds["LONGPORT_APP_SECRET"],
-        access_token=creds["LONGPORT_ACCESS_TOKEN"],
+    return Config.from_apikey(
+        creds["LONGPORT_APP_KEY"],
+        creds["LONGPORT_APP_SECRET"],
+        creds["LONGPORT_ACCESS_TOKEN"],
     )
 
 
