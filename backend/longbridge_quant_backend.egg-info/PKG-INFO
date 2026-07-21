@@ -15,6 +15,7 @@ Requires-Dist: httpx<1,>=0.27
 Requires-Dist: pydantic-settings>=2.2
 Requires-Dist: python-dotenv>=1.0
 Requires-Dist: numpy>=1.24.0
+Requires-Dist: openai<3,>=1.30
 Requires-Dist: pandas>=2.0.0
 Requires-Dist: tavily-python<1,>=0.5
 Requires-Dist: longport<5,>=4.3

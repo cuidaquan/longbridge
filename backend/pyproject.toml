@@ -16,6 +16,7 @@ dependencies = [
     "pydantic-settings>=2.2",
     "python-dotenv>=1.0",
     "numpy>=1.24.0",
+    "openai>=1.30,<3",
     "pandas>=2.0.0",
     "tavily-python>=0.5,<1",
     "longport>=4.3,<5"

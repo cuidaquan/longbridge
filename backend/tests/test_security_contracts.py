@@ -12,6 +12,7 @@ from starlette.routing import Match
 
 from app.main import app, _stream_websocket_queue
 from app import services
+from app.ai_analyzer import DeepSeekAnalyzer
 from app.models import GlobalMonitoringSettings, MonitoringStatus
 from app.position_monitor import PositionMonitor
 
@@ -79,6 +80,10 @@ class SecurityContractTest(unittest.TestCase):
 
         asyncio.run(run_stream())
         self.assertEqual([], websocket.sent)
+
+    def test_deepseek_client_dependency_can_initialize(self) -> None:
+        analyzer = DeepSeekAnalyzer(api_key="test-key")
+        self.assertIsNotNone(analyzer.client)
 
     def test_credential_reads_never_return_saved_secrets(self) -> None:
         longport = {
