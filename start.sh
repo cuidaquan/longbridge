@@ -49,25 +49,14 @@ check_backend() {
     fi
     echo "✅ 虚拟环境存在"
 
-    if [ ! -f "backend/.env" ]; then
-        echo "⚠️  警告: 未找到 .env 配置文件，请配置 Longbridge API 凭据"
-    else
-        echo "✅ 环境配置文件存在"
-    fi
-
     if [ ! -f "backend/.venv/.deps_installed" ] || [ "backend/pyproject.toml" -nt "backend/.venv/.deps_installed" ]; then
         echo "📦 安装后端依赖..."
 
         backend/.venv/bin/python -m pip install -U pip
 
         if ! backend/.venv/bin/python -m pip install -e backend; then
-            if [ -f "backend/requirements.txt" ]; then
-                echo "⚠️  警告: pip install -e backend 失败，尝试 requirements.txt"
-                backend/.venv/bin/python -m pip install -r backend/requirements.txt
-            else
-                echo "❌ 错误: 后端依赖安装失败（且未找到 backend/requirements.txt 作为回退）"
-                exit 1
-            fi
+            echo "❌ 错误: 后端依赖安装失败，请检查 backend/pyproject.toml"
+            exit 1
         fi
 
         touch backend/.venv/.deps_installed
@@ -188,7 +177,7 @@ show_info() {
     echo "1. 打开浏览器访问 http://localhost:5173"
     echo "2. 进入「基础配置」页面配置 Longbridge API 凭据"
     echo "3. 添加要监控的股票代码"
-    echo "4. 查看「信号分析」页面获取智能交易建议"
+    echo "4. 按需使用「AI 交易」「智能选股」等功能"
     echo ""
     echo "📝 日志文件:"
     echo "   后端: logs/backend.log"

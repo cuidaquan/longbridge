@@ -17,7 +17,7 @@ WebSocket：
 - 行情流路径：`/ws/quotes`
 
 页面路由/Tab：
-- 顶部 Tab 在 `src/App.tsx`，包含：设置、实时、实时K线、历史、策略控制、持仓监控
+- 侧边栏菜单由 `src/components/Sidebar.tsx` 定义，`src/App.tsx` 负责加载当前 8 个页面：AI 交易、智能仓位、智能选股、板块轮动、策略盯盘、持仓监控、持仓 K 线和基础配置
 
 接口约定（示例）：
 - 凭据：`fetchCredentials()`、`updateCredentials()`

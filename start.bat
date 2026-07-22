@@ -92,12 +92,6 @@ if not exist "backend\.venv" (
 )
 echo OK: venv exists
 
-if not exist "backend\.env" (
-  echo WARN: backend\.env missing. Configure Longbridge API credentials.
-) else (
-  echo OK: backend\.env exists
-)
-
 set "NEED_BACKEND_DEPS=1"
 if exist "backend\.venv\.deps_installed" (
   where powershell >nul 2>&1
@@ -119,19 +113,9 @@ if "%NEED_BACKEND_DEPS%"=="1" (
 
   call .venv\Scripts\python.exe -m pip install -e .
   if errorlevel 1 (
-    if exist "requirements.txt" (
-      echo WARN: Editable install failed; trying requirements.txt
-      call .venv\Scripts\python.exe -m pip install -r requirements.txt
-      if errorlevel 1 (
-        popd
-        echo ERROR: Failed to install backend dependencies
-        exit /b 1
-      )
-    ) else (
-      popd
-      echo ERROR: Failed to install backend dependencies (no requirements.txt fallback)
-      exit /b 1
-    )
+    popd
+    echo ERROR: Failed to install backend dependencies; check backend\pyproject.toml
+    exit /b 1
   )
 
   type nul > .venv\.deps_installed

@@ -1,965 +1,123 @@
-# 🚀 Longbridge Quant Console
+# Longbridge Quant Console
 
-<div align="center">
+Longbridge Quant Console 是一个在本机运行的量化交易控制台。后端使用 FastAPI、DuckDB 和 Longbridge OpenAPI，前端使用 React、TypeScript、Vite 与 MUI。
 
-**AI驱动的智能量化交易系统**
+> 本项目能够提交真实订单。AI 交易和自动仓位默认使用模拟模式；启用实盘前，请先确认账户、权限、标的、数量和风控参数。
 
-[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-green.svg)](https://fastapi.tiangolo.com/)
-[![React](https://img.shields.io/badge/React-18+-61DAFB.svg)](https://reactjs.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5+-blue.svg)](https://www.typescriptlang.org/)
-[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+## 当前功能
 
-[功能特性](#-功能特性) • [快速开始](#-快速开始) • [使用指南](#-使用指南) • [API文档](#-api文档) • [常见问题](#-常见问题)
+| 菜单 | 功能 |
+| --- | --- |
+| AI 交易 | AI 分析、策略参数、模拟或实盘执行、运行日志 |
+| 智能仓位 | 仓位计算、持仓选择、自动仓位管理 |
+| 智能选股 | 多空股票池、量化评分和 AI 分析 |
+| 板块轮动 | 板块热力图、因子分析和持仓关联 |
+| 策略盯盘 | 策略信号、实时 K 线和运行状态 |
+| 持仓监控 | 持仓盈亏、止盈止损与监控设置 |
+| 持仓 K 线 | 按持仓标的和周期查看历史 K 线 |
+| 基础配置 | Longbridge/AI 凭据、股票列表和历史数据同步 |
 
-</div>
+## 环境要求
 
----
+- Python 3.9+
+- Node.js 20+
+- npm
+- macOS 或 Linux 可直接使用 Shell 启停脚本；Windows 可使用对应的 `.bat` 文件
 
-## 📖 项目简介
+## 快速启动
 
-Longbridge Quant Console 是一个基于 Longbridge OpenAPI 的本地量化交易系统，集成了 AI 智能分析、自动交易、智能选股、仓位管理等核心功能。通过 DeepSeek AI 深度分析 + 量化评分体系，帮助您做出更科学的交易决策。
-
-### 🎯 核心优势
-
-- **🤖 AI 智能分析**：集成 DeepSeek AI，深度分析 K线数据，提供交易决策
-- **📊 5维度量化评分**：趋势、动量、量能、波动、形态多维度评估（0-100分）
-- **🎯 智能选股系统**：批量分析股票池，AI推荐最值得交易的标的
-- **💼 智能仓位管理**：自动计算最优仓位，风险可控
-- **📈 实时监控**：持仓监控、策略盯盘、K线图表一应俱全
-- **🔄 全自动交易**：从选股到下单，全流程自动化
-
-### 🖼️ 主界面预览
-
-> **截图占位 1：主界面全景**
-> 
-> 建议截图内容：显示完整的导航栏和主界面
-> 
-> 文件名：`docs/screenshots/main-interface.png`
-
----
-
-## ✨ 功能特性
-
-### 1. ⚙️ 基础配置
-
-配置 Longbridge API 凭据、股票池、系统参数等。
-
-> **截图占位 2：基础配置页面**
-> 
-> 建议截图内容：配置页面，显示 API 凭据输入、股票列表等
-> 
-> 文件名：`docs/screenshots/settings.png`
-
-**功能清单**：
-- ✅ Longbridge API 凭据配置
-- ✅ 股票代码列表管理
-- ✅ 凭据验证
-- ✅ 配置导入导出
-
----
-
-### 2. 🤖 AI 交易
-
-AI驱动的自动交易引擎，实时分析市场并执行交易。
-
-> **截图占位 3：AI交易界面**
-> 
-> 建议截图内容：AI交易控制面板、实时分析日志、交易记录
-> 
-> 文件名：`docs/screenshots/ai-trading.png`
-
-**核心功能**：
-- ✅ DeepSeek AI 深度分析
-- ✅ 实时K线数据获取
-- ✅ 技术指标计算（MA、RSI、MACD、布林带等）
-- ✅ K线形态识别（锤子线、晨星、吊颈线等）
-- ✅ 自动下单/撤单
-- ✅ 风险控制（止损止盈）
-- ✅ 交易日志记录
-
-**AI分析维度**：
-```
-📊 量化评分（0-100分）
-├─ 趋势分析（0-30分）：短中长期趋势评估
-├─ 动量分析（0-25分）：RSI、MACD等动量指标
-├─ 量能分析（0-15分）：成交量变化
-├─ 波动分析（0-15分）：价格波动率、布林带
-└─ 形态分析（0-15分）：K线形态识别
-
-🤖 AI决策
-├─ 行动建议：BUY / SELL / HOLD
-├─ 信心度：0.0-1.0（70%以上执行）
-└─ 推理过程：详细的分析理由
-```
-
----
-
-### 3. 🎯 智能选股
-
-**全新功能！** 批量分析股票，AI推荐最值得交易的标的。
-
-> **截图占位 4：智能选股 - 双栏布局**
-> 
-> 建议截图内容：左侧做多池，右侧做空池，显示股票卡片和评分
-> 
-> 文件名：`docs/screenshots/stock-picker-overview.png`
-
-**功能亮点**：
-
-#### 📈 做多池 + 📉 做空池
-- 支持两个独立股票池（各20只）
-- 自定义添加股票代码
-- 批量导入功能
-
-#### 🔍 一键分析
-- 获取200根K线数据
-- 计算技术指标
-- AI深度分析
-- 生成推荐评分
-
-#### 📊 评分系统
-| 评级 | 分数 | 说明 |
-|------|------|------|
-| 🟢 A级 | 80-100 | 极佳，强烈推荐 |
-| 🟡 B级 | 65-79 | 良好，推荐 |
-| 🟠 C级 | 50-64 | 中等，谨慎 |
-| 🔴 D级 | 0-49 | 较差，不推荐 |
-
-#### 🎯 推荐算法
-```python
-推荐度 = 量化评分 × 40% + AI信心度 × 35% + 信号强度 × 25%
-```
-
-> **截图占位 5：股票卡片详情**
-> 
-> 建议截图内容：展开的股票卡片，显示评分细节、AI理由、信号列表
-> 
-> 文件名：`docs/screenshots/stock-card-detail.png`
-
-**股票卡片信息**：
-- 🏷️ 股票代码、名称
-- 💰 当前价格、涨跌幅
-- 📊 量化评分（5维度柱状图）
-- 🎯 推荐度
-- 🤖 AI信心度
-- 💡 推荐理由
-- ✅ 技术信号列表
-- 📈 AI分析理由
-
----
-
-### 4. 🎲 智能仓位
-
-智能计算最优仓位规模，平衡收益与风险。
-
-> **截图占位 6：智能仓位管理**
-> 
-> 建议截图内容：仓位计算器、风险评估、仓位建议
-> 
-> 文件名：`docs/screenshots/smart-position.png`
-
-**功能清单**：
-- ✅ 凯利公式计算
-- ✅ 风险敞口评估
-- ✅ 仓位建议
-- ✅ 资金管理策略
-
----
-
-### 5. 📊 持仓K线
-
-查看持仓股票的K线图表，支持多周期切换。
-
-> **截图占位 7：持仓K线图表**
-> 
-> 建议截图内容：K线图表、技术指标、成交量
-> 
-> 文件名：`docs/screenshots/position-klines.png`
-
-**图表功能**：
-- ✅ 多周期切换（1分钟到日线）
-- ✅ 技术指标叠加（MA、MACD、RSI等）
-- ✅ 成交量展示
-- ✅ 实时更新
-
----
-
-### 6. 🔍 策略盯盘
-
-策略运行监控，实时查看策略表现。
-
-> **截图占位 8：策略盯盘**
-> 
-> 建议截图内容：策略列表、运行状态、盈亏统计
-> 
-> 文件名：`docs/screenshots/strategy-watch.png`
-
----
-
-### 7. 👁️ 持仓监控
-
-实时监控持仓变化、盈亏情况。
-
-> **截图占位 9：持仓监控**
-> 
-> 建议截图内容：持仓列表、盈亏统计、风险提示
-> 
-> 文件名：`docs/screenshots/position-monitoring.png`
-
----
-
-## 🏗️ 系统架构
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                   Frontend (React + TS)                 │
-│  ┌─────────┬─────────┬─────────┬─────────┬─────────┐  │
-│  │ 配置    │ AI交易  │ 选股    │ 仓位    │ 监控    │  │
-│  └─────────┴─────────┴─────────┴─────────┴─────────┘  │
-└────────────────────┬────────────────────────────────────┘
-                     │ HTTP/WebSocket
-┌────────────────────▼────────────────────────────────────┐
-│              Backend (FastAPI + Python)                 │
-│  ┌──────────────────────────────────────────────────┐  │
-│  │  Routers (API 路由层)                             │  │
-│  │  ├─ /api/settings                                 │  │
-│  │  ├─ /api/ai-trading                               │  │
-│  │  ├─ /api/stock-picker  (新增)                     │  │
-│  │  ├─ /api/portfolio                                │  │
-│  │  └─ /ws/quotes                                    │  │
-│  └──────────────────────────────────────────────────┘  │
-│  ┌──────────────────────────────────────────────────┐  │
-│  │  Services (业务逻辑层)                            │  │
-│  │  ├─ AI Analyzer (DeepSeek)                        │  │
-│  │  ├─ AI Trading Engine                             │  │
-│  │  ├─ Stock Picker Service  (新增)                  │  │
-│  │  ├─ Quote Stream Manager                          │  │
-│  │  └─ Position Monitor                              │  │
-│  └──────────────────────────────────────────────────┘  │
-│  ┌──────────────────────────────────────────────────┐  │
-│  │  Data Layer (数据层)                              │  │
-│  │  └─ DuckDB (本地数据库)                           │  │
-│  │     ├─ candlesticks (K线数据)                     │  │
-│  │     ├─ ai_analysis_log (AI分析日志)               │  │
-│  │     ├─ stock_picker_pools (股票池)  (新增)        │  │
-│  │     ├─ stock_picker_analysis (分析结果)  (新增)   │  │
-│  │     └─ ...                                        │  │
-│  └──────────────────────────────────────────────────┘  │
-└────────────────────┬────────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────────┐
-│              Longbridge OpenAPI                         │
-│  ├─ QuoteContext (行情数据)                             │
-│  └─ TradeContext (交易接口)                             │
-└─────────────────────────────────────────────────────────┘
-```
-
----
-
-## 🚀 快速开始
-
-### 前置要求
-
-| 软件 | 版本要求 |
-|------|---------|
-| Python | 3.9+ |
-| Node.js | 16+ |
-| npm | 8+ |
-
-### 安装步骤
-
-#### 1. 克隆项目
-
-```bash
-git clone <your-repo-url>
-cd longbridge
-```
-
-#### 2. 安装后端依赖
-
-```bash
-cd backend
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-#### 3. 安装前端依赖
-
-```bash
-cd frontend
-npm install
-```
-
-#### 4. 配置环境变量
-
-创建 `.env` 文件（或在前端配置页面配置）：
-
-```bash
-# Longbridge API 凭据
-LONGBRIDGE_APP_KEY=your_app_key
-LONGBRIDGE_APP_SECRET=your_app_secret
-LONGBRIDGE_ACCESS_TOKEN=your_access_token
-
-# DeepSeek AI API
-DEEPSEEK_API_KEY=your_deepseek_api_key
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-
-# 数据库路径
-DATABASE_PATH=data/quant.db
-```
-
-#### 5. 启动系统
-
-**方式1：一键启动（推荐）**
+在仓库根目录运行：
 
 ```bash
 ./start.sh
 ```
 
-**方式2：分别启动**
+脚本会创建 `backend/.venv`、安装缺失依赖，并启动：
+
+- 前端：http://localhost:5173
+- 后端：http://localhost:8000
+- API 文档：http://localhost:8000/docs
+- 健康检查：http://localhost:8000/health
+
+停止服务：
 
 ```bash
-# 终端1：启动后端
-cd backend
-python -m app.main
-
-# 终端2：启动前端
-cd frontend
-npm run dev
-```
-
-#### 6. 访问系统
-
-- **前端界面**：http://localhost:5173
-- **后端API**：http://localhost:8000
-- **API文档**：http://localhost:8000/docs
-
-> **截图占位 10：系统启动成功**
-> 
-> 建议截图内容：终端显示启动成功信息
-> 
-> 文件名：`docs/screenshots/startup-success.png`
-
----
-
-## 📚 使用指南
-
-### 第一步：配置API凭据
-
-1. 打开浏览器访问：http://localhost:5173
-2. 点击「⚙️ 基础配置」
-3. 填入 Longbridge API 凭据
-4. 点击「验证凭据」确认连接成功
-5. 添加要监控的股票代码
-6. 点击「保存配置」
-
-### 第二步：使用智能选股
-
-> **截图占位 11：智能选股使用流程**
-> 
-> 建议截图内容：完整的选股操作流程，从添加股票到查看结果
-> 
-> 文件名：`docs/screenshots/stock-picker-workflow.png`
-
-#### 2.1 添加股票到池
-
-**方式A：手动添加**
-
-1. 点击「🎯 智能选股」Tab
-2. 点击「➕ 添加」按钮
-3. 输入股票代码（如：`AAPL.US`）
-4. 输入股票名称（可选）
-5. 输入添加理由（可选）
-6. 点击「确定添加」
-
-**方式B：批量导入（推荐）**
-
-编辑 `import_stocks.py`：
-
-```python
-# 做多池（20只）
-long_symbols = [
-    "AAPL.US", "MSFT.US", "GOOGL.US", ...
-]
-
-# 做空池（20只）
-short_symbols = [
-    "TSLA.US", "NFLX.US", ...
-]
-```
-
-运行导入脚本：
-
-```bash
-python import_stocks.py
-```
-
-#### 2.2 触发分析
-
-**方式A：前端操作**
-
-1. 点击顶部「🔄 分析全部」按钮
-2. 或分别点击做多池/做空池的「🔍 分析」按钮
-3. 等待2-5分钟（取决于股票数量）
-4. 查看分析结果
-
-**方式B：命令行操作**
-
-```bash
-python analyze_stocks.py
-```
-
-#### 2.3 查看结果
-
-分析完成后，股票会按推荐度排序：
-
-- **#1** 排名第一，推荐度最高
-- 点击「▼ 查看详情」展开详细信息
-- 查看5维度评分柱状图
-- 阅读AI分析理由
-- 查看技术信号列表
-
-#### 2.4 执行交易
-
-根据推荐结果，您可以：
-
-1. **手动交易**：在券商平台下单
-2. **自动交易**：切换到「🤖 AI交易」Tab，启动自动交易
-
-### 第三步：启动AI自动交易
-
-1. 点击「🤖 AI交易」Tab
-2. 设置交易参数：
-   - 最小信心度（默认70%）
-   - 每笔金额
-   - 止损止盈比例
-3. 选择要交易的股票
-4. 点击「启动AI交易」
-5. 实时查看交易日志
-
-> **截图占位 12：AI交易运行中**
-> 
-> 建议截图内容：AI交易日志、实时分析、交易记录
-> 
-> 文件名：`docs/screenshots/ai-trading-running.png`
-
-### 第四步：监控持仓
-
-1. 点击「👁️ 持仓监控」Tab
-2. 查看当前持仓列表
-3. 查看盈亏情况
-4. 设置风险提醒
-
-### 第五步：查看K线
-
-1. 点击「📊 持仓K线」Tab
-2. 选择股票
-3. 选择周期（日线、小时线等）
-4. 查看K线图表和技术指标
-
----
-
-## 🔧 API 文档
-
-### 智能选股 API
-
-#### 1. 获取股票池
-
-```http
-GET /api/stock-picker/pools
-GET /api/stock-picker/pools?pool_type=LONG
-```
-
-**响应示例**：
-
-```json
-{
-  "long_pool": [
-    {
-      "id": 1,
-      "symbol": "AAPL.US",
-      "name": "Apple Inc.",
-      "pool_type": "LONG",
-      "is_active": true,
-      "priority": 0
-    }
-  ],
-  "short_pool": [...]
-}
-```
-
-#### 2. 添加股票
-
-```http
-POST /api/stock-picker/pools
-Content-Type: application/json
-
-{
-  "pool_type": "LONG",
-  "symbol": "AAPL.US",
-  "name": "Apple Inc.",
-  "added_reason": "科技龙头"
-}
-```
-
-#### 3. 批量添加
-
-```http
-POST /api/stock-picker/pools/batch
-Content-Type: application/json
-
-{
-  "pool_type": "LONG",
-  "symbols": ["AAPL.US", "MSFT.US", "GOOGL.US"]
-}
-```
-
-#### 4. 触发分析
-
-```http
-POST /api/stock-picker/analyze
-Content-Type: application/json
-
-{
-  "pool_type": "LONG",  // 可选，不传则分析全部
-  "force_refresh": true
-}
-```
-
-#### 5. 获取分析结果
-
-```http
-GET /api/stock-picker/analysis?sort_by=recommendation&limit=10
-```
-
-**响应示例**：
-
-```json
-{
-  "long_analysis": [
-    {
-      "id": 1,
-      "symbol": "AAPL.US",
-      "current_price": 175.50,
-      "price_change_1d": 2.35,
-      "score": {
-        "total": 85.2,
-        "grade": "A",
-        "breakdown": {
-          "trend": 25.5,
-          "momentum": 22.0,
-          "volume": 12.0,
-          "volatility": 11.5,
-          "pattern": 14.2
-        }
-      },
-      "ai_decision": {
-        "action": "BUY",
-        "confidence": 0.85,
-        "reasoning": ["趋势向上", "MACD金叉", "成交量放大"]
-      },
-      "recommendation_score": 92.5,
-      "recommendation_reason": "高分量化 + 高信心AI + 多个买入信号"
-    }
-  ],
-  "short_analysis": [...],
-  "stats": {
-    "long_count": 20,
-    "short_count": 20,
-    "long_avg_score": 75.3,
-    "short_avg_score": 68.5
-  }
-}
-```
-
-#### 6. 删除股票
-
-```http
-DELETE /api/stock-picker/pools/{pool_id}
-```
-
-### 完整API文档
-
-访问 http://localhost:8000/docs 查看完整的 Swagger API 文档。
-
----
-
-## 💻 技术栈
-
-### 后端
-
-| 技术 | 说明 |
-|------|------|
-| **FastAPI** | 现代、高性能的 Web 框架 |
-| **DuckDB** | 嵌入式分析型数据库 |
-| **Longbridge SDK** | 长桥证券 OpenAPI SDK |
-| **DeepSeek AI** | AI 分析引擎 |
-| **Pydantic** | 数据验证和设置管理 |
-| **uvicorn** | ASGI 服务器 |
-
-### 前端
-
-| 技术 | 说明 |
-|------|------|
-| **React 18** | 用户界面库 |
-| **TypeScript** | 类型安全的 JavaScript |
-| **Vite** | 下一代前端构建工具 |
-| **Tailwind CSS** | 实用优先的 CSS 框架 |
-| **Recharts** | React 图表库 |
-
-### 数据库结构
-
-```sql
--- K线数据
-CREATE TABLE candlesticks (...)
-
--- AI分析日志
-CREATE TABLE ai_analysis_log (...)
-
--- 股票池
-CREATE TABLE stock_picker_pools (
-    id INTEGER PRIMARY KEY,
-    pool_type TEXT,  -- 'LONG' or 'SHORT'
-    symbol TEXT,
-    name TEXT,
-    is_active BOOLEAN,
-    priority INTEGER
-)
-
--- 分析结果
-CREATE TABLE stock_picker_analysis (
-    id INTEGER PRIMARY KEY,
-    symbol TEXT,
-    analysis_time TIMESTAMP,
-    score_total DOUBLE,
-    score_grade TEXT,
-    ai_confidence DOUBLE,
-    recommendation_score DOUBLE,
-    ...
-)
-```
-
----
-
-## 🎓 核心算法
-
-### 量化评分算法（0-100分）
-
-```python
-def calculate_score(klines, indicators):
-    """
-    5维度量化评分
-    """
-    # 1. 趋势分析（0-30分）
-    trend_score = analyze_trend(
-        ma5, ma10, ma20, ma60,
-        price_position, trend_direction
-    )
-    
-    # 2. 动量分析（0-25分）
-    momentum_score = analyze_momentum(
-        rsi, macd_histogram, macd_line
-    )
-    
-    # 3. 量能分析（0-15分）
-    volume_score = analyze_volume(
-        volume_ratio, price_volume_correlation
-    )
-    
-    # 4. 波动分析（0-15分）
-    volatility_score = analyze_volatility(
-        bollinger_position, volatility_level
-    )
-    
-    # 5. 形态分析（0-15分）
-    pattern_score = analyze_pattern(
-        identified_patterns, pattern_strength
-    )
-    
-    # 总分
-    total = (trend_score + momentum_score + 
-             volume_score + volatility_score + 
-             pattern_score)
-    
-    # 评级
-    grade = get_grade(total)  # A/B/C/D
-    
-    return {
-        "total": total,
-        "grade": grade,
-        "breakdown": {
-            "trend": trend_score,
-            "momentum": momentum_score,
-            "volume": volume_score,
-            "volatility": volatility_score,
-            "pattern": pattern_score
-        }
-    }
-```
-
-### 推荐度算法
-
-```python
-def calculate_recommendation_score(
-    quantitative_score,  # 量化评分
-    ai_confidence,       # AI信心度
-    signals              # 技术信号
-):
-    """
-    综合推荐度计算
-    """
-    # 信号强度
-    signal_strength = (
-        len([s for s in signals if 'buy' in s.lower()]) * 10 +
-        len([s for s in signals if 'strong' in s.lower()]) * 5
-    )
-    
-    # 加权计算
-    recommendation = (
-        quantitative_score * 0.40 +      # 40%
-        ai_confidence * 100 * 0.35 +     # 35%
-        min(signal_strength, 25) * 0.25  # 25%
-    )
-    
-    return min(recommendation, 100)
-```
-
----
-
-## 🔍 常见问题
-
-### Q1: 如何获取 Longbridge API 凭据？
-
-**答**：
-1. 访问 [Longbridge 开放平台](https://open.longbridgeapp.com/)
-2. 注册并创建应用
-3. 获取 `APP_KEY`、`APP_SECRET`、`ACCESS_TOKEN`
-4. 在系统配置页面填入凭据
-
-### Q2: DeepSeek API 如何申请？
-
-**答**：
-1. 访问 [DeepSeek 官网](https://platform.deepseek.com/)
-2. 注册账号
-3. 创建 API Key
-4. 在 `.env` 文件中配置 `DEEPSEEK_API_KEY`
-
-### Q3: 智能选股最多支持多少只股票？
-
-**答**：
-- 默认：每个池20只（做多池20 + 做空池20 = 共40只）
-- 可配置：修改 `stock_picker_config` 表中的 `max_pool_size`
-- 建议：不超过50只/池，否则分析时间会很长
-
-### Q4: 分析一次需要多长时间？
-
-**答**：
-- 单只股票：约5-10秒
-- 40只股票：约2-5分钟
-- 时间取决于：网络速度、DeepSeek API 响应速度
-
-### Q5: AI 交易会自动执行吗？
-
-**答**：
-- 需要手动启动「AI 交易」功能
-- 启动后，AI 会自动分析并下单
-- 可以随时暂停或停止
-- 建议先用小金额测试
-
-### Q6: 评分很高但我觉得风险大，怎么办？
-
-**答**：
-- 评分是技术面分析，不考虑基本面、消息面
-- 建议结合您的判断使用
-- 可以查看「详细分析」了解评分依据
-- 最终决策权在您手中
-
-### Q7: 系统支持哪些市场？
-
-**答**：
-- ✅ 美股（如：`AAPL.US`）
-- ✅ 港股（如：`00700.HK`）
-- ✅ A股（如：`000001.SZ`，需要 Longbridge 支持）
-
-### Q8: 数据存储在哪里？
-
-**答**：
-- 本地数据库：`data/quant.db`（DuckDB）
-- 所有数据都在本地，不上传云端
-- 支持数据备份和恢复
-
-### Q9: 如何停止系统？
-
-**答**：
-
-```bash
-# 方式1：脚本停止
 ./stop.sh
-
-# 方式2：手动停止
-# 按 Ctrl+C 终止进程
-
-# 方式3：强制停止
-pkill -f "uvicorn"
-pkill -f "vite"
 ```
 
-### Q10: 遇到错误怎么办？
+首次启动后，在“基础配置”页面保存并验证 Longbridge 凭据；AI 相关功能还需要配置相应 API Key。敏感配置会加密存入本地 DuckDB，不要提交数据库、环境文件或加密密钥。
 
-**答**：
+## 手动启动
 
-1. **查看日志**：
-   ```bash
-   tail -f logs/backend.log
-   tail -f logs/frontend.log
-   ```
+安装并启动后端：
 
-2. **常见错误**：
-   - API 凭据无效 → 重新配置凭据
-   - DeepSeek 额度不足 → 充值或更换 API Key
-   - 股票代码格式错误 → 确保带后缀（`.US`/`.HK`）
-   - 数据库锁定 → 重启系统
-
-3. **获取帮助**：
-   - 查看文档：`docs/` 目录下的详细文档
-   - 提交 Issue：在 GitHub 上提交问题
-
----
-
-## 📂 项目结构
-
-```
-longbridge/
-├── backend/                    # 后端代码
-│   ├── app/
-│   │   ├── main.py            # FastAPI 入口
-│   │   ├── config.py          # 配置管理
-│   │   ├── db.py              # 数据库连接
-│   │   ├── models.py          # Pydantic 模型
-│   │   ├── services.py        # 业务逻辑
-│   │   ├── ai_analyzer.py     # AI 分析器
-│   │   ├── ai_trading_engine.py  # AI 交易引擎
-│   │   ├── stock_picker.py    # 智能选股服务
-│   │   ├── streaming.py       # 行情流管理
-│   │   ├── trading_api.py     # 交易API
-│   │   └── routers/           # API 路由
-│   │       ├── settings.py
-│   │       ├── ai_trading.py
-│   │       ├── stock_picker.py
-│   │       ├── portfolio.py
-│   │       └── ...
-│   ├── data/                  # 数据目录
-│   │   └── quant.db           # DuckDB 数据库
-│   └── requirements.txt       # Python 依赖
-├── frontend/                   # 前端代码
-│   ├── src/
-│   │   ├── App.tsx            # 主应用
-│   │   ├── api/               # API 客户端
-│   │   │   ├── client.ts
-│   │   │   └── stockPicker.ts
-│   │   ├── pages/             # 页面组件
-│   │   │   ├── Settings.tsx
-│   │   │   ├── AiTrading.tsx
-│   │   │   ├── StockPicker.tsx
-│   │   │   ├── SmartPosition.tsx
-│   │   │   └── ...
-│   │   └── components/        # 公共组件
-│   ├── package.json           # 前端依赖
-│   └── vite.config.ts         # Vite 配置
-├── docs/                       # 文档目录
-│   ├── screenshots/           # 截图目录 (待添加)
-│   ├── AI_TRADING_GUIDE.md
-│   ├── STOCK_PICKER_DESIGN.md
-│   ├── STOCK_PICKER_FRONTEND_GUIDE.md
-│   └── ...
-├── logs/                       # 日志目录
-│   ├── backend.log
-│   └── frontend.log
-├── import_stocks.py           # 导入股票脚本
-├── analyze_stocks.py          # 分析股票脚本
-├── start.sh                   # 启动脚本
-├── stop.sh                    # 停止脚本
-└── README.md                  # 本文件
+```bash
+python3 -m venv backend/.venv
+backend/.venv/bin/python -m pip install -e backend
+cd backend
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
----
+在另一个终端安装并启动前端：
 
-## 🤝 贡献指南
+```bash
+cd frontend
+npm ci
+VITE_API_BASE=http://127.0.0.1:8000 npm run dev
+```
 
-欢迎贡献代码、报告问题、提出建议！
+## 配置
 
-### 贡献流程
+应用凭据通过“基础配置”页面管理并加密保存。后端还支持在 `backend/.env` 中设置本地运行参数：
 
-1. Fork 本项目
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
+```dotenv
+DATA_DIR=data
+DUCKDB_PATH=data/quant.db
+CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+# ENCRYPTION_KEY=<Fernet key；不设置时首次运行自动生成>
+```
 
-### 代码规范
+`backend/longport.env.example` 提供 Longbridge 官方服务端点示例。需要覆盖 SDK 默认端点时，将其复制为 `backend/.longport.env` 后再启动。前端 API 地址由 `VITE_API_BASE` 控制，默认是 `http://localhost:8000`。
 
-- **Python**：遵循 PEP 8
-- **TypeScript**：遵循 ESLint 规则
-- **提交信息**：使用清晰的提交描述
+## 实盘保护
 
----
+- AI 交易和自动仓位配置中的 `enable_real_trading` 默认为 `false`。
+- 从模拟模式切换为实盘模式时，后端要求显式确认值 `CONFIRM_REAL_TRADING`。
+- `start.sh` 默认只监听 `127.0.0.1`，后端同时校验浏览器 Origin。
+- 启用实盘不代表订单一定成功；券商权限、余额、交易时段和上游风控仍会生效。
 
-## 📜 许可证
+## 验证
 
-本项目采用 MIT 许可证。详见 [LICENSE](LICENSE) 文件。
+前端类型检查和生产构建：
 
----
+```bash
+cd frontend
+npm run check
+```
 
-## 🙏 致谢
+后端测试：
 
-- [Longbridge OpenAPI](https://open.longbridgeapp.com/) - 提供行情和交易接口
-- [DeepSeek AI](https://platform.deepseek.com/) - 提供 AI 分析能力
-- [FastAPI](https://fastapi.tiangolo.com/) - 现代化的 Web 框架
-- [React](https://reactjs.org/) - 前端框架
-- [DuckDB](https://duckdb.org/) - 高性能分析型数据库
+```bash
+backend/.venv/bin/python -m unittest discover -s backend/tests -p 'test_*.py' -v
+```
 
----
+CI 使用的完整命令是：
 
-## 📞 联系方式
+```bash
+python -m unittest discover -s backend/tests -v
+cd frontend && npm ci && npm run check
+```
 
-- **问题反馈**：GitHub Issues
-- **邮件**：your-email@example.com
-- **文档**：查看 `docs/` 目录
+## 目录结构
 
----
+```text
+backend/app/             FastAPI 路由、服务、策略和数据访问
+backend/tests/           后端单元与契约测试
+frontend/src/pages/      当前 8 个菜单页面
+frontend/src/api/        前端 HTTP API 客户端
+frontend/src/components/ 共享 UI 与图表组件
+config/strategies.json   策略模板
+start.sh / stop.sh       本地服务启停脚本
+```
 
-## 🎉 更新日志
-
-### v1.0.0 (2025-10-24)
-
-**🎯 新功能**：
-- ✅ 智能选股系统（做多池 + 做空池）
-- ✅ 5维度量化评分系统（0-100分）
-- ✅ AI 推荐算法
-- ✅ 批量分析功能
-- ✅ 股票卡片详情展示
-
-**🔧 优化**：
-- ✅ AI 提示词优化（降低保守性）
-- ✅ 评分系统重构
-- ✅ 界面精简（11个Tab → 7个Tab）
-- ✅ 性能优化
-
-**📚 文档**：
-- ✅ 13个详细文档
-- ✅ API 文档完善
-- ✅ 使用指南更新
-
----
-
-<div align="center">
-
-**⭐ 如果觉得有用，请给个 Star！⭐**
-
-Made with ❤️ by [Your Name]
-
-[返回顶部](#-longbridge-quant-console)
-
-</div>
+运行时数据位于 `backend/data/`，日志位于 `logs/`；这些内容均不应进入版本控制。
