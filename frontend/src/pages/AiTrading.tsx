@@ -64,6 +64,71 @@ interface AiPosition {
   open_time: string;
 }
 
+interface RealtimeQuote {
+  type?: string;
+  symbol?: string;
+  sequence?: string | number | null;
+  last_done?: string | number | null;
+  timestamp?: string | number | null;
+  current_volume?: string | number | null;
+}
+
+function comparableSymbol(symbol: string): string {
+  const normalized = symbol.trim().toUpperCase();
+  const match = normalized.match(/^(\d+)\.HK$/);
+  return match ? `${Number(match[1])}.HK` : normalized;
+}
+
+function mergeRealtimeQuote(bars: any[], quote: RealtimeQuote, limit: number = 200): any[] {
+  const price = Number(quote.last_done);
+  if (!Number.isFinite(price) || price <= 0) return bars;
+
+  const rawTimestamp = Number(quote.timestamp);
+  const timestampMs = Number.isFinite(rawTimestamp)
+    ? rawTimestamp * (rawTimestamp < 1_000_000_000_000 ? 1000 : 1)
+    : Date.now();
+  const minuteMs = Math.floor(timestampMs / 60_000) * 60_000;
+  const volumeDelta = Number(quote.current_volume);
+  const tickVolume = Number.isFinite(volumeDelta) && volumeDelta > 0 ? volumeDelta : 0;
+
+  if (bars.length === 0) {
+    return [{
+      ts: new Date(minuteMs).toISOString(),
+      open: price,
+      high: price,
+      low: price,
+      close: price,
+      volume: tickVolume,
+    }];
+  }
+
+  const latest = bars[bars.length - 1];
+  const latestMs = new Date(latest.ts).getTime();
+  const latestMinuteMs = Math.floor(latestMs / 60_000) * 60_000;
+
+  if (Number.isFinite(latestMinuteMs) && minuteMs < latestMinuteMs) return bars;
+
+  if (minuteMs === latestMinuteMs) {
+    const updated = {
+      ...latest,
+      high: Math.max(Number(latest.high) || price, price),
+      low: Math.min(Number(latest.low) || price, price),
+      close: price,
+      volume: (Number(latest.volume) || 0) + tickVolume,
+    };
+    return [...bars.slice(0, -1), updated];
+  }
+
+  return [...bars, {
+    ts: new Date(minuteMs).toISOString(),
+    open: price,
+    high: price,
+    low: price,
+    close: price,
+    volume: tickVolume,
+  }].slice(-limit);
+}
+
 function apiErrorMessage(detail: unknown, fallback: string): string {
   if (typeof detail === "string") return detail;
   if (detail && typeof detail === "object" && "message" in detail) {
@@ -94,20 +159,23 @@ export default function AiTradingPage() {
   const [symbolsInput, setSymbolsInput] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const mainKlineSymbolRef = useRef("");
+  const lastQuoteSequenceRef = useRef("");
 
   const loadMainKline = async (symbol: string, autoSync: boolean = true) => {
     if (!symbol) return;
+    mainKlineSymbolRef.current = symbol;
+    lastQuoteSequenceRef.current = "";
+    setMainKlineSymbol(symbol);
+    setLastUpdateTime(null);
     setMainKlineLoading(true);
     try {
       const response = await fetch(`${API_BASE}/ai-trading/klines/${symbol}?period=min1&limit=200`);
       if (response.ok) {
         const data = await response.json();
         setMainKlineData(data.klines || []);
-        setMainKlineSymbol(symbol);
-        setLastUpdateTime(new Date());
       } else if (response.status === 404 && autoSync) {
         setMainKlineData([]);
-        setMainKlineSymbol(symbol);
         const syncResponse = await fetch(`${API_BASE}/quotes/history/sync`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -172,17 +240,36 @@ export default function AiTradingPage() {
 
   useEffect(() => {
     loadAll();
-    const wsUrl = API_BASE.replace(/^http/, "ws") + "/ws/ai-trading";
-    const ws = new WebSocket(wsUrl);
+    const quotesWs = new WebSocket(resolveWsUrl("/ws/quotes"));
 
-    ws.onmessage = (event) => {
+    quotesWs.onmessage = (event) => {
       try {
-        const message = JSON.parse(event.data);
-        if (message.type === "ai_analysis") {
-          setLastUpdateTime(new Date());
+        const quote = JSON.parse(event.data) as RealtimeQuote;
+        const selectedSymbol = mainKlineSymbolRef.current;
+        if (
+          quote.type !== "quote"
+          || !quote.symbol
+          || !selectedSymbol
+          || comparableSymbol(quote.symbol) !== comparableSymbol(selectedSymbol)
+        ) {
+          return;
         }
+
+        const sequenceKey = quote.sequence == null
+          ? ""
+          : `${comparableSymbol(quote.symbol)}:${quote.sequence}`;
+        if (sequenceKey && sequenceKey === lastQuoteSequenceRef.current) return;
+        lastQuoteSequenceRef.current = sequenceKey;
+
+        setMainKlineData((previous) => mergeRealtimeQuote(previous, quote));
+        const rawTimestamp = Number(quote.timestamp);
+        setLastUpdateTime(new Date(
+          Number.isFinite(rawTimestamp)
+            ? rawTimestamp * (rawTimestamp < 1_000_000_000_000 ? 1000 : 1)
+            : Date.now(),
+        ));
       } catch (e) {
-        console.error("Failed to parse WebSocket message:", e);
+        console.error("Failed to parse quote WebSocket message:", e);
       }
     };
 
@@ -192,11 +279,11 @@ export default function AiTradingPage() {
     }, 60000);
 
     return () => {
-      ws.onopen = null;
-      ws.onmessage = null;
-      ws.onerror = null;
-      ws.onclose = null;
-      ws.close();
+      quotesWs.onopen = null;
+      quotesWs.onmessage = null;
+      quotesWs.onerror = null;
+      quotesWs.onclose = null;
+      quotesWs.close();
       clearInterval(interval);
     };
   }, []);
@@ -510,7 +597,12 @@ export default function AiTradingPage() {
               }
             />
             {lastUpdateTime && (
-              <p className="text-xs text-slate-500 mb-4">📡 实时推送 • 最后更新: {lastUpdateTime.toLocaleTimeString()}</p>
+              <p className="text-xs text-slate-500 mb-4">
+                📡 行情推送: {lastUpdateTime.toLocaleTimeString()}
+                {mainKlineData.length > 0 && (
+                  <> • 最新K线: {new Date(mainKlineData[mainKlineData.length - 1].ts).toLocaleString()}</>
+                )}
+              </p>
             )}
 
             {mainKlineLoading ? (

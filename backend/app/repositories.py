@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from typing import Dict, Iterable, List, Optional, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import get_settings
 from .db import get_connection
@@ -218,8 +219,6 @@ def fetch_bars_from_ticks(symbol: str, limit: int) -> List[Dict[str, Optional[fl
         cutoff = None
         if max_row and max_row[0]:
             try:
-                from datetime import timedelta
-
                 cutoff = max_row[0] - timedelta(days=3)
             except Exception:
                 cutoff = None
@@ -233,11 +232,21 @@ def fetch_bars_from_ticks(symbol: str, limit: int) -> List[Dict[str, Optional[fl
 
         rows = conn.execute(
             f"""
-            WITH base AS (
-                SELECT ts, price,
-                       COALESCE(current_volume, volume, 0) AS vol
+            WITH raw AS (
+                SELECT ts, price, volume, current_volume,
+                       lag(volume) OVER (ORDER BY ts) AS previous_volume
                 FROM ticks
                 WHERE symbol = ? AND price IS NOT NULL{filter_sql}
+            ),
+            base AS (
+                SELECT ts, price,
+                       CASE
+                           WHEN current_volume IS NOT NULL THEN greatest(current_volume, 0)
+                           WHEN volume IS NOT NULL AND previous_volume IS NOT NULL
+                               THEN greatest(volume - previous_volume, 0)
+                           ELSE 0
+                       END AS vol
+                FROM raw
             ),
             g AS (
                 SELECT date_trunc('minute', ts) AS t,
@@ -263,9 +272,9 @@ def fetch_bars_from_ticks(symbol: str, limit: int) -> List[Dict[str, Optional[fl
             params,
         ).fetchall()
 
-    return [
+    bars = [
         {
-            "ts": row[0],
+            "ts": _tick_timestamp_in_market_timezone(symbol, row[0]),
             "open": row[1],
             "high": row[2],
             "low": row[3],
@@ -275,6 +284,28 @@ def fetch_bars_from_ticks(symbol: str, limit: int) -> List[Dict[str, Optional[fl
         }
         for row in rows
     ]
+    bars.reverse()
+    return bars
+
+
+def _tick_timestamp_in_market_timezone(symbol: str, timestamp: datetime) -> datetime:
+    """Convert UTC tick storage into the exchange-local timestamps used by OHLC."""
+    if not isinstance(timestamp, datetime):
+        return timestamp
+
+    utc_timestamp = timestamp.replace(tzinfo=timezone.utc) if timestamp.tzinfo is None else timestamp.astimezone(timezone.utc)
+    upper_symbol = symbol.upper()
+    if upper_symbol.endswith((".HK", ".SH", ".SZ")):
+        market_timezone = timezone(timedelta(hours=8))
+    elif upper_symbol.endswith(".US"):
+        try:
+            market_timezone = ZoneInfo("America/New_York")
+        except ZoneInfoNotFoundError:  # pragma: no cover - platform dependent
+            market_timezone = timezone(timedelta(hours=-5))
+    else:
+        market_timezone = timezone.utc
+
+    return utc_timestamp.astimezone(market_timezone).replace(tzinfo=None)
 
 
 def save_positions(positions: Sequence[Dict[str, float]]) -> None:

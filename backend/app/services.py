@@ -5,7 +5,8 @@ import copy
 import threading
 import time
 from contextlib import contextmanager
-from typing import Dict, Iterable, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, List, Optional
 
 from fastapi import HTTPException
 
@@ -192,34 +193,56 @@ def _fetch_candlesticks_from_db(symbol: str, period: str, limit: int) -> List[Di
     ]
 
 
+def _bar_timestamp(bar: Dict[str, Any]) -> Optional[datetime]:
+    timestamp = bar.get("ts")
+    if isinstance(timestamp, datetime):
+        parsed = timestamp
+    elif isinstance(timestamp, str):
+        try:
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _merge_minute_bars(
+    historical_bars: List[Dict[str, Any]],
+    tick_bars: List[Dict[str, Any]],
+    limit: int,
+) -> List[Dict[str, Any]]:
+    """Merge cached minute candles with newer tick-derived candles chronologically."""
+    merged: Dict[datetime, Dict[str, Any]] = {}
+    for bar in [*historical_bars, *tick_bars]:
+        timestamp = _bar_timestamp(bar)
+        if timestamp is not None:
+            merged[timestamp] = bar
+    return [bar for _, bar in sorted(merged.items())][-limit:]
+
+
 def get_cached_candlesticks(symbol: str, period: str = "day", limit: int = 200) -> List[Dict[str, float]]:
     if limit <= 0:
         raise ValueError("limit 必须大于 0")
 
     if _repo_fetch_candlesticks is not None:
         bars = _repo_fetch_candlesticks(symbol, period, limit)
-        if bars:
-            return bars
-        # Tick aggregation produces one-minute bars and must not be mislabeled
-        # as a different requested period.
-        if period.lower() == "min1":
-            tick_bars = fetch_bars_from_ticks(symbol, min(limit, 500))
-            if tick_bars:
-                return tick_bars
-        return []
+    else:
+        global _candlestick_fallback_warned
+        if not _candlestick_fallback_warned:
+            logger.warning("fetch_candlesticks not exported by app.repositories; using direct DuckDB fallback")
+            _candlestick_fallback_warned = True
+        bars = _fetch_candlesticks_from_db(symbol, period, limit)
 
-    global _candlestick_fallback_warned
-    if not _candlestick_fallback_warned:
-        logger.warning("fetch_candlesticks not exported by app.repositories; using direct DuckDB fallback")
-        _candlestick_fallback_warned = True
-    bars = _fetch_candlesticks_from_db(symbol, period, limit)
-    if bars:
-        return bars
+    # Tick aggregation is specifically one-minute data. Merge it even when
+    # historical OHLC exists so the current trading day is not omitted.
     if period.lower() == "min1":
         tick_bars = fetch_bars_from_ticks(symbol, min(limit, 500))
-        if tick_bars:
-            return tick_bars
-    return []
+        return _merge_minute_bars(bars, tick_bars, limit)
+    return bars
 
 
 def _build_longport_config(creds: Dict[str, str]):

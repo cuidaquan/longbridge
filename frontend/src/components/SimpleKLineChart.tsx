@@ -68,7 +68,7 @@ export default function SimpleKLineChart({
     const padding = priceRange * 0.1;
 
     // Scale functions
-    const xScale = (index: number) => margin.left + (index * chartWidth) / (data.length - 1);
+    const xScale = (index: number) => margin.left + (index * chartWidth) / Math.max(1, data.length - 1);
     const yScale = (price: number) => margin.top + ((maxPrice + padding - price) * priceHeight) / (priceRange + padding * 2);
     
     // Volume scale
@@ -119,7 +119,12 @@ export default function SimpleKLineChart({
     ctx.strokeStyle = '#e5e7eb';
     ctx.lineWidth = 1;
     const timeStep = Math.max(1, Math.floor(data.length / 8));
-    for (let i = 0; i < data.length; i += timeStep) {
+    const timeLabelIndices: number[] = [];
+    for (let i = 0; i < data.length; i += timeStep) timeLabelIndices.push(i);
+    if (timeLabelIndices[timeLabelIndices.length - 1] !== data.length - 1) {
+      timeLabelIndices.push(data.length - 1);
+    }
+    for (const i of timeLabelIndices) {
       const x = xScale(i);
       ctx.beginPath();
       ctx.moveTo(x, margin.top);
@@ -129,11 +134,9 @@ export default function SimpleKLineChart({
       // Time labels - 智能显示日期或时间
       const date = new Date(data[i].time);
       
-      // 判断是日线还是分时数据
-      const isIntraday = i > 0 && (() => {
+      const startsNewTradingDay = i > 0 && (() => {
         const prevDate = new Date(data[i - 1].time);
-        const timeDiff = Math.abs(date.getTime() - prevDate.getTime());
-        return timeDiff < 24 * 60 * 60 * 1000; // 小于1天为分时
+        return date.toDateString() !== prevDate.toDateString();
       })();
       
       ctx.fillStyle = '#6b7280';
@@ -141,11 +144,9 @@ export default function SimpleKLineChart({
       ctx.textAlign = 'center';
       
       let timeStr: string;
-      if (i === 0 || !isIntraday) {
-        // 日线数据：显示月/日
+      if (i === 0 || startsNewTradingDay) {
         timeStr = `${date.getMonth() + 1}/${date.getDate()}`;
       } else {
-        // 分时数据：显示时:分
         timeStr = date.toLocaleTimeString('zh-CN', {
           hour: '2-digit',
           minute: '2-digit'

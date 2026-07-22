@@ -382,14 +382,6 @@ class QuoteStreamManager:
 
     # ------------------------------------------------------------------
     def _normalize_quote(self, symbol: str, event: Any) -> Dict[str, Any]:
-        # Normalize symbol format (e.g., "5.HK" -> "0005.HK")
-        normalized_symbol = symbol
-        if symbol.endswith(".HK"):
-            parts = symbol.split(".")
-            if parts[0].isdigit():
-                # Pad with zeros to make it 4 digits for HK stocks
-                normalized_symbol = f"{int(parts[0]):04d}.HK"
-
         sequence = getattr(event, "sequence", None)
         timestamp = getattr(event, "timestamp", None)
         ts_iso: Optional[str] = None
@@ -430,7 +422,10 @@ class QuoteStreamManager:
 
         data = {
             "type": "quote",
-            "symbol": normalized_symbol,
+            # Keep the exact subscription symbol. Longbridge accepts compact HK
+            # codes such as 700.HK; padding them here made the pushed symbol
+            # (0700.HK) differ from the configured/chart symbol (700.HK).
+            "symbol": symbol,
             "sequence": sequence,
             "last_done": last_done,
             "prev_close": prev_close,
