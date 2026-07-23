@@ -237,11 +237,8 @@ export async function analyzeStocks(data?: {
   force_refresh?: boolean;
 }): Promise<{
   success: boolean;
-  result: {
-    total: number;
-    success: number;
-    failed: number;
-  };
+  job_id: string;
+  status: 'queued';
   message: string;
 }> {
   const response = await fetch(`${API_BASE}/api/stock-picker/analyze`, {

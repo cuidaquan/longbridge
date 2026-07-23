@@ -63,7 +63,7 @@ export default function StockPicker() {
     current: '',
     total: 0,
     completed: 0,
-    status: 'idle' as 'idle' | 'running' | 'completed',
+    status: 'idle' as 'idle' | 'queued' | 'running' | 'completed' | 'error',
   });
 
   const loadPools = async () => {
@@ -95,32 +95,7 @@ export default function StockPicker() {
     setError(null);
     setAnalysisLogs([]);
     setShowLogs(true);
-    setAnalysisProgress({ current: '', total: 0, completed: 0, status: 'idle' });
-
-    const eventSource = new EventSource(`${API_BASE}/api/stock-picker/analysis/progress`);
-
-    eventSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        setAnalysisProgress({
-          current: data.current || '',
-          total: data.total || 0,
-          completed: data.completed || 0,
-          status: data.status || 'idle',
-        });
-        if (data.logs && data.logs.length > 0) {
-          setAnalysisLogs(data.logs.map((log: any) => log.message));
-        }
-        if (data.status === 'completed') {
-          eventSource.close();
-          loadAnalysis();
-        }
-      } catch (e) {
-        console.error('解析进度数据失败:', e);
-      }
-    };
-
-    eventSource.onerror = () => eventSource.close();
+    setAnalysisProgress({ current: '', total: 0, completed: 0, status: 'queued' });
 
     try {
       const result = await analyzeStocks({
@@ -128,11 +103,48 @@ export default function StockPicker() {
         force_refresh: forceRefresh,
       });
       setSuccess(result.message);
-      setTimeout(() => loadAnalysis(), 2000);
+
+      const eventSource = new EventSource(
+        `${API_BASE}/api/stock-picker/analysis/progress/${result.job_id}`,
+      );
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          setAnalysisProgress({
+            current: data.current || '',
+            total: data.total || 0,
+            completed: data.completed || 0,
+            status: data.status || 'queued',
+          });
+          if (data.logs && data.logs.length > 0) {
+            setAnalysisLogs(data.logs.map((log: { message: string }) => log.message));
+          }
+          if (data.status === 'completed') {
+            eventSource.close();
+            const summary = data.result;
+            setSuccess(
+              summary
+                ? `分析完成：成功 ${summary.success}，跳过 ${summary.skipped}，失败 ${summary.failed}`
+                : '分析完成',
+            );
+            setAnalyzing(false);
+            loadAnalysis();
+          } else if (data.status === 'error') {
+            eventSource.close();
+            setError(data.error || '分析任务失败');
+            setAnalyzing(false);
+          }
+        } catch (e) {
+          console.error('解析进度数据失败:', e);
+        }
+      };
+      eventSource.onerror = () => {
+        eventSource.close();
+        setError('分析进度连接已断开');
+        setAnalyzing(false);
+      };
     } catch (err) {
       setError(err instanceof Error ? err.message : '分析失败');
-      eventSource.close();
-    } finally {
       setAnalyzing(false);
     }
   };

@@ -1,13 +1,15 @@
 """
 选股系统 API 路由
 """
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, AsyncGenerator
+from datetime import datetime, timedelta, timezone
 import logging
 import json
 import asyncio
+from uuid import uuid4
 
 from ..stock_picker import get_stock_picker_service
 from ..exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
@@ -18,14 +20,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/stock-picker", tags=["stock-picker"])
 
-# 全局进度状态
-analysis_progress = {
-    'current': None,
-    'total': 0,
-    'completed': 0,
-    'status': 'idle',  # idle, running, completed
-    'logs': []
-}
+ANALYSIS_JOB_TTL = timedelta(hours=1)
+MAX_ANALYSIS_JOBS = 100
+analysis_jobs = {}
 
 
 # ========== 请求/响应模型 ==========
@@ -46,6 +43,114 @@ class BatchAddStocksRequest(BaseModel):
 class AnalyzeRequest(BaseModel):
     pool_type: Optional[str] = None  # LONG/SHORT/None(全部)
     force_refresh: bool = False
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _prune_analysis_jobs() -> None:
+    """Remove expired terminal jobs and cap retained job history."""
+    cutoff = _utc_now() - ANALYSIS_JOB_TTL
+    expired = [
+        job_id
+        for job_id, job in analysis_jobs.items()
+        if job['updated_at'] < cutoff
+    ]
+    for job_id in expired:
+        del analysis_jobs[job_id]
+
+    if len(analysis_jobs) < MAX_ANALYSIS_JOBS:
+        return
+    terminal_jobs = sorted(
+        (
+            (job['updated_at'], job_id)
+            for job_id, job in analysis_jobs.items()
+            if job['status'] in {'completed', 'error'}
+        ),
+    )
+    for _, job_id in terminal_jobs[:len(analysis_jobs) - MAX_ANALYSIS_JOBS + 1]:
+        del analysis_jobs[job_id]
+
+
+def _create_analysis_job(pool_type: Optional[str], force_refresh: bool) -> str:
+    _prune_analysis_jobs()
+    if len(analysis_jobs) >= MAX_ANALYSIS_JOBS:
+        raise HTTPException(
+            status_code=429,
+            detail="当前分析任务过多，请稍后重试",
+        )
+    job_id = uuid4().hex
+    now = _utc_now()
+    analysis_jobs[job_id] = {
+        'job_id': job_id,
+        'pool_type': pool_type,
+        'force_refresh': force_refresh,
+        'current': None,
+        'total': 0,
+        'completed': 0,
+        'status': 'queued',
+        'logs': [],
+        'result': None,
+        'error': None,
+        'created_at': now,
+        'updated_at': now,
+    }
+    return job_id
+
+
+def _append_job_log(job: dict, message: str) -> None:
+    job['logs'].append({
+        'time': _utc_now().isoformat(),
+        'message': message,
+    })
+    if len(job['logs']) > 50:
+        job['logs'] = job['logs'][-50:]
+    job['updated_at'] = _utc_now()
+
+
+async def _run_analysis_job(
+    job_id: str,
+    pool_type: Optional[str],
+    force_refresh: bool,
+) -> None:
+    job = analysis_jobs.get(job_id)
+    if job is None:
+        return
+    service = get_stock_picker_service()
+
+    def update_progress(data: dict) -> None:
+        current_job = analysis_jobs.get(job_id)
+        if current_job is None:
+            return
+        for field in ('status', 'total', 'completed', 'current'):
+            if field in data:
+                if field == 'status' and data[field] in {'completed', 'error'}:
+                    # The runner publishes terminal status only after result/error
+                    # has been attached, so SSE cannot close on a partial payload.
+                    continue
+                current_job[field] = data[field]
+        if 'log' in data:
+            _append_job_log(current_job, data['log'])
+        else:
+            current_job['updated_at'] = _utc_now()
+
+    try:
+        job['status'] = 'running'
+        job['updated_at'] = _utc_now()
+        result = await service.analyze_pool(
+            pool_type=pool_type,
+            force_refresh=force_refresh,
+            progress_callback=update_progress,
+        )
+        job['result'] = result
+        job['status'] = 'completed'
+        job['updated_at'] = _utc_now()
+    except Exception as exc:
+        job['status'] = 'error'
+        job['error'] = str(exc)
+        _append_job_log(job, f'❌ 错误: {exc}')
+        logger.error("批量分析任务失败: job_id=%s", job_id, exc_info=True)
 
 
 # ========== API 端点 ==========
@@ -186,8 +291,11 @@ async def toggle_stock(pool_id: int):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/analyze")
-async def analyze_pools(request: AnalyzeRequest):
+@router.post("/analyze", status_code=202)
+async def analyze_pools(
+    request: AnalyzeRequest,
+    background_tasks: BackgroundTasks,
+):
     """
     触发批量分析
     
@@ -195,83 +303,70 @@ async def analyze_pools(request: AnalyzeRequest):
         pool_type: LONG | SHORT | None(全部)
         force_refresh: 是否强制刷新缓存
     """
-    try:
-        service = get_stock_picker_service()
-        
-        logger.info(f"开始分析: pool_type={request.pool_type}, force={request.force_refresh}")
-        
-        # 重置进度状态
-        analysis_progress['status'] = 'idle'
-        analysis_progress['total'] = 0
-        analysis_progress['completed'] = 0
-        analysis_progress['current'] = None
-        analysis_progress['logs'] = []
-        
-        # 定义进度回调
-        def update_progress(data: dict):
-            if 'status' in data:
-                analysis_progress['status'] = data['status']
-            if 'total' in data:
-                analysis_progress['total'] = data['total']
-            if 'completed' in data:
-                analysis_progress['completed'] = data['completed']
-            if 'current' in data:
-                analysis_progress['current'] = data['current']
-            if 'log' in data:
-                analysis_progress['logs'].append({
-                    'time': asyncio.get_event_loop().time(),
-                    'message': data['log']
-                })
-                # 保持最近50条日志
-                if len(analysis_progress['logs']) > 50:
-                    analysis_progress['logs'] = analysis_progress['logs'][-50:]
-        
-        result = await service.analyze_pool(
-            pool_type=request.pool_type,
-            force_refresh=request.force_refresh,
-            progress_callback=update_progress
-        )
-        
-        return {
-            "success": True,
-            "result": result,
-            "message": f"分析完成: 总计{result['total']}只, 成功{result['success']}只"
-        }
-    except Exception as e:
-        analysis_progress['status'] = 'error'
-        analysis_progress['logs'].append({
-            'time': asyncio.get_event_loop().time(),
-            'message': f'❌ 错误: {str(e)}'
-        })
-        logger.error(f"批量分析失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+    job_id = _create_analysis_job(request.pool_type, request.force_refresh)
+    logger.info(
+        "创建分析任务: job_id=%s, pool_type=%s, force=%s",
+        job_id,
+        request.pool_type,
+        request.force_refresh,
+    )
+    background_tasks.add_task(
+        _run_analysis_job,
+        job_id,
+        request.pool_type,
+        request.force_refresh,
+    )
+    return {
+        "success": True,
+        "job_id": job_id,
+        "status": "queued",
+        "message": "分析任务已创建",
+    }
 
 
-@router.get("/analysis/progress")
-async def get_analysis_progress():
+@router.get("/analysis/progress/{job_id}")
+async def get_analysis_progress(job_id: str):
     """
     获取实时分析进度 (SSE)
     """
+    _prune_analysis_jobs()
+    if job_id not in analysis_jobs:
+        raise HTTPException(status_code=404, detail="分析任务不存在或已过期")
+
     async def event_generator() -> AsyncGenerator[str, None]:
         """生成SSE事件"""
         try:
             while True:
-                # 发送当前进度
+                job = analysis_jobs.get(job_id)
+                if job is None:
+                    yield (
+                        "data: "
+                        + json.dumps({
+                            'job_id': job_id,
+                            'status': 'error',
+                            'error': '分析任务已过期',
+                            'logs': [],
+                        }, ensure_ascii=False)
+                        + "\n\n"
+                    )
+                    break
                 progress_data = {
-                    'current': analysis_progress['current'],
-                    'total': analysis_progress['total'],
-                    'completed': analysis_progress['completed'],
-                    'status': analysis_progress['status'],
-                    'logs': analysis_progress['logs'][-10:]  # 最后10条日志
+                    'job_id': job_id,
+                    'current': job['current'],
+                    'total': job['total'],
+                    'completed': job['completed'],
+                    'status': job['status'],
+                    'logs': job['logs'][-10:],
+                    'result': job['result'],
+                    'error': job['error'],
                 }
                 
                 yield f"data: {json.dumps(progress_data, ensure_ascii=False)}\n\n"
                 
-                # 如果已完成，停止推送
-                if analysis_progress['status'] == 'completed':
+                if job['status'] in {'completed', 'error'}:
                     break
                 
-                await asyncio.sleep(0.5)  # 每0.5秒推送一次
+                await asyncio.sleep(0.5)
         except asyncio.CancelledError:
             pass
     

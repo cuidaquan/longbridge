@@ -4,7 +4,12 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from fastapi import BackgroundTasks, HTTPException
+from fastapi.testclient import TestClient
+
 from app.ai_analyzer import DeepSeekAnalyzer, calculate_technical_indicators
+from app.main import app
+from app.routers import stock_picker as stock_picker_router
 from app.routers.stock_picker import get_pools as get_pools_route
 from app.stock_picker import StockPickerService
 
@@ -137,6 +142,164 @@ class StockPickerPersistenceTest(unittest.TestCase):
             12.0,
         )
         self.assertEqual(result["long_analysis"][0]["name"], "Test")
+
+
+class StockPickerJobIsolationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        stock_picker_router.analysis_jobs.clear()
+
+    def tearDown(self) -> None:
+        stock_picker_router.analysis_jobs.clear()
+
+    def test_analyze_endpoint_returns_unique_queued_jobs(self) -> None:
+        first_background = BackgroundTasks()
+        second_background = BackgroundTasks()
+
+        first = asyncio.run(
+            stock_picker_router.analyze_pools(
+                stock_picker_router.AnalyzeRequest(pool_type="LONG"),
+                first_background,
+            )
+        )
+        second = asyncio.run(
+            stock_picker_router.analyze_pools(
+                stock_picker_router.AnalyzeRequest(pool_type="SHORT"),
+                second_background,
+            )
+        )
+
+        self.assertNotEqual(first["job_id"], second["job_id"])
+        self.assertEqual(first["status"], "queued")
+        self.assertEqual(second["status"], "queued")
+        self.assertEqual(len(first_background.tasks), 1)
+        self.assertEqual(len(second_background.tasks), 1)
+        self.assertEqual(
+            stock_picker_router.analysis_jobs[first["job_id"]]["pool_type"],
+            "LONG",
+        )
+        self.assertEqual(
+            stock_picker_router.analysis_jobs[second["job_id"]]["pool_type"],
+            "SHORT",
+        )
+
+    def test_job_runner_only_updates_its_own_progress(self) -> None:
+        first_job_id = stock_picker_router._create_analysis_job("LONG", False)
+        second_job_id = stock_picker_router._create_analysis_job("SHORT", False)
+        service = MagicMock()
+
+        async def analyze_pool(pool_type, force_refresh, progress_callback):
+            progress_callback({
+                "status": "running",
+                "total": 2,
+                "completed": 1,
+                "current": "AAA.US",
+                "log": "first update",
+            })
+            await asyncio.sleep(0)
+            return {"total": 2, "success": 2, "skipped": 0, "failed": 0}
+
+        service.analyze_pool = AsyncMock(side_effect=analyze_pool)
+        with patch(
+            "app.routers.stock_picker.get_stock_picker_service",
+            return_value=service,
+        ):
+            asyncio.run(
+                stock_picker_router._run_analysis_job(
+                    first_job_id,
+                    "LONG",
+                    False,
+                )
+            )
+
+        first_job = stock_picker_router.analysis_jobs[first_job_id]
+        second_job = stock_picker_router.analysis_jobs[second_job_id]
+        self.assertEqual(first_job["status"], "completed")
+        self.assertEqual(first_job["current"], "AAA.US")
+        self.assertEqual(first_job["result"]["success"], 2)
+        self.assertEqual(first_job["logs"][-1]["message"], "first update")
+        self.assertEqual(second_job["status"], "queued")
+        self.assertIsNone(second_job["current"])
+        self.assertEqual(second_job["logs"], [])
+
+    def test_job_runner_records_failure_without_touching_other_jobs(self) -> None:
+        failed_job_id = stock_picker_router._create_analysis_job("LONG", False)
+        other_job_id = stock_picker_router._create_analysis_job("SHORT", False)
+        service = MagicMock()
+        service.analyze_pool = AsyncMock(side_effect=RuntimeError("temporary outage"))
+
+        with patch(
+            "app.routers.stock_picker.get_stock_picker_service",
+            return_value=service,
+        ):
+            asyncio.run(
+                stock_picker_router._run_analysis_job(
+                    failed_job_id,
+                    "LONG",
+                    False,
+                )
+            )
+
+        failed_job = stock_picker_router.analysis_jobs[failed_job_id]
+        self.assertEqual(failed_job["status"], "error")
+        self.assertEqual(failed_job["error"], "temporary outage")
+        self.assertIn("temporary outage", failed_job["logs"][-1]["message"])
+        self.assertEqual(
+            stock_picker_router.analysis_jobs[other_job_id]["status"],
+            "queued",
+        )
+
+    def test_progress_endpoint_rejects_unknown_job(self) -> None:
+        with self.assertRaises(HTTPException) as context:
+            asyncio.run(stock_picker_router.get_analysis_progress("missing"))
+
+        self.assertEqual(context.exception.status_code, 404)
+
+    def test_job_registry_rejects_more_than_active_limit(self) -> None:
+        for _ in range(stock_picker_router.MAX_ANALYSIS_JOBS):
+            stock_picker_router._create_analysis_job("LONG", False)
+
+        with self.assertRaises(HTTPException) as context:
+            stock_picker_router._create_analysis_job("LONG", False)
+
+        self.assertEqual(context.exception.status_code, 429)
+
+    def test_http_job_lifecycle_returns_isolated_sse_stream(self) -> None:
+        service = MagicMock()
+
+        async def analyze_pool(pool_type, force_refresh, progress_callback):
+            progress_callback({
+                "status": "running",
+                "total": 1,
+                "completed": 0,
+                "current": "AAA.US",
+                "log": "working",
+            })
+            progress_callback({
+                "completed": 1,
+                "log": "done",
+            })
+            return {"total": 1, "success": 1, "skipped": 0, "failed": 0}
+
+        service.analyze_pool = AsyncMock(side_effect=analyze_pool)
+        with patch(
+            "app.routers.stock_picker.get_stock_picker_service",
+            return_value=service,
+        ):
+            client = TestClient(app)
+            response = client.post(
+                "/api/stock-picker/analyze",
+                json={"pool_type": "LONG", "force_refresh": False},
+            )
+
+        self.assertEqual(response.status_code, 202)
+        job_id = response.json()["job_id"]
+        progress = TestClient(app).get(
+            f"/api/stock-picker/analysis/progress/{job_id}",
+        )
+        self.assertEqual(progress.status_code, 200)
+        self.assertIn(f'"job_id": "{job_id}"', progress.text)
+        self.assertIn('"status": "completed"', progress.text)
+        self.assertIn('"success": 1', progress.text)
 
 
 def _trend_klines(direction: int, count: int = 120) -> list[dict]:
