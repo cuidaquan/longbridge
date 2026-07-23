@@ -13,7 +13,11 @@ from fastapi.testclient import TestClient
 
 from app.ai_analyzer import DeepSeekAnalyzer, calculate_technical_indicators
 from app.db import _run_migrations
-from app.main import app, _run_stock_picker_auto_refresh_once
+from app.main import (
+    app,
+    _run_stock_picker_auto_refresh_once,
+    _run_stock_picker_factor_snapshot_once,
+)
 from app.routers import stock_picker as stock_picker_router
 from app.routers.stock_picker import get_pools as get_pools_route
 from app.stock_picker import StockPickerService
@@ -207,6 +211,8 @@ class StockPickerConfigAndSnapshotTest(unittest.TestCase):
             "ai_top_n_per_pool",
             "history_retention_days",
             "max_history_per_stock",
+            "factor_snapshot_enabled",
+            "factor_snapshot_poll_interval",
         }.issubset(config_columns))
 
         updated = self.service.update_config({
@@ -214,20 +220,26 @@ class StockPickerConfigAndSnapshotTest(unittest.TestCase):
             "ai_top_n_per_pool": 5,
             "cache_duration": 600,
             "history_retention_days": 30,
+            "factor_snapshot_enabled": True,
+            "factor_snapshot_poll_interval": 600,
         })
 
         self.assertEqual(updated["analysis_lookback"], 300)
         self.assertEqual(updated["ai_top_n_per_pool"], 5)
         self.assertEqual(updated["cache_duration"], 600)
         self.assertEqual(updated["history_retention_days"], 30)
+        self.assertTrue(updated["factor_snapshot_enabled"])
+        self.assertEqual(
+            updated["factor_snapshot_poll_interval"],
+            600,
+        )
 
     def test_config_http_contract_validates_and_persists_updates(self) -> None:
         with patch(
             "app.routers.stock_picker.get_stock_picker_service",
             return_value=self.service,
         ):
-            client = TestClient(app)
-            try:
+            with TestClient(app) as client:
                 updated = client.put(
                     "/api/stock-picker/config",
                     json={"analysis_lookback": 320, "ai_top_n_per_pool": 6},
@@ -237,8 +249,6 @@ class StockPickerConfigAndSnapshotTest(unittest.TestCase):
                     json={"unknown_setting": 1},
                 )
                 current = client.get("/api/stock-picker/config")
-            finally:
-                client.close()
 
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(updated.json()["analysis_lookback"], 320)
@@ -274,6 +284,37 @@ class StockPickerConfigAndSnapshotTest(unittest.TestCase):
         self.assertEqual(enabled, "auto-job")
         create_job.assert_called_once_with(None, False)
         run_job.assert_awaited_once_with("auto-job", None, False)
+
+    def test_factor_snapshot_config_runs_only_enabled_due_capture(
+        self,
+    ) -> None:
+        disabled = asyncio.run(
+            _run_stock_picker_factor_snapshot_once({
+                "factor_snapshot_enabled": False,
+            })
+        )
+        snapshot_service = MagicMock()
+        snapshot_service.capture_due_baseline.return_value = {
+            "captured": [],
+            "skipped": [],
+            "row_count": 0,
+        }
+        with patch(
+            "app.stock_picker_factor_snapshots."
+            "get_stock_picker_factor_snapshot_service",
+            return_value=snapshot_service,
+        ):
+            enabled = asyncio.run(
+                _run_stock_picker_factor_snapshot_once({
+                    "factor_snapshot_enabled": True,
+                })
+            )
+
+        self.assertIsNone(disabled)
+        self.assertEqual(enabled["row_count"], 0)
+        snapshot_service.capture_due_baseline.assert_called_once_with(
+            persist=True,
+        )
 
     def test_pool_capacity_and_symbol_normalization_are_enforced(self) -> None:
         self.service.update_config({"max_pool_size": 1})

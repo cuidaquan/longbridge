@@ -71,6 +71,12 @@ class StockPickerConfigUpdate(BaseModel):
     ai_top_n_per_pool: Optional[int] = Field(None, ge=0, le=100)
     history_retention_days: Optional[int] = Field(None, ge=1, le=3650)
     max_history_per_stock: Optional[int] = Field(None, ge=1, le=1000)
+    factor_snapshot_enabled: Optional[bool] = None
+    factor_snapshot_poll_interval: Optional[int] = Field(
+        None,
+        ge=300,
+        le=3600,
+    )
 
 
 class ScreenerIndexFilters(BaseModel):

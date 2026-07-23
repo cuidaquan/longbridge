@@ -186,6 +186,18 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     _ensure_column(conn, "stock_picker_config", "max_history_per_stock", "INTEGER DEFAULT 30")
     _ensure_column(
         conn,
+        "stock_picker_config",
+        "factor_snapshot_enabled",
+        "BOOLEAN DEFAULT FALSE",
+    )
+    _ensure_column(
+        conn,
+        "stock_picker_config",
+        "factor_snapshot_poll_interval",
+        "INTEGER DEFAULT 900",
+    )
+    _ensure_column(
+        conn,
         "stock_picker_factor_snapshots",
         "observation_date",
         "DATE",
@@ -425,6 +437,8 @@ CREATE TABLE IF NOT EXISTS stock_picker_config (
     ai_top_n_per_pool INTEGER DEFAULT 10,
     history_retention_days INTEGER DEFAULT 90,
     max_history_per_stock INTEGER DEFAULT 30,
+    factor_snapshot_enabled BOOLEAN DEFAULT FALSE,
+    factor_snapshot_poll_interval INTEGER DEFAULT 900,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 INSERT OR IGNORE INTO stock_picker_config (id) VALUES (1);

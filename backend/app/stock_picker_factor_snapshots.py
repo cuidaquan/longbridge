@@ -34,6 +34,7 @@ MIN_FACTOR_COVERAGE = 0.9
 MIN_DISTINCT_SYMBOLS = 10
 MAX_SNAPSHOT_AGE_HOURS = 48
 EVENT_WINDOW_DAYS = 365
+AUTO_CAPTURE_LOCAL_HOUR = 17
 MARKET_TIMEZONES = {
     "US": "America/New_York",
     "HK": "Asia/Hong_Kong",
@@ -99,6 +100,9 @@ class StockPickerFactorSnapshotService:
         fundamental_loader: Callable = get_fundamental_profiles,
         margin_loader: Callable = get_margin_requirements,
         connection_factory: Callable = get_connection,
+        clock: Callable[[], datetime] = (
+            lambda: datetime.now(timezone.utc)
+        ),
     ) -> None:
         self.index_loader = index_loader
         self.short_risk_loader = short_risk_loader
@@ -106,6 +110,7 @@ class StockPickerFactorSnapshotService:
         self.fundamental_loader = fundamental_loader
         self.margin_loader = margin_loader
         self.connection_factory = connection_factory
+        self.clock = clock
 
     def capture_baseline(
         self,
@@ -160,10 +165,14 @@ class StockPickerFactorSnapshotService:
             raise ValueError("symbols 不能为空")
         benchmark = DEFAULT_MARKET_BENCHMARKS[normalized_market]
         request_id = uuid4().hex
-        observed_at = datetime.now(timezone.utc)
+        observed_at = self._as_utc(self.clock())
         observation_date = observed_at.astimezone(
             ZoneInfo(MARKET_TIMEZONES[normalized_market])
         ).date()
+        session_phase = self._session_phase(
+            normalized_market,
+            observed_at,
+        )
         channel_status: Dict[str, Dict[str, Any]] = {}
 
         indexes = self._load_channel(
@@ -281,6 +290,7 @@ class StockPickerFactorSnapshotService:
                     }
                 ),
                 "capture": {
+                    "session_phase": session_phase,
                     "depth_requested": True,
                     "corporate_actions_requested": True,
                     "event_window_days": EVENT_WINDOW_DAYS,
@@ -307,6 +317,7 @@ class StockPickerFactorSnapshotService:
             "request_id": request_id,
             "observed_at": observed_at.isoformat(),
             "observation_date": observation_date.isoformat(),
+            "session_phase": session_phase,
             "market": normalized_market,
             "target_direction": direction,
             "benchmark_symbol": benchmark,
@@ -319,6 +330,56 @@ class StockPickerFactorSnapshotService:
             result["snapshots"] = rows
         return result
 
+    def capture_due_baseline(
+        self,
+        persist: bool = True,
+    ) -> Dict[str, Any]:
+        now = self._as_utc(self.clock())
+        captured = []
+        skipped = []
+        for market in BASELINE_UNIVERSES:
+            local_date = now.astimezone(
+                ZoneInfo(MARKET_TIMEZONES[market])
+            ).date().isoformat()
+            phase = self._session_phase(market, now)
+            for direction in ("LONG", "SHORT"):
+                if phase != "post_close":
+                    skipped.append({
+                        "market": market,
+                        "target_direction": direction,
+                        "observation_date": local_date,
+                        "reason": f"session_phase:{phase}",
+                    })
+                    continue
+                if self._has_post_close_snapshot(
+                    market,
+                    direction,
+                    local_date,
+                ):
+                    skipped.append({
+                        "market": market,
+                        "target_direction": direction,
+                        "observation_date": local_date,
+                        "reason": "already_captured",
+                    })
+                    continue
+                captured.append(self.capture_group(
+                    market,
+                    direction,
+                    BASELINE_UNIVERSES[market]["symbols"],
+                    persist=persist,
+                ))
+        return {
+            "snapshot_version": SNAPSHOT_VERSION,
+            "persisted": persist,
+            "captured": captured,
+            "skipped": skipped,
+            "row_count": sum(
+                group["row_count"]
+                for group in captured
+            ),
+        }
+
     def get_coverage(
         self,
         days: int = 365,
@@ -327,7 +388,7 @@ class StockPickerFactorSnapshotService:
         if not 1 <= int(days) <= 3650:
             raise ValueError("days 必须在 1～3650 之间")
         now = self._as_utc(
-            current_time or datetime.now(timezone.utc)
+            current_time or self.clock()
         )
         cutoff = now - timedelta(days=int(days))
         with self.connection_factory() as connection:
@@ -386,11 +447,21 @@ class StockPickerFactorSnapshotService:
                         now,
                     )
                 )
+        evaluation_rows = [
+            row
+            for row in parsed_rows
+            if (
+                (row["payload"].get("capture") or {}).get(
+                    "session_phase"
+                ) == "post_close"
+            )
+        ]
         return {
             "snapshot_version": SNAPSHOT_VERSION,
             "window_days": int(days),
             "raw_snapshot_count": len(raw_rows),
             "daily_snapshot_count": len(parsed_rows),
+            "evaluation_snapshot_count": len(evaluation_rows),
             "minimums": {
                 "observation_dates": MIN_OBSERVATION_DATES,
                 "factor_coverage": MIN_FACTOR_COVERAGE,
@@ -411,6 +482,23 @@ class StockPickerFactorSnapshotService:
         rows: List[Dict[str, Any]],
         now: datetime,
     ) -> Dict[str, Any]:
+        captured_count = len(rows)
+        phase_counts = Counter(
+            (row["payload"].get("capture") or {}).get(
+                "session_phase",
+                "unknown",
+            )
+            for row in rows
+        )
+        rows = [
+            row
+            for row in rows
+            if (
+                (row["payload"].get("capture") or {}).get(
+                    "session_phase"
+                ) == "post_close"
+            )
+        ]
         observation_dates = {
             row["observation_date"]
             for row in rows
@@ -466,6 +554,8 @@ class StockPickerFactorSnapshotService:
         return {
             "market": market,
             "target_direction": direction,
+            "captured_daily_snapshot_count": captured_count,
+            "session_phase_counts": dict(phase_counts),
             "snapshot_count": len(rows),
             "observation_dates": len(observation_dates),
             "distinct_symbols": len(symbols),
@@ -484,6 +574,32 @@ class StockPickerFactorSnapshotService:
                 )
             ),
         }
+
+    def _has_post_close_snapshot(
+        self,
+        market: str,
+        direction: str,
+        observation_date: str,
+    ) -> bool:
+        with self.connection_factory() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload
+                FROM stock_picker_factor_snapshots
+                WHERE market = ?
+                  AND target_direction = ?
+                  AND observation_date = ?
+                """,
+                [market, direction, observation_date],
+            ).fetchall()
+        return any(
+            (
+                (json.loads(row[0]).get("capture") or {}).get(
+                    "session_phase"
+                ) == "post_close"
+            )
+            for row in rows
+        )
 
     def _load_channel(
         self,
@@ -647,6 +763,20 @@ class StockPickerFactorSnapshotService:
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _session_phase(
+        market: str,
+        observed_at: datetime,
+    ) -> str:
+        local = observed_at.astimezone(
+            ZoneInfo(MARKET_TIMEZONES[market])
+        )
+        if local.weekday() >= 5:
+            return "non_trading_day"
+        if local.hour >= AUTO_CAPTURE_LOCAL_HOUR:
+            return "post_close"
+        return "intraday"
 
 
 _factor_snapshot_service: Optional[

@@ -386,6 +386,8 @@ export interface StockPickerConfig {
   ai_top_n_per_pool: number;
   history_retention_days: number;
   max_history_per_stock: number;
+  factor_snapshot_enabled: boolean;
+  factor_snapshot_poll_interval: number;
   updated_at?: string;
 }
 

@@ -207,6 +207,61 @@ async def _auto_refresh_stock_picker() -> None:
             await asyncio.sleep(30)
 
 
+async def _run_stock_picker_factor_snapshot_once(
+    config: dict,
+) -> Optional[dict]:
+    if not config["factor_snapshot_enabled"]:
+        return None
+    from .stock_picker_factor_snapshots import (
+        get_stock_picker_factor_snapshot_service,
+    )
+
+    return await asyncio.to_thread(
+        get_stock_picker_factor_snapshot_service().capture_due_baseline,
+        persist=True,
+    )
+
+
+async def _auto_capture_stock_picker_factor_snapshots() -> None:
+    """Poll for post-close market dates and capture each group once."""
+    from .stock_picker import get_stock_picker_service
+
+    await asyncio.sleep(60)
+    config_service = get_stock_picker_service()
+    while True:
+        poll_interval = 900
+        try:
+            config = await asyncio.to_thread(
+                config_service.get_config
+            )
+            poll_interval = max(
+                300,
+                min(
+                    3600,
+                    int(config["factor_snapshot_poll_interval"]),
+                ),
+            )
+            result = await _run_stock_picker_factor_snapshot_once(
+                config
+            )
+            if result is not None:
+                logger.info(
+                    "stock-picker factor snapshots: captured=%s "
+                    "skipped=%s rows=%s",
+                    len(result["captured"]),
+                    len(result["skipped"]),
+                    result["row_count"],
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "stock-picker factor snapshot capture failed: %s",
+                exc,
+            )
+        await asyncio.sleep(poll_interval)
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     logger.info("startup: entering handler")
@@ -232,6 +287,11 @@ async def on_startup() -> None:
 
     _start_background_task(_auto_refresh_stock_picker())
     logger.info("startup: stock-picker auto-refresh scheduled")
+
+    _start_background_task(
+        _auto_capture_stock_picker_factor_snapshots()
+    )
+    logger.info("startup: stock-picker factor snapshots scheduled")
     
     # Initialize AI Trading Engine (if enabled)
     ai_engine = get_ai_trading_engine()

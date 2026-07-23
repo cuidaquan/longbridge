@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.db import _run_migrations
 from app.main import app
 from app.stock_picker_factor_snapshots import (
+    AUTO_CAPTURE_LOCAL_HOUR,
     MAX_SNAPSHOT_AGE_HOURS,
     MIN_OBSERVATION_DATES,
     SNAPSHOT_VERSION,
@@ -120,6 +121,16 @@ def _service(**kwargs):
         ),
         margin_loader=kwargs.get("margin_loader", _margin),
         connection_factory=kwargs.get("connection_factory"),
+        clock=kwargs.get(
+            "clock",
+            lambda: datetime(
+                2026,
+                7,
+                23,
+                23,
+                tzinfo=timezone.utc,
+            ),
+        ),
     )
 
 
@@ -166,6 +177,7 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
             long_row["observation_date"],
             long_result["observation_date"],
         )
+        self.assertEqual(long_result["session_phase"], "post_close")
         self.assertAlmostEqual(
             long_row["payload"]["relative_strength"][
                 "market_rs_10d"
@@ -269,8 +281,13 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
             "available",
         )
         self.assertEqual(group["snapshot_count"], 2)
+        self.assertEqual(
+            group["captured_daily_snapshot_count"],
+            2,
+        )
         self.assertEqual(coverage["raw_snapshot_count"], 2)
         self.assertEqual(coverage["daily_snapshot_count"], 2)
+        self.assertEqual(coverage["evaluation_snapshot_count"], 2)
         self.assertFalse(group["ready_for_return_evaluation"])
         self.assertFalse(coverage["ready_for_return_evaluation"])
 
@@ -281,6 +298,22 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
         self.addCleanup(connection.close)
         _run_migrations(connection)
         factory = lambda: _ConnectionContext(connection)
+        intraday_service = _service(
+            connection_factory=factory,
+            clock=lambda: datetime(
+                2026,
+                7,
+                23,
+                18,
+                tzinfo=timezone.utc,
+            ),
+        )
+        intraday_service.capture_group(
+            "US",
+            "LONG",
+            ["AAA.US"],
+            persist=True,
+        )
         service = _service(connection_factory=factory)
         service.capture_group(
             "US",
@@ -303,8 +336,9 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
             and item["target_direction"] == "LONG"
         )
 
-        self.assertEqual(coverage["raw_snapshot_count"], 2)
+        self.assertEqual(coverage["raw_snapshot_count"], 3)
         self.assertEqual(coverage["daily_snapshot_count"], 1)
+        self.assertEqual(coverage["evaluation_snapshot_count"], 1)
         self.assertEqual(group["snapshot_count"], 1)
         self.assertEqual(group["observation_dates"], 1)
 
@@ -342,6 +376,9 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
                 "status": "available",
                 "short_ratio": 0.1,
                 "days_to_cover": 2,
+            },
+            "capture": {
+                "session_phase": "post_close",
             },
         }
         rows = [
@@ -409,6 +446,180 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
             incomplete["factors"]["depth"]["coverage_ready"]
         )
         self.assertFalse(incomplete["ready_for_return_evaluation"])
+
+    def test_session_phase_uses_market_local_time_and_weekends(
+        self,
+    ) -> None:
+        service = _service()
+        us_before_cutoff = datetime(
+            2026,
+            7,
+            23,
+            20,
+            59,
+            tzinfo=timezone.utc,
+        )
+        us_at_cutoff = datetime(
+            2026,
+            7,
+            23,
+            21,
+            tzinfo=timezone.utc,
+        )
+        hk_before_cutoff = datetime(
+            2026,
+            7,
+            23,
+            8,
+            59,
+            tzinfo=timezone.utc,
+        )
+        hk_at_cutoff = datetime(
+            2026,
+            7,
+            23,
+            9,
+            tzinfo=timezone.utc,
+        )
+        us_weekend = datetime(
+            2026,
+            7,
+            25,
+            23,
+            tzinfo=timezone.utc,
+        )
+
+        self.assertEqual(
+            service._session_phase("US", us_before_cutoff),
+            "intraday",
+        )
+        self.assertEqual(
+            service._session_phase("US", us_at_cutoff),
+            "post_close",
+        )
+        self.assertEqual(
+            service._session_phase("HK", hk_before_cutoff),
+            "intraday",
+        )
+        self.assertEqual(
+            service._session_phase("HK", hk_at_cutoff),
+            "post_close",
+        )
+        self.assertEqual(
+            service._session_phase("US", us_weekend),
+            "non_trading_day",
+        )
+        self.assertGreaterEqual(AUTO_CAPTURE_LOCAL_HOUR, 17)
+
+    def test_only_post_close_snapshots_pass_coverage_gate(
+        self,
+    ) -> None:
+        now = datetime(
+            2026,
+            7,
+            24,
+            tzinfo=timezone.utc,
+        )
+        phases = (
+            "post_close",
+            "intraday",
+            "non_trading_day",
+            None,
+        )
+        rows = []
+        for index, phase in enumerate(phases):
+            payload = {}
+            if phase is not None:
+                payload["capture"] = {
+                    "session_phase": phase,
+                }
+            rows.append({
+                "observed_at": now - timedelta(hours=index),
+                "observation_date": (
+                    now - timedelta(days=index)
+                ).date().isoformat(),
+                "market": "US",
+                "target_direction": "LONG",
+                "symbol": f"S{index}.US",
+                "payload": payload,
+            })
+
+        group = _service()._coverage_group(
+            "US",
+            "LONG",
+            rows,
+            now,
+        )
+
+        self.assertEqual(
+            group["captured_daily_snapshot_count"],
+            4,
+        )
+        self.assertEqual(group["snapshot_count"], 1)
+        self.assertEqual(group["observation_dates"], 1)
+        self.assertEqual(group["distinct_symbols"], 1)
+        self.assertEqual(
+            group["session_phase_counts"],
+            {
+                "post_close": 1,
+                "intraday": 1,
+                "non_trading_day": 1,
+                "unknown": 1,
+            },
+        )
+        self.assertFalse(group["ready_for_return_evaluation"])
+
+    def test_due_capture_skips_existing_and_non_post_close_groups(
+        self,
+    ) -> None:
+        connection = duckdb.connect(":memory:")
+        self.addCleanup(connection.close)
+        _run_migrations(connection)
+        factory = lambda: _ConnectionContext(connection)
+        intraday_service = _service(
+            connection_factory=factory,
+            clock=lambda: datetime(
+                2026,
+                7,
+                23,
+                18,
+                tzinfo=timezone.utc,
+            ),
+        )
+        intraday_service.capture_group(
+            "US",
+            "LONG",
+            ["AAA.US"],
+            persist=True,
+        )
+        service = _service(connection_factory=factory)
+
+        first = service.capture_due_baseline(persist=True)
+        second = service.capture_due_baseline(persist=True)
+
+        self.assertEqual(
+            [
+                (group["market"], group["target_direction"])
+                for group in first["captured"]
+            ],
+            [("US", "LONG"), ("US", "SHORT")],
+        )
+        self.assertEqual(first["row_count"], 20)
+        self.assertEqual(
+            {
+                item["reason"]
+                for item in first["skipped"]
+            },
+            {"session_phase:intraday"},
+        )
+        self.assertEqual(second["row_count"], 0)
+        self.assertIn(
+            "already_captured",
+            {
+                item["reason"]
+                for item in second["skipped"]
+            },
+        )
 
     def test_invalid_capture_scope_is_rejected(self) -> None:
         service = _service()
