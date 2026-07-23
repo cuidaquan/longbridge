@@ -278,7 +278,7 @@ class StockPickerService:
             
             # 3. 获取K线数据（从缓存读取）
             klines = get_cached_candlesticks(symbol, limit=1000)  # ⬆️ 获取1000条K线
-            if not klines or len(klines) < 20:
+            if not klines or len(klines) < 30:
                 # 无法获取K线，直接跳过此股票
                 logger.warning(f"⏭️ 跳过: {symbol} - K线数据不足({len(klines) if klines else 0}条)")
                 if progress_callback:
@@ -559,7 +559,7 @@ class StockPickerService:
         6. 波动机会（10分）- 适度波动有利于交易
         """
         if not klines or len(klines) < 30:
-            return self._empty_score_v2()
+            return self._empty_score_v2(pool_type)
         
         # 基础数据准备
         closes = np.array([k['close'] for k in klines])
@@ -572,30 +572,34 @@ class StockPickerService:
         signals = []
         
         # 1. 趋势评分（25分）
-        trend_result = self._calc_trend_score_v2(closes, highs, lows, current_price)
+        trend_result = self._calc_trend_score_v2(
+            closes, highs, lows, current_price, pool_type
+        )
         scores['trend'] = trend_result['score']
         signals.extend(trend_result['signals'])
         trend_strength = trend_result['strength']
         
         # 2. 动量评分（20分）
-        momentum_result = self._calc_momentum_score_v2(closes, volumes)
+        momentum_result = self._calc_momentum_score_v2(closes, volumes, pool_type)
         scores['momentum'] = momentum_result['score']
         signals.extend(momentum_result['signals'])
         momentum_direction = momentum_result['direction']
         
         # 3. 支撑阻力评分（15分）
-        sr_result = self._calc_support_resistance_v2(closes, highs, lows, current_price)
+        sr_result = self._calc_support_resistance_v2(
+            closes, highs, lows, current_price, pool_type
+        )
         scores['support_resistance'] = sr_result['score']
         signals.extend(sr_result['signals'])
         support_resistance = sr_result['levels']
         
         # 4. 量价配合评分（15分）
-        volume_result = self._calc_volume_price_v2(closes, volumes)
+        volume_result = self._calc_volume_price_v2(closes, volumes, pool_type)
         scores['volume'] = volume_result['score']
         signals.extend(volume_result['signals'])
         
         # 5. 形态评分（15分）
-        pattern_result = self._calc_pattern_score_v2(klines[-20:])
+        pattern_result = self._calc_pattern_score_v2(klines[-20:], pool_type)
         scores['pattern'] = pattern_result['score']
         signals.extend(pattern_result['signals'])
         
@@ -604,12 +608,8 @@ class StockPickerService:
         scores['volatility'] = volatility_result['score']
         signals.extend(volatility_result['signals'])
         
-        # 计算总分
+        # 每个分项都是当前方向的机会分，因此无论做多还是做空都直接求和。
         total_score = sum(scores.values())
-        
-        # 做空池评分调整
-        if pool_type == "SHORT":
-            total_score = self._adjust_for_short_v2(scores, trend_strength, momentum_direction)
         
         # 评级
         grade = self._get_grade_v2(total_score)
@@ -622,13 +622,22 @@ class StockPickerService:
             "trend_strength": trend_strength,
             "support_resistance": support_resistance,
             "momentum_direction": momentum_direction,
+            "opportunity_direction": pool_type,
             "current_price": current_price
         }
     
-    def _calc_trend_score_v2(self, closes, highs, lows, current_price) -> Dict:
-        """趋势评分（25分）"""
+    def _calc_trend_score_v2(
+        self,
+        closes,
+        highs,
+        lows,
+        current_price,
+        pool_type: str = "LONG"
+    ) -> Dict:
+        """计算当前交易方向的趋势机会分（25分）。"""
         score = 0
         signals = []
+        is_short = pool_type == "SHORT"
         
         # 计算多周期均线
         ma5 = np.mean(closes[-5:]) if len(closes) >= 5 else current_price
@@ -637,21 +646,38 @@ class StockPickerService:
         ma60 = np.mean(closes[-60:]) if len(closes) >= 60 else None
         
         # 1. MA排列评分（10分）
-        if ma5 > ma10 > ma20:
-            score += 8
-            signals.append("📈 完美多头排列(MA5>MA10>MA20)")
-            if ma60 and ma20 > ma60:
+        if is_short:
+            if ma5 < ma10 < ma20:
+                score += 8
+                signals.append("📉 完美空头排列(MA5<MA10<MA20)")
+                if ma60 and ma20 < ma60:
+                    score += 2
+                    signals.append("📉 长期空头确认(MA20<MA60)")
+            elif ma5 < ma10:
+                score += 5
+                signals.append("📉 短期空头(MA5<MA10)")
+            elif ma5 > ma10 > ma20:
                 score += 2
-                signals.append("📈 长期多头确认(MA20>MA60)")
-        elif ma5 > ma10:
-            score += 5
-            signals.append("📈 短期多头(MA5>MA10)")
-        elif ma5 < ma10 < ma20:
-            score += 2
-            signals.append("📉 空头排列")
+                signals.append("⚠️ 多头排列，不利做空")
+            else:
+                score += 4
+                signals.append("➡️ 均线纠缠")
         else:
-            score += 4
-            signals.append("➡️ 均线纠缠")
+            if ma5 > ma10 > ma20:
+                score += 8
+                signals.append("📈 完美多头排列(MA5>MA10>MA20)")
+                if ma60 and ma20 > ma60:
+                    score += 2
+                    signals.append("📈 长期多头确认(MA20>MA60)")
+            elif ma5 > ma10:
+                score += 5
+                signals.append("📈 短期多头(MA5>MA10)")
+            elif ma5 < ma10 < ma20:
+                score += 2
+                signals.append("⚠️ 空头排列，不利做多")
+            else:
+                score += 4
+                signals.append("➡️ 均线纠缠")
         
         # 2. 趋势强度ADX（8分）
         adx = self._calc_adx_v2(highs, lows, closes)
@@ -670,23 +696,52 @@ class StockPickerService:
         
         # 3. 价格位置（7分）
         price_vs_ma20 = (current_price - ma20) / ma20 * 100 if ma20 > 0 else 0
-        if price_vs_ma20 > 5:
-            score += 7
-            signals.append(f"💪 价格强势(+{price_vs_ma20:.1f}% vs MA20)")
-        elif price_vs_ma20 > 0:
-            score += 5
-            signals.append(f"📈 价格在MA20上方")
-        elif price_vs_ma20 > -3:
-            score += 3
-            signals.append(f"➡️ 价格接近MA20")
+        if is_short:
+            if price_vs_ma20 < -5:
+                score += 7
+                signals.append(f"💪 价格弱势({price_vs_ma20:+.1f}% vs MA20)")
+            elif price_vs_ma20 < 0:
+                score += 5
+                signals.append("📉 价格在MA20下方")
+            elif price_vs_ma20 < 3:
+                score += 3
+                signals.append("➡️ 价格接近MA20")
+            else:
+                score += 1
+                signals.append(f"⚠️ 价格偏强(+{price_vs_ma20:.1f}% vs MA20)")
         else:
-            score += 1
-            signals.append(f"📉 价格弱势({price_vs_ma20:+.1f}%)")
+            if price_vs_ma20 > 5:
+                score += 7
+                signals.append(f"💪 价格强势(+{price_vs_ma20:.1f}% vs MA20)")
+            elif price_vs_ma20 > 0:
+                score += 5
+                signals.append("📈 价格在MA20上方")
+            elif price_vs_ma20 > -3:
+                score += 3
+                signals.append("➡️ 价格接近MA20")
+            else:
+                score += 1
+                signals.append(f"📉 价格弱势({price_vs_ma20:+.1f}%)")
         
-        # 趋势强度
-        trend_strength = min(1.0, max(0.0, (adx / 50) * (1 + price_vs_ma20 / 20)))
+        if ma5 > ma10 and current_price > ma20:
+            trend_direction = "bullish"
+        elif ma5 < ma10 and current_price < ma20:
+            trend_direction = "bearish"
+        else:
+            trend_direction = "neutral"
+
+        expected_direction = "bearish" if is_short else "bullish"
+        alignment = 1.0 if trend_direction == expected_direction else 0.5 if trend_direction == "neutral" else 0.25
+        favorable_distance = -price_vs_ma20 if is_short else price_vs_ma20
+        distance_factor = 1 + min(20, max(-10, favorable_distance)) / 20
+        trend_strength = min(1.0, max(0.0, (adx / 50) * alignment * distance_factor))
         
-        return {"score": score, "signals": signals, "strength": round(trend_strength, 2)}
+        return {
+            "score": score,
+            "signals": signals,
+            "strength": round(trend_strength, 2),
+            "direction": trend_direction,
+        }
     
     def _calc_adx_v2(self, highs, lows, closes, period=14) -> float:
         """计算ADX"""
@@ -712,66 +767,121 @@ class StockPickerService:
         except:
             return 20.0
     
-    def _calc_momentum_score_v2(self, closes, volumes) -> Dict:
-        """动量评分（20分）"""
+    def _calc_momentum_score_v2(
+        self,
+        closes,
+        volumes,
+        pool_type: str = "LONG"
+    ) -> Dict:
+        """计算当前交易方向的动量机会分（20分）。"""
         score = 0
         signals = []
-        direction = "neutral"
+        is_short = pool_type == "SHORT"
         
         # 1. RSI评分（8分）
         rsi = self._calc_rsi_v2(closes)
-        if 40 <= rsi <= 60:
-            score += 8
-            signals.append(f"✅ RSI健康({rsi:.1f})")
-        elif 30 <= rsi < 40:
-            score += 7
-            signals.append(f"🟢 RSI超卖反弹区({rsi:.1f})")
-            direction = "bullish"
-        elif 60 < rsi <= 70:
-            score += 5
-            signals.append(f"⚠️ RSI偏高({rsi:.1f})")
-        elif 20 <= rsi < 30:
-            score += 6
-            signals.append(f"🟢 RSI深度超卖({rsi:.1f})")
-            direction = "bullish"
-        elif 70 < rsi:
-            score += 3
-            signals.append(f"🔴 RSI超买({rsi:.1f})")
-            direction = "bearish"
+        if is_short:
+            if 40 <= rsi <= 60:
+                score += 8
+                signals.append(f"✅ RSI做空区间({rsi:.1f})")
+            elif 60 < rsi <= 70:
+                score += 7
+                signals.append(f"🟠 RSI高位回落区({rsi:.1f})")
+            elif rsi > 70:
+                score += 6
+                signals.append(f"⚠️ RSI超买，注意逼空风险({rsi:.1f})")
+            elif 30 <= rsi < 40:
+                score += 5
+                signals.append(f"📉 RSI偏弱({rsi:.1f})")
+            elif 20 <= rsi < 30:
+                score += 3
+                signals.append(f"⚠️ RSI接近超卖({rsi:.1f})")
+            else:
+                score += 2
+                signals.append(f"🔴 RSI深度超卖，不宜追空({rsi:.1f})")
         else:
-            score += 2
+            if 40 <= rsi <= 60:
+                score += 8
+                signals.append(f"✅ RSI健康({rsi:.1f})")
+            elif 30 <= rsi < 40:
+                score += 7
+                signals.append(f"🟢 RSI超卖反弹区({rsi:.1f})")
+            elif 60 < rsi <= 70:
+                score += 5
+                signals.append(f"⚠️ RSI偏高({rsi:.1f})")
+            elif 20 <= rsi < 30:
+                score += 6
+                signals.append(f"🟢 RSI深度超卖({rsi:.1f})")
+            elif rsi > 70:
+                score += 3
+                signals.append(f"🔴 RSI超买({rsi:.1f})")
+            else:
+                score += 2
         
         # 2. MACD评分（8分）
         macd, signal, hist = self._calc_macd_v2(closes)
-        if macd > signal and hist > 0:
-            score += 8 if hist > abs(np.mean(hist) if isinstance(hist, np.ndarray) else hist) * 0.5 else 6
-            signals.append("📈 MACD金叉")
-            if direction != "bearish":
-                direction = "bullish"
-        elif macd < signal and hist < 0:
-            score += 2
-            signals.append("📉 MACD死叉")
-            direction = "bearish"
-        elif macd > signal:
-            score += 5
-            signals.append("➡️ MACD收敛向上")
+        if is_short:
+            if macd < signal and hist < 0:
+                score += 8
+                signals.append("📉 MACD死叉")
+            elif macd > signal and hist > 0:
+                score += 2
+                signals.append("⚠️ MACD金叉，不利做空")
+            elif macd < signal:
+                score += 5
+                signals.append("➡️ MACD收敛向下")
+            else:
+                score += 4
         else:
-            score += 4
+            if macd > signal and hist > 0:
+                score += 8
+                signals.append("📈 MACD金叉")
+            elif macd < signal and hist < 0:
+                score += 2
+                signals.append("📉 MACD死叉")
+            elif macd > signal:
+                score += 5
+                signals.append("➡️ MACD收敛向上")
+            else:
+                score += 4
         
         # 3. 价格动量（4分）
+        momentum = 0.0
         if len(closes) >= 6:
             momentum = (closes[-1] / closes[-6] - 1) * 100
-            if momentum > 5:
-                score += 4
-                signals.append(f"🚀 5日动量强劲(+{momentum:.1f}%)")
-            elif momentum > 2:
-                score += 3
-                signals.append(f"📈 5日动量向上(+{momentum:.1f}%)")
-            elif momentum > -2:
-                score += 2
+            if is_short:
+                if momentum < -5:
+                    score += 4
+                    signals.append(f"📉 5日下跌动量强劲({momentum:+.1f}%)")
+                elif momentum < -2:
+                    score += 3
+                    signals.append(f"📉 5日动量向下({momentum:+.1f}%)")
+                elif momentum < 2:
+                    score += 2
+                else:
+                    score += 1
+                    signals.append(f"⚠️ 5日动量上涨(+{momentum:.1f}%)")
             else:
-                score += 1
-                signals.append(f"📉 5日动量下跌({momentum:+.1f}%)")
+                if momentum > 5:
+                    score += 4
+                    signals.append(f"🚀 5日动量强劲(+{momentum:.1f}%)")
+                elif momentum > 2:
+                    score += 3
+                    signals.append(f"📈 5日动量向上(+{momentum:.1f}%)")
+                elif momentum > -2:
+                    score += 2
+                else:
+                    score += 1
+                    signals.append(f"📉 5日动量下跌({momentum:+.1f}%)")
+
+        bullish_votes = int(macd > signal and hist > 0) + int(momentum > 1)
+        bearish_votes = int(macd < signal and hist < 0) + int(momentum < -1)
+        if bullish_votes > bearish_votes:
+            direction = "bullish"
+        elif bearish_votes > bullish_votes:
+            direction = "bearish"
+        else:
+            direction = "neutral"
         
         return {"score": score, "signals": signals, "direction": direction}
     
@@ -800,48 +910,88 @@ class StockPickerService:
         histogram = macd_line - signal_line
         return float(macd_line[-1]), float(signal_line[-1]), float(histogram[-1])
     
-    def _calc_support_resistance_v2(self, closes, highs, lows, current_price) -> Dict:
-        """支撑阻力评分（15分）"""
+    def _calc_support_resistance_v2(
+        self,
+        closes,
+        highs,
+        lows,
+        current_price,
+        pool_type: str = "LONG"
+    ) -> Dict:
+        """计算当前交易方向的支撑阻力机会分（15分）。"""
         score = 0
         signals = []
+        is_short = pool_type == "SHORT"
         
         # 查找支撑阻力位
         levels = self._find_sr_levels_v2(highs, lows, closes)
         support = levels['support']
         resistance = levels['resistance']
         
-        # 支撑位评分（8分）
-        if support > 0:
-            dist = (current_price - support) / current_price * 100
-            if 0 < dist <= 3:
-                score += 8
-                signals.append(f"🟢 接近强支撑(距离{dist:.1f}%)")
-            elif dist <= 5:
-                score += 6
-                signals.append(f"🟢 支撑位保护")
-            elif dist <= 10:
-                score += 4
+        if is_short:
+            # 做空更关注上方阻力保护和下方支撑空间。
+            if resistance > current_price:
+                dist = (resistance - current_price) / current_price * 100
+                if dist <= 3:
+                    score += 8
+                    signals.append(f"🔴 接近强阻力(距离{dist:.1f}%)")
+                elif dist <= 5:
+                    score += 6
+                    signals.append("🔴 阻力位压制")
+                elif dist <= 10:
+                    score += 4
+                else:
+                    score += 2
             else:
-                score += 2
-        else:
-            score += 3
-        
-        # 阻力位空间（7分）
-        if resistance > 0 and resistance > current_price:
-            space = (resistance - current_price) / current_price * 100
-            if space > 15:
-                score += 7
-                signals.append(f"🚀 上涨空间大(+{space:.1f}%)")
-            elif space > 8:
-                score += 5
-                signals.append(f"📈 上涨空间适中")
-            elif space > 3:
                 score += 3
+
+            if 0 < support < current_price:
+                space = (current_price - support) / current_price * 100
+                if space > 15:
+                    score += 7
+                    signals.append(f"📉 下跌空间大(-{space:.1f}%)")
+                elif space > 8:
+                    score += 5
+                    signals.append("📉 下跌空间适中")
+                elif space > 3:
+                    score += 3
+                else:
+                    score += 1
+                    signals.append("⚠️ 接近支撑位")
             else:
-                score += 1
-                signals.append(f"⚠️ 接近阻力位")
+                score += 4
         else:
-            score += 4
+            # 做多关注下方支撑保护和上方阻力空间。
+            if support > 0:
+                dist = (current_price - support) / current_price * 100
+                if 0 < dist <= 3:
+                    score += 8
+                    signals.append(f"🟢 接近强支撑(距离{dist:.1f}%)")
+                elif dist <= 5:
+                    score += 6
+                    signals.append("🟢 支撑位保护")
+                elif dist <= 10:
+                    score += 4
+                else:
+                    score += 2
+            else:
+                score += 3
+
+            if resistance > current_price:
+                space = (resistance - current_price) / current_price * 100
+                if space > 15:
+                    score += 7
+                    signals.append(f"🚀 上涨空间大(+{space:.1f}%)")
+                elif space > 8:
+                    score += 5
+                    signals.append("📈 上涨空间适中")
+                elif space > 3:
+                    score += 3
+                else:
+                    score += 1
+                    signals.append("⚠️ 接近阻力位")
+            else:
+                score += 4
         
         return {"score": score, "signals": signals, "levels": levels}
     
@@ -870,10 +1020,16 @@ class StockPickerService:
         
         return {"support": support, "resistance": resistance}
     
-    def _calc_volume_price_v2(self, closes, volumes) -> Dict:
-        """量价配合评分（15分）"""
+    def _calc_volume_price_v2(
+        self,
+        closes,
+        volumes,
+        pool_type: str = "LONG"
+    ) -> Dict:
+        """计算当前交易方向的量价配合分（15分）。"""
         score = 0
         signals = []
+        is_short = pool_type == "SHORT"
         
         if len(volumes) < 10 or np.sum(volumes) == 0:
             return {"score": 7, "signals": ["❓ 成交量数据不足"]}
@@ -898,27 +1054,48 @@ class StockPickerService:
         
         # 量价关系（7分）
         price_chg = (closes[-1] / closes[-6] - 1) * 100 if len(closes) >= 6 else 0
-        if price_chg > 0 and vol_ratio > 1.2:
-            score += 7
-            signals.append("✅ 量价齐升")
-        elif price_chg > 0 and vol_ratio < 0.8:
-            score += 4
-            signals.append("⚠️ 价升量缩")
-        elif price_chg < 0 and vol_ratio > 1.2:
-            score += 2
-            signals.append("⚠️ 放量下跌")
-        elif price_chg < 0 and vol_ratio < 0.8:
-            score += 5
-            signals.append("➡️ 缩量回调")
+        if is_short:
+            if price_chg < 0 and vol_ratio > 1.2:
+                score += 7
+                signals.append("✅ 量价齐跌")
+            elif price_chg < 0 and vol_ratio < 0.8:
+                score += 4
+                signals.append("⚠️ 价跌量缩")
+            elif price_chg > 0 and vol_ratio > 1.2:
+                score += 2
+                signals.append("⚠️ 放量上涨")
+            elif price_chg > 0 and vol_ratio < 0.8:
+                score += 5
+                signals.append("➡️ 缩量反弹")
+            else:
+                score += 4
         else:
-            score += 4
+            if price_chg > 0 and vol_ratio > 1.2:
+                score += 7
+                signals.append("✅ 量价齐升")
+            elif price_chg > 0 and vol_ratio < 0.8:
+                score += 4
+                signals.append("⚠️ 价升量缩")
+            elif price_chg < 0 and vol_ratio > 1.2:
+                score += 2
+                signals.append("⚠️ 放量下跌")
+            elif price_chg < 0 and vol_ratio < 0.8:
+                score += 5
+                signals.append("➡️ 缩量回调")
+            else:
+                score += 4
         
         return {"score": score, "signals": signals}
     
-    def _calc_pattern_score_v2(self, klines: List[Dict]) -> Dict:
-        """K线形态评分（15分）"""
+    def _calc_pattern_score_v2(
+        self,
+        klines: List[Dict],
+        pool_type: str = "LONG"
+    ) -> Dict:
+        """计算当前交易方向的 K 线形态分（15分）。"""
         score = 0
         signals = []
+        is_short = pool_type == "SHORT"
         
         if len(klines) < 3:
             return {"score": 7, "signals": ["❓ K线数据不足"]}
@@ -944,46 +1121,90 @@ class StockPickerService:
         
         # 单K线形态（5分）
         if last_range > 0:
-            if lower_shadow(k3) / last_range > 0.6 and body_size(k3) / last_range < 0.3:
-                score += 5
-                signals.append("🔨 锤子线(看涨反转)")
-            elif upper_shadow(k3) / last_range > 0.6 and body_size(k3) / last_range < 0.3:
-                score += 3
-                signals.append("🔨 倒锤子")
-            elif is_bullish(k3) and body_size(k3) / last_range > 0.7:
-                score += 4
-                signals.append("📈 大阳线")
-            elif not is_bullish(k3) and body_size(k3) / last_range > 0.7:
-                score += 1
-                signals.append("📉 大阴线")
-            elif body_size(k3) / last_range < 0.1:
-                score += 2
-                signals.append("✖️ 十字星")
+            if is_short:
+                if upper_shadow(k3) / last_range > 0.6 and body_size(k3) / last_range < 0.3:
+                    score += 5
+                    signals.append("🌠 射击之星(看跌反转)")
+                elif lower_shadow(k3) / last_range > 0.6 and body_size(k3) / last_range < 0.3:
+                    score += 3
+                    signals.append("⚠️ 锤子线，不利追空")
+                elif not is_bullish(k3) and body_size(k3) / last_range > 0.7:
+                    score += 4
+                    signals.append("📉 大阴线")
+                elif is_bullish(k3) and body_size(k3) / last_range > 0.7:
+                    score += 1
+                    signals.append("📈 大阳线")
+                elif body_size(k3) / last_range < 0.1:
+                    score += 2
+                    signals.append("✖️ 十字星")
+                else:
+                    score += 2
             else:
-                score += 2
+                if lower_shadow(k3) / last_range > 0.6 and body_size(k3) / last_range < 0.3:
+                    score += 5
+                    signals.append("🔨 锤子线(看涨反转)")
+                elif upper_shadow(k3) / last_range > 0.6 and body_size(k3) / last_range < 0.3:
+                    score += 3
+                    signals.append("🔨 倒锤子")
+                elif is_bullish(k3) and body_size(k3) / last_range > 0.7:
+                    score += 4
+                    signals.append("📈 大阳线")
+                elif not is_bullish(k3) and body_size(k3) / last_range > 0.7:
+                    score += 1
+                    signals.append("📉 大阴线")
+                elif body_size(k3) / last_range < 0.1:
+                    score += 2
+                    signals.append("✖️ 十字星")
+                else:
+                    score += 2
         else:
             score += 2
         
         # 组合形态（10分）
-        if is_bullish(k1) and is_bullish(k2) and is_bullish(k3):
-            if k3['close'] > k2['close'] > k1['close']:
-                score += 10
-                signals.append("🚀 红三兵(强势看涨)")
-        elif not is_bullish(k1) and body_size(k2) < body_size(k1) * 0.3 and is_bullish(k3):
-            score += 8
-            signals.append("⭐ 早晨之星(底部反转)")
-        elif is_bullish(k1) and not is_bullish(k2) and is_bullish(k3):
-            if k3['close'] > k1['close']:
-                score += 7
-                signals.append("💥 多方炮")
-        elif not is_bullish(k1) and not is_bullish(k2) and not is_bullish(k3):
-            score += 1
-            signals.append("⚠️ 黑三兵")
-        elif is_bullish(k1) and body_size(k2) < body_size(k1) * 0.3 and not is_bullish(k3):
-            score += 2
-            signals.append("🌙 黄昏之星")
+        if is_short:
+            if not is_bullish(k1) and not is_bullish(k2) and not is_bullish(k3):
+                if k3['close'] < k2['close'] < k1['close']:
+                    score += 10
+                    signals.append("📉 黑三兵(强势看跌)")
+                else:
+                    score += 5
+            elif is_bullish(k1) and body_size(k2) < body_size(k1) * 0.3 and not is_bullish(k3):
+                score += 8
+                signals.append("🌙 黄昏之星(顶部反转)")
+            elif not is_bullish(k1) and is_bullish(k2) and not is_bullish(k3):
+                if k3['close'] < k1['close']:
+                    score += 7
+                    signals.append("💥 空方炮")
+            elif is_bullish(k1) and is_bullish(k2) and is_bullish(k3):
+                score += 1
+                signals.append("⚠️ 红三兵，不利做空")
+            elif not is_bullish(k1) and body_size(k2) < body_size(k1) * 0.3 and is_bullish(k3):
+                score += 2
+                signals.append("⚠️ 早晨之星")
+            else:
+                score += 5
         else:
-            score += 5
+            if is_bullish(k1) and is_bullish(k2) and is_bullish(k3):
+                if k3['close'] > k2['close'] > k1['close']:
+                    score += 10
+                    signals.append("🚀 红三兵(强势看涨)")
+                else:
+                    score += 5
+            elif not is_bullish(k1) and body_size(k2) < body_size(k1) * 0.3 and is_bullish(k3):
+                score += 8
+                signals.append("⭐ 早晨之星(底部反转)")
+            elif is_bullish(k1) and not is_bullish(k2) and is_bullish(k3):
+                if k3['close'] > k1['close']:
+                    score += 7
+                    signals.append("💥 多方炮")
+            elif not is_bullish(k1) and not is_bullish(k2) and not is_bullish(k3):
+                score += 1
+                signals.append("⚠️ 黑三兵")
+            elif is_bullish(k1) and body_size(k2) < body_size(k1) * 0.3 and not is_bullish(k3):
+                score += 2
+                signals.append("🌙 黄昏之星")
+            else:
+                score += 5
         
         return {"score": score, "signals": signals}
     
@@ -1032,24 +1253,6 @@ class StockPickerService:
         
         return {"score": score, "signals": signals}
     
-    def _adjust_for_short_v2(self, scores, trend_strength, momentum_dir) -> float:
-        """做空池评分调整"""
-        adjusted = (25 - scores['trend'])  # 趋势反转
-        
-        if momentum_dir == "bearish":
-            adjusted += 20
-        elif momentum_dir == "neutral":
-            adjusted += 10
-        else:
-            adjusted += 5
-        
-        adjusted += scores['support_resistance']
-        adjusted += scores['volume']
-        adjusted += scores['pattern']
-        adjusted += scores['volatility']
-        
-        return adjusted
-    
     def _ema_v2(self, data, period) -> np.ndarray:
         """计算EMA"""
         alpha = 2 / (period + 1)
@@ -1059,11 +1262,21 @@ class StockPickerService:
             ema[i] = alpha * data[i] + (1 - alpha) * ema[i-1]
         return ema
     
-    def _empty_score_v2(self) -> Dict:
+    def _empty_score_v2(self, pool_type: str = "LONG") -> Dict:
         return {
-            "total": 50, "breakdown": {}, "signals": ["数据不足"],
+            "total": 50,
+            "breakdown": {
+                "trend": 12,
+                "momentum": 10,
+                "support_resistance": 8,
+                "volume": 7,
+                "pattern": 7,
+                "volatility": 6,
+            },
+            "signals": ["数据不足"],
             "grade": "C", "trend_strength": 0.5, "support_resistance": {},
-            "momentum_direction": "neutral", "current_price": 0
+            "momentum_direction": "neutral", "opportunity_direction": pool_type,
+            "current_price": 0
         }
     
     def _get_grade_v2(self, score) -> str:
@@ -1088,12 +1301,13 @@ class StockPickerService:
             else:
                 return 'HOLD'
         else:  # SHORT
-            if total >= 75 and momentum == 'bearish':
+            if total >= 75 and trend > 0.6:
                 return 'SELL'
-            elif total <= 45:
+            elif total >= 65 and momentum == 'bearish':
                 return 'SELL'
-            else:
-                return 'HOLD'
+            elif total >= 60:
+                return 'SELL'
+            return 'HOLD'
     
     def _calculate_confidence_v2(self, score: Dict, pool_type: str) -> float:
         """V2: 根据评分计算信心度"""
@@ -1124,38 +1338,37 @@ class StockPickerService:
         pool_type: str
     ) -> float:
         """
-        V2.0 推荐度计算
-        
-        公式：
-        推荐度 = 量化评分*0.5 + AI信心度*30*0.3 + 趋势强度*20*0.2
+        计算 0-100 的方向化推荐度。
+
+        量化机会分占 70 分，AI 与目标方向的一致性占 20 分，
+        方向化趋势强度占 10 分。三项都有明确上下界。
         """
         quant_score = score_result.get('total', 50)
         trend_strength = score_result.get('trend_strength', 0.5)
-        momentum_dir = score_result.get('momentum_direction', 'neutral')
-        
         ai_confidence = 0.5
         ai_action = "HOLD"
         if ai_analysis:
             ai_confidence = ai_analysis.get('confidence', 0.5)
             ai_action = ai_analysis.get('action', 'HOLD')
         
-        # 基础推荐度
+        expected_action = "BUY" if pool_type == "LONG" else "SELL"
+        opposite_action = "SELL" if pool_type == "LONG" else "BUY"
+        if ai_action == expected_action:
+            ai_alignment = ai_confidence
+        elif ai_action == "HOLD":
+            ai_alignment = 0.5 * (1 - ai_confidence)
+        elif ai_action == opposite_action:
+            ai_alignment = 0.0
+        else:
+            ai_alignment = 0.25
+
         recommendation = (
-            quant_score * 0.5 +
-            ai_confidence * 30 * 0.3 +
-            trend_strength * 20 * 0.2
+            quant_score * 0.70 +
+            ai_alignment * 20 +
+            trend_strength * 10
         )
-        
-        # 多因子共振加分
-        bonus = 0
-        if quant_score >= 70 and ai_action == "BUY" and pool_type == "LONG":
-            bonus += 5
-        if trend_strength > 0.7 and momentum_dir == "bullish" and pool_type == "LONG":
-            bonus += 3
-        if pool_type == "SHORT" and ai_action == "SELL" and momentum_dir == "bearish":
-            bonus += 5
-        
-        return min(100, max(0, recommendation + bonus))
+
+        return round(min(100, max(0, recommendation)), 1)
     
     def _save_analysis_result(self, **kwargs) -> Dict:
         """保存分析结果"""
