@@ -285,9 +285,8 @@ class StockPickerService:
                     progress_callback({'log': f'⏭️ 跳过: {symbol} - K线数据不足({len(klines) if klines else 0}条)'})
                 return None  # 返回None表示跳过
             
-            # 3. 调用DeepSeek AI进行深度分析
-            from .ai_analyzer import DeepSeekAnalyzer
-            from .repositories import load_ai_credentials
+            # 3. 构建统一技术快照，并按配置执行 DeepSeek 深度分析。
+            from .ai_analyzer import DeepSeekAnalyzer, calculate_technical_indicators
             
             # 获取AI凭据（使用正确的函数）
             ai_creds = load_ai_credentials()
@@ -295,23 +294,21 @@ class StockPickerService:
             base_url = ai_creds.get('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
             tavily_api_key = ai_creds.get('TAVILY_API_KEY')  # ⬆️ 获取Tavily API Key
             
-            # ⬆️ V2.0: 使用优化后的量化评分系统
+            indicators = calculate_technical_indicators(klines)
             v2_score = self._calculate_advanced_score_v2(klines, pool_type)
+            indicators.update({
+                'trend_strength': v2_score.get('trend_strength', 0.5),
+                'momentum_direction': v2_score.get('momentum_direction', 'neutral'),
+            })
             
             if not api_key:
                 logger.warning(f"⚠️ 未配置DeepSeek API，使用V2量化评分: {symbol}")
-                # 使用V2评分系统
-                analysis = {
-                    'action': self._determine_action_v2(v2_score, pool_type),
-                    'confidence': self._calculate_confidence_v2(v2_score, pool_type),
-                    'reasoning': v2_score['signals'][:8],  # 取前8个信号作为理由
-                    'score': v2_score,
-                    'indicators': {
-                        'current_price': v2_score.get('current_price', 0),
-                        'trend_strength': v2_score.get('trend_strength', 0.5),
-                        'momentum_direction': v2_score.get('momentum_direction', 'neutral')
-                    }
-                }
+                analysis = self._build_quant_analysis(
+                    v2_score,
+                    indicators,
+                    pool_type,
+                    ai_status='disabled',
+                )
             else:
                 # 使用DeepSeek AI分析（集成Tavily搜索）
                 logger.info(f"🤖 DeepSeek分析: {symbol} (搜索引擎: {'✅' if tavily_api_key else '❌'})")
@@ -329,13 +326,21 @@ class StockPickerService:
                     analyzer.analyze_trading_opportunity,
                     symbol=symbol,
                     klines=klines,
-                    scenario="buy_focus" if pool_type == 'LONG' else "sell_focus"
+                    scenario="buy_focus" if pool_type == 'LONG' else "sell_focus",
+                    technical_indicators=indicators,
+                    quant_score=v2_score,
                 )
-                
-                # ⬆️ V2.0: 合并V2量化评分到AI分析结果
-                analysis['score'] = v2_score  # 使用V2评分替换原有评分
-                analysis['indicators']['trend_strength'] = v2_score.get('trend_strength', 0.5)
-                analysis['indicators']['momentum_direction'] = v2_score.get('momentum_direction', 'neutral')
+
+                if analysis.get('error'):
+                    ai_error = analysis['error']
+                    logger.warning(f"⚠️ AI分析失败，回退到量化结论: {symbol} - {ai_error}")
+                    analysis = self._build_quant_analysis(
+                        v2_score,
+                        indicators,
+                        pool_type,
+                        ai_status='fallback',
+                        ai_error=ai_error,
+                    )
                 
                 logger.info(f"🤖 AI决策: {symbol} - {analysis['action']} (信心度: {analysis['confidence']:.2f}, V2评分: {v2_score['total']:.1f})")
                 if progress_callback:
@@ -1284,6 +1289,33 @@ class StockPickerService:
         elif score >= 65: return "B"
         elif score >= 50: return "C"
         else: return "D"
+
+    def _build_quant_analysis(
+        self,
+        score: Dict,
+        indicators: Dict,
+        pool_type: str,
+        ai_status: str,
+        ai_error: Optional[str] = None,
+    ) -> Dict:
+        """Build the deterministic fallback without discarding the quant signal."""
+        reasoning = list(score.get('signals', []))[:8]
+        if ai_status == 'disabled':
+            reasoning.insert(0, "AI未配置，当前结论来自统一量化评分")
+        elif ai_error:
+            reasoning.insert(0, f"AI分析不可用，已回退到量化结论: {ai_error}")
+
+        analysis = {
+            'action': self._determine_action_v2(score, pool_type),
+            'confidence': self._calculate_confidence_v2(score, pool_type),
+            'reasoning': reasoning,
+            'score': score,
+            'indicators': dict(indicators),
+            'ai_status': ai_status,
+        }
+        if ai_error:
+            analysis['ai_error'] = ai_error
+        return analysis
     
     def _determine_action_v2(self, score: Dict, pool_type: str) -> str:
         """V2: 根据评分确定行动"""

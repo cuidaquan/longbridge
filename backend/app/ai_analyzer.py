@@ -20,6 +20,97 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def calculate_technical_indicators(klines: List[Dict]) -> Dict:
+    """Build the shared technical snapshot used by quant scoring and AI prompts."""
+    if not klines or len(klines) < 20:
+        return {}
+
+    try:
+        df = pd.DataFrame(klines)
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        indicators = {}
+        if len(df) >= 5:
+            ma5_val = df['close'].rolling(5).mean().iloc[-1]
+            indicators['ma5'] = float(ma5_val) if not pd.isna(ma5_val) else 0.0
+        if len(df) >= 10:
+            ma10_val = df['close'].rolling(10).mean().iloc[-1]
+            indicators['ma10'] = float(ma10_val) if not pd.isna(ma10_val) else 0.0
+        if len(df) >= 20:
+            ma20_val = df['close'].rolling(20).mean().iloc[-1]
+            indicators['ma20'] = float(ma20_val) if not pd.isna(ma20_val) else 0.0
+        if len(df) >= 60:
+            ma60_val = df['close'].rolling(60).mean().iloc[-1]
+            indicators['ma60'] = float(ma60_val) if not pd.isna(ma60_val) else None
+
+        if len(df) >= 14:
+            delta = df['close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rs = gain / loss
+            rsi = 100 - (100 / (1 + rs))
+            indicators['rsi'] = float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else 50.0
+
+        if len(df) >= 26:
+            exp1 = df['close'].ewm(span=12).mean()
+            exp2 = df['close'].ewm(span=26).mean()
+            macd = exp1 - exp2
+            signal = macd.ewm(span=9).mean()
+            macd_val = macd.iloc[-1]
+            signal_val = signal.iloc[-1]
+            indicators['macd'] = float(macd_val) if not pd.isna(macd_val) else 0.0
+            indicators['macd_signal'] = float(signal_val) if not pd.isna(signal_val) else 0.0
+            hist_val = (macd - signal).iloc[-1]
+            indicators['macd_histogram'] = float(hist_val) if not pd.isna(hist_val) else 0.0
+
+        if len(df) >= 20:
+            sma20 = df['close'].rolling(20).mean()
+            std20 = df['close'].rolling(20).std()
+            bb_upper = (sma20 + 2 * std20).iloc[-1]
+            bb_middle = sma20.iloc[-1]
+            bb_lower = (sma20 - 2 * std20).iloc[-1]
+            indicators['bollinger_upper'] = float(bb_upper) if not pd.isna(bb_upper) else 0.0
+            indicators['bollinger_middle'] = float(bb_middle) if not pd.isna(bb_middle) else 0.0
+            indicators['bollinger_lower'] = float(bb_lower) if not pd.isna(bb_lower) else 0.0
+
+        if len(df) >= 5:
+            volume_ma5 = df['volume'].rolling(5).mean().iloc[-1]
+            if not pd.isna(volume_ma5) and volume_ma5 > 0:
+                indicators['volume_ma5'] = float(volume_ma5)
+                curr_vol = df['volume'].iloc[-1]
+                indicators['volume_ratio'] = (
+                    float(curr_vol / volume_ma5) if not pd.isna(curr_vol) else 1.0
+                )
+            else:
+                indicators['volume_ratio'] = 1.0
+
+        if len(df) >= 2:
+            close_1 = df['close'].iloc[-1]
+            close_2 = df['close'].iloc[-2]
+            indicators['price_change_1d'] = (
+                float((close_1 / close_2 - 1) * 100)
+                if not pd.isna(close_1) and not pd.isna(close_2) and close_2 > 0
+                else 0.0
+            )
+        if len(df) >= 6:
+            close_1 = df['close'].iloc[-1]
+            close_6 = df['close'].iloc[-6]
+            indicators['price_change_5d'] = (
+                float((close_1 / close_6 - 1) * 100)
+                if not pd.isna(close_1) and not pd.isna(close_6) and close_6 > 0
+                else 0.0
+            )
+
+        curr_price = df['close'].iloc[-1]
+        indicators['current_price'] = float(curr_price) if not pd.isna(curr_price) else 0.0
+        return indicators
+    except Exception as exc:
+        logger.error(f"计算指标失败: {exc}")
+        return {}
+
+
 class DeepSeekAnalyzer:
     """DeepSeek AI 分析器 - 集成新闻舆情"""
     
@@ -63,7 +154,9 @@ class DeepSeekAnalyzer:
         symbol: str,
         klines: List[Dict],
         current_positions: Optional[Dict] = None,
-        scenario: str = "general"
+        scenario: str = "general",
+        technical_indicators: Optional[Dict] = None,
+        quant_score: Optional[Dict] = None,
     ) -> Dict:
         """
         分析交易机会
@@ -95,9 +188,12 @@ class DeepSeekAnalyzer:
                 }
             }
         """
+        indicators = dict(technical_indicators or {})
+        score = dict(quant_score or {})
         try:
-            # 1. 计算技术指标
-            indicators = self._calculate_indicators(klines)
+            # 1. 复用调用方快照；其他业务未传入时保持向后兼容。
+            if not indicators:
+                indicators = calculate_technical_indicators(klines)
             
             # 2. 🔍 获取新闻分析（如果启用）
             news_analysis = None
@@ -113,8 +209,9 @@ class DeepSeekAnalyzer:
                     logger.warning(f"⚠️ 新闻分析失败: {e}")
                     news_analysis = None
             
-            # 3. 计算量化评分（结合新闻）
-            score = self._calculate_score(klines, indicators, scenario, news_analysis)
+            # 3. 选股业务传入统一机会分；其他业务继续使用分析器内置评分。
+            if not score:
+                score = self._calculate_score(klines, indicators, scenario, news_analysis)
             
             # 4. 构建提示词（包含新闻信息）
             prompt = self._build_prompt(symbol, klines, indicators, current_positions, scenario, score, news_analysis)
@@ -144,6 +241,7 @@ class DeepSeekAnalyzer:
             # 添加指标和评分到结果中
             result['indicators'] = indicators
             result['score'] = score
+            result['ai_status'] = 'available'
             result['ai_raw_response'] = ai_response
             result['ai_prompt'] = prompt
             
@@ -156,116 +254,19 @@ class DeepSeekAnalyzer:
             
         except Exception as e:
             logger.error(f"❌ AI 分析失败 {symbol}: {e}", exc_info=True)
-            # 返回保守的 HOLD 决策
             return {
                 "action": "HOLD",
                 "confidence": 0.0,
                 "reasoning": [f"AI 分析失败: {str(e)}"],
                 "error": str(e),
-                "indicators": {}
+                "ai_status": "error",
+                "indicators": indicators,
+                "score": score,
             }
     
     def _calculate_indicators(self, klines: List[Dict]) -> Dict:
-        """计算技术指标"""
-        if not klines or len(klines) < 20:
-            return {}
-        
-        try:
-            # 转换为 DataFrame
-            df = pd.DataFrame(klines)
-            
-            # 确保价格列为浮点数
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                if col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
-            
-            indicators = {}
-            
-            # 移动平均线
-            if len(df) >= 5:
-                ma5_val = df['close'].rolling(5).mean().iloc[-1]
-                indicators['ma5'] = float(ma5_val) if not pd.isna(ma5_val) else 0.0
-            if len(df) >= 10:
-                ma10_val = df['close'].rolling(10).mean().iloc[-1]
-                indicators['ma10'] = float(ma10_val) if not pd.isna(ma10_val) else 0.0
-            if len(df) >= 20:
-                ma20_val = df['close'].rolling(20).mean().iloc[-1]
-                indicators['ma20'] = float(ma20_val) if not pd.isna(ma20_val) else 0.0
-            if len(df) >= 60:
-                ma60_val = df['close'].rolling(60).mean().iloc[-1]
-                indicators['ma60'] = float(ma60_val) if not pd.isna(ma60_val) else None
-            
-            # RSI
-            if len(df) >= 14:
-                delta = df['close'].diff()
-                gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-                rs = gain / loss
-                rsi = 100 - (100 / (1 + rs))
-                indicators['rsi'] = float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else 50.0
-            
-            # MACD
-            if len(df) >= 26:
-                exp1 = df['close'].ewm(span=12).mean()
-                exp2 = df['close'].ewm(span=26).mean()
-                macd = exp1 - exp2
-                signal = macd.ewm(span=9).mean()
-                macd_val = macd.iloc[-1]
-                signal_val = signal.iloc[-1]
-                indicators['macd'] = float(macd_val) if not pd.isna(macd_val) else 0.0
-                indicators['macd_signal'] = float(signal_val) if not pd.isna(signal_val) else 0.0
-                hist_val = (macd - signal).iloc[-1]
-                indicators['macd_histogram'] = float(hist_val) if not pd.isna(hist_val) else 0.0
-            
-            # 布林带
-            if len(df) >= 20:
-                sma20 = df['close'].rolling(20).mean()
-                std20 = df['close'].rolling(20).std()
-                bb_upper = (sma20 + 2 * std20).iloc[-1]
-                bb_middle = sma20.iloc[-1]
-                bb_lower = (sma20 - 2 * std20).iloc[-1]
-                indicators['bollinger_upper'] = float(bb_upper) if not pd.isna(bb_upper) else 0.0
-                indicators['bollinger_middle'] = float(bb_middle) if not pd.isna(bb_middle) else 0.0
-                indicators['bollinger_lower'] = float(bb_lower) if not pd.isna(bb_lower) else 0.0
-            
-            # 成交量相关
-            if len(df) >= 5:
-                volume_ma5 = df['volume'].rolling(5).mean().iloc[-1]
-                if not pd.isna(volume_ma5) and volume_ma5 > 0:
-                    indicators['volume_ma5'] = float(volume_ma5)
-                    curr_vol = df['volume'].iloc[-1]
-                    if not pd.isna(curr_vol):
-                        indicators['volume_ratio'] = float(curr_vol / volume_ma5)
-                    else:
-                        indicators['volume_ratio'] = 1.0
-                else:
-                    indicators['volume_ratio'] = 1.0
-            
-            # 价格变化
-            if len(df) >= 2:
-                close_1 = df['close'].iloc[-1]
-                close_2 = df['close'].iloc[-2]
-                if not pd.isna(close_1) and not pd.isna(close_2) and close_2 > 0:
-                    indicators['price_change_1d'] = float((close_1 / close_2 - 1) * 100)
-                else:
-                    indicators['price_change_1d'] = 0.0
-            if len(df) >= 6:
-                close_1 = df['close'].iloc[-1]
-                close_6 = df['close'].iloc[-6]
-                if not pd.isna(close_1) and not pd.isna(close_6) and close_6 > 0:
-                    indicators['price_change_5d'] = float((close_1 / close_6 - 1) * 100)
-                else:
-                    indicators['price_change_5d'] = 0.0
-            
-            # 当前价格
-            curr_price = df['close'].iloc[-1]
-            indicators['current_price'] = float(curr_price) if not pd.isna(curr_price) else 0.0
-            
-            return indicators
-            
-        except Exception as e:
-            logger.error(f"计算指标失败: {e}")
-            return {}
+        """Backward-compatible wrapper for the shared indicator builder."""
+        return calculate_technical_indicators(klines)
     
     def _calculate_score(
         self, 
@@ -793,6 +794,48 @@ STEP 6: 信心度评级
 - 信心度 < 0.60 或信号矛盾 → 返回 HOLD
 - 0.60-0.69 之间 → 根据具体情况判断（偏向机会）"""
     
+    def _format_score_section(self, score: Dict) -> str:
+        """Format either the shared stock-picker score or the legacy AI score."""
+        breakdown = score.get('breakdown', {})
+        signals = score.get('signals', [])
+        signal_text = chr(10).join([f'  ✓ {item}' for item in signals[:12]])
+
+        if 'support_resistance' in breakdown:
+            direction = score.get('opportunity_direction', 'LONG')
+            direction_label = '做空' if direction == 'SHORT' else '做多'
+            return f"""【统一机会评分 V2】⭐
+方向: {direction_label}
+总分: {score.get('total', 50)}/100 分 | 评级: {score.get('grade', 'C')}
+细分维度（所有分项均为当前方向的机会分，越高越好）:
+  • 趋势评分: {breakdown.get('trend', 0)}/25
+  • 动量评分: {breakdown.get('momentum', 0)}/20
+  • 支撑阻力: {breakdown.get('support_resistance', 0)}/15
+  • 量价评分: {breakdown.get('volume', 0)}/15
+  • 形态评分: {breakdown.get('pattern', 0)}/15
+  • 波动评分: {breakdown.get('volatility', 0)}/10
+
+检测到的信号:
+{signal_text}
+
+评分口径：
+- 80+分(A级): 当前方向机会很强
+- 65-79分(B级): 当前方向机会较好
+- 50-64分(C级): 中性观察
+- <50分(D级): 当前方向机会较弱"""
+
+        return f"""【量化评分系统 V3.1】⭐ (舆情增强版)
+总分: {score.get('total', 50)}/100 分 | 评级: {score.get('grade', 'C')}
+细分维度（舆情增强）:
+  • 趋势评分: {breakdown.get('trend', 0)}/15
+  • 动量评分: {breakdown.get('momentum', 0)}/18
+  • 波动评分: {breakdown.get('volatility', 0)}/25
+  • 量能评分: {breakdown.get('volume', 0)}/12
+  • 形态评分: {breakdown.get('pattern', 0)}/10
+  • 新闻舆情: {breakdown.get('news', 0)}/20
+
+检测到的信号:
+{signal_text}"""
+
     def _build_prompt(
         self,
         symbol: str,
@@ -809,6 +852,7 @@ STEP 6: 信心度评级
         # 如果没有提供评分，使用默认值
         if score is None:
             score = {"total": 50, "breakdown": {}, "signals": [], "grade": "C"}
+        score_section = self._format_score_section(score)
         
         # 持仓情况
         position_info = "当前无持仓"
@@ -904,11 +948,11 @@ STEP 6: 信心度评级
             
             news_section += "\n---"
         
-        prompt = f"""======= AI 交易系统分析请求 ======= ⭐ V3.0 (集成新闻舆情)
+        prompt = f"""======= AI 交易系统分析请求 =======
 
 分析股票: {symbol}
 分析时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-数据范围: 1000根K线（历史深度分析）
+数据范围: {len(klines)}根K线
 数据顺序: OLDEST（最早） → NEWEST（最新）
 
 ---
@@ -967,30 +1011,7 @@ current_volume_ratio = {float(volume_ratio):.2f}x
 │ 状态: {'成交活跃' if volume_ratio > 1.3 else '成交清淡' if volume_ratio < 0.8 else '成交平稳'}
 └──────────────────────────┘
 
-【量化评分系统 V3.1】⭐ (舆情增强版 - 新闻占比翻倍)
-总分: {score['total']}/100 分 | 评级: {score['grade']}
-细分维度（舆情增强）:
-  • 趋势评分: {score['breakdown'].get('trend', 0)}/15 (⬇️ 进一步降低)
-  • 动量评分: {score['breakdown'].get('momentum', 0)}/18 (⬇️ 降低)
-  • 波动评分: {score['breakdown'].get('volatility', 0)}/25 (⬆️ 保持高权重)
-  • 量能评分: {score['breakdown'].get('volume', 0)}/12 (⬇️ 降低)
-  • 形态评分: {score['breakdown'].get('pattern', 0)}/10 (保持)
-  • 新闻舆情: {score['breakdown'].get('news', 0)}/20 (⬆️⬆️ 翻倍！核心因子)
-
-检测到的信号:
-{chr(10).join([f'  ✓ {sig}' for sig in score['signals'][:12]])}
-
-💡 评分解读：
-- 80+分(A级): 强烈推荐，舆情+技术双重验证
-- 65-79分(B级): 推荐交易，基本面或技术面良好
-- 50-64分(C级): 中性观望，缺乏明确信号
-- <50分(D级): 不推荐，舆情差或技术面弱
-
-⚠️ V3.1核心改进：
-  📰 新闻舆情权重翻倍（10分→20分）
-  🎯 更重视基本面信息和市场情绪
-  ⚡ 波动性保持高权重（25分）
-  💡 技术指标权重适度降低，为舆情让路
+{score_section}
 
 【K线形态详情】(最近10根，从旧到新)
 {kline_text}
@@ -1264,5 +1285,3 @@ Remember:
 - Information > speculation (wait for catalysts when unclear)
 - Asymmetry > symmetry (only trade when R:R ≥ 2:1)
 """
-
-

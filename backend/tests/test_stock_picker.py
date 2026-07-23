@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from app.ai_analyzer import DeepSeekAnalyzer, calculate_technical_indicators
 from app.stock_picker import StockPickerService
 
 
@@ -203,6 +205,112 @@ class StockPickerDirectionalScoreTest(unittest.TestCase):
 
         self.assertGreater(aligned, hold)
         self.assertGreater(hold, opposed)
+
+
+class StockPickerUnifiedAnalysisTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.service = StockPickerService()
+        self.klines = _trend_klines(1)
+        self.score = self.service._calculate_advanced_score_v2(self.klines, "LONG")
+        self.indicators = calculate_technical_indicators(self.klines)
+
+    def test_shared_indicator_snapshot_contains_price_changes(self) -> None:
+        self.assertEqual(self.indicators["current_price"], self.klines[-1]["close"])
+        self.assertGreater(self.indicators["price_change_1d"], 0)
+        self.assertGreater(self.indicators["price_change_5d"], 0)
+        self.assertIn("macd", self.indicators)
+
+    def test_stock_picker_prompt_uses_shared_directional_score(self) -> None:
+        analyzer = DeepSeekAnalyzer.__new__(DeepSeekAnalyzer)
+        prompt = analyzer._build_prompt(
+            symbol="TEST.US",
+            klines=self.klines,
+            indicators=self.indicators,
+            current_positions=None,
+            scenario="buy_focus",
+            score=self.score,
+            news_analysis=None,
+        )
+
+        self.assertIn(f"总分: {self.score['total']}/100", prompt)
+        self.assertIn("【统一机会评分 V2】", prompt)
+        self.assertIn(f"趋势评分: {self.score['breakdown']['trend']}/25", prompt)
+        self.assertNotIn("新闻舆情权重翻倍", prompt)
+
+    def test_analyzer_error_preserves_caller_snapshot(self) -> None:
+        analyzer = DeepSeekAnalyzer.__new__(DeepSeekAnalyzer)
+        analyzer.news_analyzer = None
+        analyzer.client = MagicMock()
+        analyzer.client.chat.completions.create.side_effect = RuntimeError("temporary outage")
+        analyzer.model = "test-model"
+        analyzer.temperature = 0
+        analyzer._build_prompt = MagicMock(return_value="prompt")
+        analyzer._get_system_prompt = MagicMock(return_value="system")
+
+        result = analyzer.analyze_trading_opportunity(
+            symbol="TEST.US",
+            klines=self.klines,
+            scenario="buy_focus",
+            technical_indicators=self.indicators,
+            quant_score=self.score,
+        )
+
+        self.assertEqual(result["ai_status"], "error")
+        self.assertEqual(result["score"], self.score)
+        self.assertEqual(result["indicators"], self.indicators)
+
+    def test_ai_failure_falls_back_without_overwriting_quant_action(self) -> None:
+        analysis = self.service._build_quant_analysis(
+            self.score,
+            self.indicators,
+            "LONG",
+            ai_status="fallback",
+            ai_error="temporary outage",
+        )
+
+        self.assertEqual(analysis["action"], "BUY")
+        self.assertGreater(analysis["confidence"], 0)
+        self.assertEqual(analysis["score"], self.score)
+        self.assertIn("已回退到量化结论", analysis["reasoning"][0])
+
+    def test_single_stock_without_ai_uses_shared_snapshot(self) -> None:
+        with (
+            patch("app.services.sync_history_candlesticks", return_value={"TEST.US": 120}),
+            patch("app.stock_picker.get_cached_candlesticks", return_value=self.klines),
+            patch("app.stock_picker.load_ai_credentials", return_value={}),
+            patch.object(self.service, "_save_analysis_result", return_value={}) as save_result,
+        ):
+            asyncio.run(self.service._analyze_single_stock(1, "TEST.US", "LONG", True))
+
+        analysis = save_result.call_args.kwargs["analysis"]
+        self.assertEqual(analysis["ai_status"], "disabled")
+        self.assertGreater(analysis["indicators"]["price_change_1d"], 0)
+        self.assertEqual(analysis["score"], self.score)
+
+    def test_single_stock_ai_error_persists_quant_fallback(self) -> None:
+        analyzer = MagicMock()
+        analyzer.analyze_trading_opportunity.return_value = {
+            "action": "HOLD",
+            "confidence": 0,
+            "reasoning": ["failed"],
+            "error": "temporary outage",
+        }
+        with (
+            patch("app.services.sync_history_candlesticks", return_value={"TEST.US": 120}),
+            patch("app.stock_picker.get_cached_candlesticks", return_value=self.klines),
+            patch(
+                "app.stock_picker.load_ai_credentials",
+                return_value={"DEEPSEEK_API_KEY": "test-key"},
+            ),
+            patch("app.ai_analyzer.DeepSeekAnalyzer", return_value=analyzer),
+            patch.object(self.service, "_save_analysis_result", return_value={}) as save_result,
+        ):
+            asyncio.run(self.service._analyze_single_stock(1, "TEST.US", "LONG", True))
+
+        analysis = save_result.call_args.kwargs["analysis"]
+        self.assertEqual(analysis["ai_status"], "fallback")
+        self.assertEqual(analysis["action"], "BUY")
+        self.assertEqual(analysis["score"], self.score)
 
 
 if __name__ == "__main__":
