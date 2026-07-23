@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from decimal import Decimal
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -9,6 +10,56 @@ from app import services
 
 
 class QuoteHistoryPeriodTest(unittest.TestCase):
+    def test_calc_indexes_fetches_all_stock_picker_metrics_in_one_call(self) -> None:
+        first = MagicMock(
+            symbol="AAA.US",
+            last_done=Decimal("10.5"),
+            change_rate=Decimal("0.012"),
+            volume=123456,
+            turnover=Decimal("1500000"),
+            turnover_rate=Decimal("0.035"),
+            total_market_value=Decimal("500000000"),
+            capital_flow=Decimal("250000"),
+            volume_ratio=Decimal("1.2"),
+            pe_ttm_ratio=Decimal("18.5"),
+            pb_ratio=Decimal("2.1"),
+            dividend_ratio_ttm=Decimal("0.02"),
+            five_day_change_rate=Decimal("0.05"),
+            ten_day_change_rate=Decimal("0.08"),
+            half_year_change_rate=Decimal("0.12"),
+            ytd_change_rate=Decimal("0.15"),
+        )
+        context = MagicMock()
+        context.calc_indexes.return_value = [first]
+
+        @contextmanager
+        def quote_context(_credentials):
+            yield context
+
+        with (
+            patch.object(
+                services,
+                "load_credentials",
+                return_value={
+                    "LONGPORT_APP_KEY": "key",
+                    "LONGPORT_APP_SECRET": "secret",
+                    "LONGPORT_ACCESS_TOKEN": "token",
+                },
+            ),
+            patch.object(services, "_quote_context", side_effect=quote_context),
+        ):
+            result = services.get_security_calc_indexes([
+                " aaa.us ",
+                "AAA.US",
+            ])
+
+        self.assertEqual(context.calc_indexes.call_count, 1)
+        self.assertEqual(context.calc_indexes.call_args.args[0], ["AAA.US"])
+        self.assertGreaterEqual(len(context.calc_indexes.call_args.args[1]), 10)
+        self.assertEqual(result["AAA.US"]["last_done"], 10.5)
+        self.assertEqual(result["AAA.US"]["turnover"], 1_500_000.0)
+        self.assertEqual(result["AAA.US"]["pe_ttm_ratio"], 18.5)
+
     def test_incremental_daily_sync_reuses_one_context_for_all_symbols(self) -> None:
         context = MagicMock()
         context.history_candlesticks_by_date.return_value = [object()]

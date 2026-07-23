@@ -17,7 +17,8 @@ class _Response:
 
 
 class _ServiceWithContext(StockScreenerService):
-    def __init__(self, context) -> None:
+    def __init__(self, context, index_loader=None) -> None:
+        super().__init__(index_loader=index_loader or (lambda _symbols: {}))
         self.context = context
 
     @contextmanager
@@ -168,6 +169,9 @@ class StockScreenerServiceTest(unittest.TestCase):
             service.search("US", 0)
         with self.assertRaisesRegex(ValueError, "1～100"):
             service.search("US", 1, size=101)
+        with self.assertRaisesRegex(ValueError, "有限数字"):
+            service.search("US", 1, filters={"min_turnover": float("nan")})
+        service.context.screener_search.assert_not_called()
 
     def test_sdk_failure_is_exposed_as_longbridge_api_error(self) -> None:
         context = MagicMock()
@@ -176,6 +180,77 @@ class StockScreenerServiceTest(unittest.TestCase):
 
         with self.assertRaisesRegex(LongbridgeAPIError, "主动选股失败"):
             service.search("US", 1)
+
+    def test_calc_indexes_enrich_and_filter_candidates(self) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "items": [
+                {"symbol": "AAPL.US", "name": "Apple"},
+                {"symbol": "PENNY.US", "name": "Penny"},
+                {"symbol": "MISSING.US", "name": "Missing"},
+            ],
+        })
+        index_loader = MagicMock(return_value={
+            "AAPL.US": {
+                "turnover": 50_000_000,
+                "total_market_value": 3_000_000_000,
+                "pe_ttm_ratio": 30,
+            },
+            "PENNY.US": {
+                "turnover": 50_000,
+                "total_market_value": 20_000_000,
+                "pe_ttm_ratio": 15,
+            },
+        })
+        service = _ServiceWithContext(context, index_loader=index_loader)
+
+        result = service.search(
+            "US",
+            101,
+            filters={
+                "min_turnover": 1_000_000,
+                "max_pe_ttm": 40,
+            },
+        )
+
+        index_loader.assert_called_once_with([
+            "AAPL.US",
+            "PENNY.US",
+            "MISSING.US",
+        ])
+        self.assertEqual([item["symbol"] for item in result["items"]], ["AAPL.US"])
+        self.assertEqual(result["items"][0]["indexes"]["pe_ttm_ratio"], 30)
+        self.assertEqual(result["filters"]["excluded"], 2)
+        self.assertEqual(
+            result["filters"]["reasons"],
+            {
+                "below_min_turnover": 1,
+                "missing_turnover": 1,
+            },
+        )
+        self.assertEqual(result["enrichment"]["status"], "available")
+
+    def test_index_failure_only_degrades_when_no_hard_filter_is_requested(self) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "items": [{"symbol": "AAPL.US", "name": "Apple"}],
+        })
+
+        def fail_indexes(_symbols):
+            raise RuntimeError("quote unavailable")
+
+        service = _ServiceWithContext(context, index_loader=fail_indexes)
+
+        degraded = service.search("US", 101)
+        self.assertEqual(degraded["enrichment"]["status"], "fallback")
+        self.assertEqual(degraded["items"][0]["symbol"], "AAPL.US")
+
+        with self.assertRaisesRegex(LongbridgeAPIError, "无法应用候选过滤条件"):
+            service.search(
+                "US",
+                101,
+                filters={"min_turnover": 1_000_000},
+            )
 
 
 class StockScreenerRouteTest(unittest.TestCase):
@@ -200,12 +275,21 @@ class StockScreenerRouteTest(unittest.TestCase):
             "size": 20,
             "total": 1,
             "has_more": False,
+            "enrichment": {"status": "available", "error": None},
+            "filters": {
+                "applied": {"min_turnover": 1000000},
+                "before": 1,
+                "after": 1,
+                "excluded": 0,
+                "reasons": {},
+            },
             "items": [{
                 "rank": 1,
                 "symbol": "AAPL.US",
                 "name": "Apple",
                 "market": "US",
                 "indicators": {},
+                "indexes": {"turnover": 2000000},
             }],
         }
 
@@ -226,6 +310,7 @@ class StockScreenerRouteTest(unittest.TestCase):
                         "strategy_id": 101,
                         "page": 0,
                         "size": 20,
+                        "filters": {"min_turnover": 1000000},
                     },
                 )
                 invalid = client.post(
@@ -241,7 +326,14 @@ class StockScreenerRouteTest(unittest.TestCase):
         self.assertEqual(search.json()["items"][0]["symbol"], "AAPL.US")
         self.assertEqual(invalid.status_code, 422)
         screener.list_strategies.assert_called_once_with("US", False)
-        screener.search.assert_called_once_with("US", 101, 0, 20)
+        screener.search.assert_called_once_with(
+            "US",
+            101,
+            0,
+            20,
+            {"min_turnover": 1000000.0},
+            True,
+        )
 
     def test_import_keeps_manual_pool_and_records_strategy_source(self) -> None:
         stock_picker = MagicMock()

@@ -111,6 +111,18 @@ export interface ScreenerCandidate {
   name: string;
   market: ScreenerMarket;
   indicators: Record<string, string | number | boolean | null>;
+  indexes: Record<string, number | null>;
+}
+
+export interface ScreenerIndexFilters {
+  min_turnover?: number;
+  min_market_value?: number;
+  min_turnover_rate?: number;
+  min_pe_ttm?: number;
+  max_pe_ttm?: number;
+  max_pb?: number;
+  min_capital_flow?: number;
+  min_volume_ratio?: number;
 }
 
 export interface ScreenerSearchResponse {
@@ -121,6 +133,17 @@ export interface ScreenerSearchResponse {
   size: number;
   total: number;
   has_more: boolean;
+  enrichment: {
+    status: 'available' | 'fallback' | 'disabled';
+    error?: string;
+  };
+  filters: {
+    applied: ScreenerIndexFilters;
+    before: number;
+    after: number;
+    excluded: number;
+    reasons: Record<string, number>;
+  };
   items: ScreenerCandidate[];
 }
 
@@ -220,6 +243,8 @@ export async function searchScreenerCandidates(params: {
   strategyId: number;
   page?: number;
   size?: number;
+  includeIndexes?: boolean;
+  filters?: ScreenerIndexFilters;
 }): Promise<ScreenerSearchResponse> {
   const response = await fetch(`${API_BASE}/api/stock-picker/screener/search`, {
     method: 'POST',
@@ -227,8 +252,10 @@ export async function searchScreenerCandidates(params: {
     body: JSON.stringify({
       market: params.market,
       strategy_id: params.strategyId,
-      page: params.page || 0,
-      size: params.size || 20,
+      page: params.page ?? 0,
+      size: params.size ?? 20,
+      include_indexes: params.includeIndexes ?? true,
+      filters: params.filters,
     }),
   });
   if (!response.ok) {

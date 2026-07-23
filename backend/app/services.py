@@ -99,6 +99,88 @@ def verify_quote_access(symbols: Optional[Iterable[str]] = None) -> dict[str, st
     return {"status": "ok", "tested_symbols": ",".join(symbols_list)}
 
 
+def get_security_calc_indexes(
+    symbols: Iterable[str],
+) -> Dict[str, Dict[str, Optional[float]]]:
+    """Fetch stock-picker liquidity, valuation, and momentum indexes in one call."""
+    symbol_list = list(dict.fromkeys(
+        symbol.strip().upper()
+        for symbol in symbols
+        if symbol and symbol.strip()
+    ))
+    if not symbol_list:
+        return {}
+
+    credentials = load_credentials()
+    if not credentials or any(
+        not credentials.get(key)
+        for key in (
+            "LONGPORT_APP_KEY",
+            "LONGPORT_APP_SECRET",
+            "LONGPORT_ACCESS_TOKEN",
+        )
+    ):
+        raise ValueError("请先在基础配置中保存完整的 Longbridge 凭据")
+
+    try:
+        from longbridge.openapi import CalcIndex
+    except ModuleNotFoundError as exc:  # pragma: no cover - environment dependent
+        raise LongbridgeDependencyMissing(
+            "未找到 longbridge Python SDK，请先运行 `pip install longbridge`。"
+        ) from exc
+
+    requested_indexes = [
+        CalcIndex.LastDone,
+        CalcIndex.ChangeRate,
+        CalcIndex.Volume,
+        CalcIndex.Turnover,
+        CalcIndex.TurnoverRate,
+        CalcIndex.TotalMarketValue,
+        CalcIndex.CapitalFlow,
+        CalcIndex.VolumeRatio,
+        CalcIndex.PeTtmRatio,
+        CalcIndex.PbRatio,
+        CalcIndex.DividendRatioTtm,
+        CalcIndex.FiveDayChangeRate,
+        CalcIndex.TenDayChangeRate,
+        CalcIndex.HalfYearChangeRate,
+        CalcIndex.YtdChangeRate,
+    ]
+    try:
+        with _quote_context(credentials) as context:
+            rows = context.calc_indexes(symbol_list, requested_indexes)
+    except (LongbridgeDependencyMissing, ValueError):
+        raise
+    except Exception as exc:
+        raise LongbridgeAPIError(f"获取 Longbridge 股票指标失败: {exc}") from exc
+
+    fields = (
+        "last_done",
+        "change_rate",
+        "volume",
+        "turnover",
+        "turnover_rate",
+        "total_market_value",
+        "capital_flow",
+        "volume_ratio",
+        "pe_ttm_ratio",
+        "pb_ratio",
+        "dividend_ratio_ttm",
+        "five_day_change_rate",
+        "ten_day_change_rate",
+        "half_year_change_rate",
+        "ytd_change_rate",
+    )
+    return {
+        str(row.symbol).strip().upper(): {
+            field: _safe_float(getattr(row, field, None))
+            for field in fields
+        }
+        for row in rows
+        if getattr(row, "symbol", None)
+    }
+
+
 def sync_history_candlesticks(
     symbols: Optional[Iterable[str]] = None,
     period: str = "day",

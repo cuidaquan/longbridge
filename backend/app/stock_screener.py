@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import logging
-from typing import Any, Dict, Iterator, List, Optional
+import math
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from .exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
 from .longbridge_compat import close_longbridge_context
 from .repositories import load_credentials
+from .services import get_security_calc_indexes
 
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,15 @@ _NAME_KEYS = ("name", "stock_name", "stockName", "name_cn", "name_en")
 
 class StockScreenerService:
     """Normalize Longbridge Screener's raw JSON responses for the stock picker."""
+
+    def __init__(
+        self,
+        index_loader: Callable[
+            [List[str]],
+            Dict[str, Dict[str, Optional[float]]],
+        ] = get_security_calc_indexes,
+    ) -> None:
+        self._index_loader = index_loader
 
     @staticmethod
     def normalize_market(market: str) -> str:
@@ -133,6 +144,8 @@ class StockScreenerService:
         strategy_id: int,
         page: int = 0,
         size: int = 20,
+        filters: Optional[Dict[str, Any]] = None,
+        include_indexes: bool = True,
     ) -> Dict[str, Any]:
         normalized_market = self.normalize_market(market)
         if isinstance(strategy_id, bool) or int(strategy_id) <= 0:
@@ -141,6 +154,7 @@ class StockScreenerService:
             raise ValueError("page 不能小于 0")
         if not 1 <= size <= 100:
             raise ValueError("size 必须在 1～100 之间")
+        normalized_filters = self._normalize_filters(filters or {})
 
         try:
             with self._context() as context:
@@ -162,6 +176,47 @@ class StockScreenerService:
             normalized_market,
             page,
             size,
+        )
+        enrichment = {
+            "status": "disabled",
+            "error": None,
+        }
+        if candidates and (include_indexes or normalized_filters):
+            try:
+                indexes = self._index_loader([
+                    candidate["symbol"]
+                    for candidate in candidates
+                ])
+            except Exception as exc:
+                if normalized_filters:
+                    if isinstance(exc, LongbridgeAPIError):
+                        raise
+                    raise LongbridgeAPIError(
+                        f"无法应用候选过滤条件: {exc}"
+                    ) from exc
+                logger.warning("Longbridge calc_indexes unavailable: %s", exc)
+                enrichment = {
+                    "status": "fallback",
+                    "error": str(exc),
+                }
+            else:
+                for candidate in candidates:
+                    candidate["indexes"] = indexes.get(
+                        candidate["symbol"],
+                        {},
+                    )
+                enrichment = {
+                    "status": "available",
+                    "error": None,
+                }
+        else:
+            for candidate in candidates:
+                candidate["indexes"] = {}
+
+        before_filter_count = len(candidates)
+        candidates, exclusion_reasons = self._apply_index_filters(
+            candidates,
+            normalized_filters,
         )
         total = self._read_int(
             container,
@@ -190,8 +245,100 @@ class StockScreenerService:
             "size": size,
             "total": total,
             "has_more": has_more,
+            "enrichment": enrichment,
+            "filters": {
+                "applied": normalized_filters,
+                "before": before_filter_count,
+                "after": len(candidates),
+                "excluded": before_filter_count - len(candidates),
+                "reasons": exclusion_reasons,
+            },
             "items": candidates,
         }
+
+    def _normalize_filters(self, filters: Dict[str, Any]) -> Dict[str, float]:
+        supported = {
+            "min_turnover": (0, None),
+            "min_market_value": (0, None),
+            "min_turnover_rate": (0, None),
+            "min_pe_ttm": (0, None),
+            "max_pe_ttm": (0, None),
+            "max_pb": (0, None),
+            "min_capital_flow": (None, None),
+            "min_volume_ratio": (0, None),
+        }
+        unknown = set(filters) - set(supported)
+        if unknown:
+            raise ValueError(
+                f"不支持的候选过滤项: {', '.join(sorted(unknown))}"
+            )
+
+        normalized: Dict[str, float] = {}
+        for key, value in filters.items():
+            if value is None or value == "":
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{key} 必须是数字") from exc
+            if not math.isfinite(number):
+                raise ValueError(f"{key} 必须是有限数字")
+            minimum, maximum = supported[key]
+            if minimum is not None and number < minimum:
+                raise ValueError(f"{key} 不能小于 {minimum}")
+            if maximum is not None and number > maximum:
+                raise ValueError(f"{key} 不能大于 {maximum}")
+            normalized[key] = number
+        if (
+            "min_pe_ttm" in normalized
+            and "max_pe_ttm" in normalized
+            and normalized["min_pe_ttm"] > normalized["max_pe_ttm"]
+        ):
+            raise ValueError("min_pe_ttm 不能大于 max_pe_ttm")
+        return normalized
+
+    def _apply_index_filters(
+        self,
+        candidates: List[Dict[str, Any]],
+        filters: Dict[str, float],
+    ) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
+        if not filters:
+            return candidates, {}
+
+        rules = (
+            ("min_turnover", "turnover", "min"),
+            ("min_market_value", "total_market_value", "min"),
+            ("min_turnover_rate", "turnover_rate", "min"),
+            ("min_pe_ttm", "pe_ttm_ratio", "min"),
+            ("max_pe_ttm", "pe_ttm_ratio", "max"),
+            ("max_pb", "pb_ratio", "max"),
+            ("min_capital_flow", "capital_flow", "min"),
+            ("min_volume_ratio", "volume_ratio", "min"),
+        )
+        kept = []
+        reasons: Dict[str, int] = {}
+        for candidate in candidates:
+            indexes = candidate.get("indexes") or {}
+            failure_reason = None
+            for filter_key, metric_key, comparison in rules:
+                threshold = filters.get(filter_key)
+                if threshold is None:
+                    continue
+                value = indexes.get(metric_key)
+                if value is None:
+                    failure_reason = f"missing_{metric_key}"
+                    break
+                if comparison == "min" and value < threshold:
+                    failure_reason = f"below_{filter_key}"
+                    break
+                if comparison == "max" and value > threshold:
+                    failure_reason = f"above_{filter_key}"
+                    break
+            if failure_reason:
+                reasons[failure_reason] = reasons.get(failure_reason, 0) + 1
+            else:
+                kept.append(candidate)
+        return kept, reasons
 
     def _normalize_strategies(
         self,
@@ -282,6 +429,7 @@ class StockScreenerService:
                     default_market,
                 ),
                 "indicators": indicators,
+                "indexes": {},
             })
 
         return candidates, container or {}

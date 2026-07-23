@@ -66,6 +66,19 @@ class StockPickerConfigUpdate(BaseModel):
     max_history_per_stock: Optional[int] = Field(None, ge=1, le=1000)
 
 
+class ScreenerIndexFilters(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    min_turnover: Optional[float] = Field(default=None, ge=0)
+    min_market_value: Optional[float] = Field(default=None, ge=0)
+    min_turnover_rate: Optional[float] = Field(default=None, ge=0)
+    min_pe_ttm: Optional[float] = Field(default=None, ge=0)
+    max_pe_ttm: Optional[float] = Field(default=None, gt=0)
+    max_pb: Optional[float] = Field(default=None, gt=0)
+    min_capital_flow: Optional[float] = None
+    min_volume_ratio: Optional[float] = Field(default=None, ge=0)
+
+
 class ScreenerSearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -73,6 +86,8 @@ class ScreenerSearchRequest(BaseModel):
     strategy_id: int = Field(gt=0)
     page: int = Field(default=0, ge=0, le=10000)
     size: int = Field(default=20, ge=1, le=100)
+    include_indexes: bool = True
+    filters: Optional[ScreenerIndexFilters] = None
 
 
 class ScreenerImportItem(BaseModel):
@@ -255,6 +270,12 @@ async def search_screener_candidates(request: ScreenerSearchRequest):
             request.strategy_id,
             request.page,
             request.size,
+            (
+                request.filters.model_dump(exclude_none=True)
+                if request.filters
+                else None
+            ),
+            request.include_indexes,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

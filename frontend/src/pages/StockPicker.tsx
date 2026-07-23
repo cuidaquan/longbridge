@@ -52,6 +52,7 @@ import {
   type ScreenerStrategy,
   type ScreenerCandidate,
   type ScreenerSearchResponse,
+  type ScreenerIndexFilters,
 } from '../api/stockPicker';
 import { API_BASE } from '../api/client';
 
@@ -758,6 +759,17 @@ function StockDiscoveryDialog({
   const [searching, setSearching] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showFilters, setShowFilters] = useState(false);
+  const [filterInputs, setFilterInputs] = useState({
+    min_turnover: '',
+    min_market_value: '',
+    min_turnover_rate: '',
+    min_pe_ttm: '',
+    max_pe_ttm: '',
+    max_pb: '',
+    min_capital_flow: '',
+    min_volume_ratio: '',
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -800,11 +812,17 @@ function StockDiscoveryDialog({
     setSearching(true);
     setError(null);
     try {
+      const filters = Object.fromEntries(
+        Object.entries(filterInputs)
+          .filter(([, value]) => value.trim() !== '')
+          .map(([key, value]) => [key, Number(value)]),
+      ) as ScreenerIndexFilters;
       const response = await searchScreenerCandidates({
         market,
         strategyId: selectedStrategy.id,
         page,
         size: 20,
+        filters,
       });
       setResult(response);
       setSelectedSymbols(new Set(response.items.map((item) => item.symbol)));
@@ -856,6 +874,18 @@ function StockDiscoveryDialog({
   };
 
   const selectedCount = selectedSymbols.size;
+  const formatIndex = (value: number | null | undefined) => {
+    if (value == null) return '-';
+    const absolute = Math.abs(value);
+    if (absolute >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
+    if (absolute >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+    if (absolute >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
+    return value.toFixed(2);
+  };
+  const indicatorNumber = (value: unknown) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -985,6 +1015,76 @@ function StockDiscoveryDialog({
           </p>
         )}
 
+        <div className="mt-3 rounded-lg border border-slate-200 dark:border-slate-700">
+          <button
+            type="button"
+            onClick={() => setShowFilters((value) => !value)}
+            className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium text-slate-700 dark:text-slate-300"
+          >
+            <span>流动性与估值过滤（可选）</span>
+            {showFilters
+              ? <ExpandLess className="h-4 w-4" />
+              : <ExpandMore className="h-4 w-4" />}
+          </button>
+          {showFilters && (
+            <div className="grid gap-3 border-t border-slate-200 p-3 sm:grid-cols-2 lg:grid-cols-4 dark:border-slate-700">
+              {([
+                ['min_turnover', '最低成交额', '市场币种'],
+                ['min_market_value', '最低总市值', '市场币种'],
+                ['min_turnover_rate', '最低换手率', 'SDK 数值'],
+                ['min_volume_ratio', '最低量比', '例如 1'],
+                ['min_pe_ttm', '最低 PE(TTM)', '例如 0'],
+                ['max_pe_ttm', '最高 PE(TTM)', '例如 40'],
+                ['max_pb', '最高 PB', '例如 8'],
+                ['min_capital_flow', '最低资金流', '可输入负数'],
+              ] as Array<[keyof typeof filterInputs, string, string]>).map(
+                ([key, label, placeholder]) => (
+                  <label key={key} className="text-xs text-slate-500">
+                    <span className="mb-1 block">{label}</span>
+                    <input
+                      type="number"
+                      step="any"
+                      value={filterInputs[key]}
+                      onChange={(event) => {
+                        setFilterInputs((current) => ({
+                          ...current,
+                          [key]: event.target.value,
+                        }));
+                        setResult(null);
+                        setSelectedSymbols(new Set());
+                      }}
+                      placeholder={placeholder}
+                      className="w-full rounded-md border border-slate-300 bg-white px-2 py-1.5
+                        text-sm text-slate-900 focus:border-cyan-500 focus:outline-none
+                        dark:border-slate-600 dark:bg-slate-900 dark:text-white"
+                    />
+                  </label>
+                ),
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setFilterInputs({
+                    min_turnover: '',
+                    min_market_value: '',
+                    min_turnover_rate: '',
+                    min_pe_ttm: '',
+                    max_pe_ttm: '',
+                    max_pb: '',
+                    min_capital_flow: '',
+                    min_volume_ratio: '',
+                  });
+                  setResult(null);
+                  setSelectedSymbols(new Set());
+                }}
+                className="self-end text-left text-xs text-cyan-600 hover:text-cyan-700 dark:text-cyan-400"
+              >
+                清空过滤条件
+              </button>
+            </div>
+          )}
+        </div>
+
         {error && (
           <div className="mt-4">
             <Alert type="error">{error}</Alert>
@@ -994,9 +1094,17 @@ function StockDiscoveryDialog({
         {result && (
           <div className="mt-5">
             <div className="mb-2 flex items-center justify-between gap-3">
-              <p className="text-sm text-slate-600 dark:text-slate-400">
-                第 {result.page + 1} 页，共 {result.total} 个候选；已选择 {selectedCount} 个
-              </p>
+              <div>
+                <p className="text-sm text-slate-600 dark:text-slate-400">
+                  第 {result.page + 1} 页，共 {result.total} 个候选；已选择 {selectedCount} 个
+                </p>
+                {result.filters.excluded > 0 && (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    本页按指标过滤 {result.filters.excluded} 只，
+                    保留 {result.filters.after}/{result.filters.before} 只
+                  </p>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={() => {
@@ -1011,6 +1119,14 @@ function StockDiscoveryDialog({
                 {selectedCount === result.items.length ? '取消全选' : '全选本页'}
               </button>
             </div>
+
+            {result.enrichment.status === 'fallback' && (
+              <div className="mb-2">
+                <Alert type="warning">
+                  实时指标暂不可用，当前仅展示 Screener 原始结果。
+                </Alert>
+              </div>
+            )}
 
             <div className="max-h-80 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-2 dark:border-slate-700">
               {result.items.length === 0 ? (
@@ -1044,17 +1160,24 @@ function StockDiscoveryDialog({
                         <span className="text-xs text-slate-400">#{candidate.rank}</span>
                       </div>
                       <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                        <span>成交额 {formatIndex(candidate.indexes.turnover)}</span>
+                        <span>市值 {formatIndex(candidate.indexes.total_market_value)}</span>
+                        <span>换手 {formatIndex(candidate.indexes.turnover_rate)}</span>
+                        <span>资金流 {formatIndex(candidate.indexes.capital_flow)}</span>
+                        <span>
+                          PE {formatIndex(
+                            candidate.indexes.pe_ttm_ratio
+                              ?? indicatorNumber(candidate.indicators.pettm),
+                          )}
+                        </span>
+                        <span>
+                          PB {formatIndex(
+                            candidate.indexes.pb_ratio
+                              ?? indicatorNumber(candidate.indicators.pbmrq),
+                          )}
+                        </span>
                         {candidate.indicators.industry != null && (
                           <span>行业 {String(candidate.indicators.industry)}</span>
-                        )}
-                        {candidate.indicators.prevchg != null && (
-                          <span>涨跌 {String(candidate.indicators.prevchg)}</span>
-                        )}
-                        {candidate.indicators.pettm != null && (
-                          <span>PE {String(candidate.indicators.pettm)}</span>
-                        )}
-                        {candidate.indicators.pbmrq != null && (
-                          <span>PB {String(candidate.indicators.pbmrq)}</span>
                         )}
                       </div>
                     </div>
