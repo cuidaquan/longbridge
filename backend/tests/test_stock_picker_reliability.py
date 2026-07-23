@@ -17,6 +17,7 @@ from app.main import _persist_stock_picker_reliability, app
 from app.stock_picker_reliability import (
     DELIVERY_RETRY_SECONDS,
     RELIABILITY_RETENTION_DAYS,
+    RELIABILITY_WORKER_STALE_SECONDS,
     StockPickerReliabilityService,
     _NoRedirectHandler,
     _send_webhook,
@@ -362,6 +363,67 @@ class StockPickerReliabilityPersistenceTests(unittest.TestCase):
             121,
         )
 
+    def test_worker_health_tracks_success_failure_and_results(
+        self,
+    ) -> None:
+        starting = self.service.get_worker_health()
+        self.assertEqual(starting["status"], "starting")
+        self.assertTrue(starting["healthy"])
+        self.assertFalse(starting["ready"])
+
+        self.service.mark_worker_started("capture")
+        self.service.mark_worker_succeeded(
+            "capture",
+            {"alert_count": 1},
+        )
+        self.service.mark_worker_started("delivery")
+        self.service.mark_worker_succeeded(
+            "delivery",
+            {"selected": 0},
+        )
+        healthy = self.service.get_worker_health()
+        self.assertEqual(healthy["status"], "healthy")
+        self.assertTrue(healthy["healthy"])
+        self.assertTrue(healthy["ready"])
+        self.assertEqual(
+            healthy["workers"]["capture"]["last_result"],
+            {"alert_count": 1},
+        )
+
+        self.service.mark_worker_started("delivery")
+        self.service.mark_worker_failed(
+            "delivery",
+            RuntimeError("https://alerts.example.test/secret"),
+        )
+        degraded = self.service.get_worker_health()
+        delivery = degraded["workers"]["delivery"]
+        self.assertEqual(degraded["status"], "degraded")
+        self.assertFalse(degraded["healthy"])
+        self.assertEqual(delivery["state"], "failed")
+        self.assertEqual(delivery["consecutive_failures"], 1)
+        self.assertEqual(delivery["last_error"], "RuntimeError")
+        self.assertNotIn("secret", json.dumps(degraded))
+
+    def test_worker_health_becomes_stale_without_heartbeat(
+        self,
+    ) -> None:
+        self.clock.advance(RELIABILITY_WORKER_STALE_SECONDS + 1)
+
+        health = self.service.get_worker_health()
+
+        self.assertEqual(health["status"], "stale")
+        self.assertFalse(health["healthy"])
+        self.assertFalse(health["ready"])
+        self.assertTrue(health["workers"]["capture"]["stale"])
+        self.assertTrue(health["workers"]["delivery"]["stale"])
+
+    def test_worker_health_rejects_unknown_worker(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "未知可靠性 worker",
+        ):
+            self.service.mark_worker_started("unknown")
+
     def test_disabled_webhook_records_skipped_transition_without_secret(
         self,
     ) -> None:
@@ -685,6 +747,8 @@ class StockPickerReliabilityLoopTests(
             asyncio.CancelledError(),
         ]
         service.deliver_due.return_value = {
+            "selected": 0,
+            "delivered": 0,
             "failed": 0,
             "dead_letter": 0,
         }
@@ -703,16 +767,42 @@ class StockPickerReliabilityLoopTests(
 
         self.assertEqual(service.capture.call_count, 2)
         service.deliver_due.assert_called_once_with()
+        service.mark_worker_started.assert_any_call("capture")
+        service.mark_worker_started.assert_any_call("delivery")
+        service.mark_worker_succeeded.assert_any_call(
+            "capture",
+            {
+                "alert_count": 0,
+                "transition_count": 0,
+            },
+        )
+        service.mark_worker_succeeded.assert_any_call(
+            "delivery",
+            {
+                "selected": service.deliver_due.return_value[
+                    "selected"
+                ],
+                "delivered": service.deliver_due.return_value[
+                    "delivered"
+                ],
+                "failed": 0,
+                "dead_letter": 0,
+            },
+        )
+        service.mark_worker_failed.assert_not_called()
 
     async def test_loop_delivers_when_capture_fails(
         self,
     ) -> None:
         service = MagicMock()
+        capture_error = RuntimeError("capture failed")
         service.capture.side_effect = [
-            RuntimeError("capture failed"),
+            capture_error,
             asyncio.CancelledError(),
         ]
         service.deliver_due.return_value = {
+            "selected": 0,
+            "delivered": 0,
             "failed": 0,
             "dead_letter": 0,
         }
@@ -732,6 +822,23 @@ class StockPickerReliabilityLoopTests(
 
         self.assertEqual(service.capture.call_count, 2)
         service.deliver_due.assert_called_once_with()
+        service.mark_worker_failed.assert_called_once_with(
+            "capture",
+            capture_error,
+        )
+        service.mark_worker_succeeded.assert_any_call(
+            "delivery",
+            {
+                "selected": service.deliver_due.return_value[
+                    "selected"
+                ],
+                "delivered": service.deliver_due.return_value[
+                    "delivered"
+                ],
+                "failed": 0,
+                "dead_letter": 0,
+            },
+        )
 
 
 class StockPickerReliabilityHttpTests(unittest.TestCase):
@@ -794,3 +901,54 @@ class StockPickerReliabilityHttpTests(unittest.TestCase):
             limit=5,
         )
         service.get_deliveries.assert_called_once_with(limit=7)
+
+    def test_health_route_reports_degraded_worker_as_unavailable(
+        self,
+    ) -> None:
+        service = MagicMock()
+        healthy = {
+            "status": "healthy",
+            "healthy": True,
+            "ready": True,
+            "workers": {},
+        }
+        degraded = {
+            "status": "degraded",
+            "healthy": False,
+            "ready": True,
+            "workers": {
+                "delivery": {
+                    "state": "failed",
+                }
+            },
+        }
+        service.get_worker_health.side_effect = [
+            healthy,
+            degraded,
+        ]
+        with patch(
+            "app.routers.stock_picker."
+            "get_stock_picker_reliability_service",
+            return_value=service,
+        ):
+            client = TestClient(app)
+            try:
+                healthy_response = client.get(
+                    "/api/stock-picker/reliability/health"
+                )
+                degraded_response = client.get(
+                    "/api/stock-picker/reliability/health"
+                )
+            finally:
+                client.close()
+
+        self.assertEqual(healthy_response.status_code, 200)
+        self.assertEqual(
+            healthy_response.json()["status"],
+            "healthy",
+        )
+        self.assertEqual(degraded_response.status_code, 503)
+        self.assertEqual(
+            degraded_response.json()["status"],
+            "degraded",
+        )

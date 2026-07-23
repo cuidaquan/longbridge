@@ -2,7 +2,7 @@
 选股系统 API 路由
 """
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Literal, Optional, AsyncGenerator
 from datetime import datetime, timedelta, timezone
@@ -526,6 +526,25 @@ def get_stock_picker_reliability():
     except Exception as exc:
         logger.error(
             "获取智能选股可靠性状态失败: %s",
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/reliability/health")
+def get_stock_picker_reliability_health():
+    try:
+        health = (
+            get_stock_picker_reliability_service()
+            .get_worker_health()
+        )
+        if not health["healthy"]:
+            return JSONResponse(status_code=503, content=health)
+        return health
+    except Exception as exc:
+        logger.error(
+            "获取智能选股可靠性 worker 健康状态失败: %s",
             exc,
             exc_info=True,
         )

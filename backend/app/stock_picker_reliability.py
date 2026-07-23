@@ -31,6 +31,10 @@ AI_DEGRADATION_WARNING = 0.5
 DELIVERY_MAX_ATTEMPTS = 3
 DELIVERY_RETRY_SECONDS = 60
 DELIVERY_BATCH_SIZE = 20
+RELIABILITY_WORKER_STALE_SECONDS = (
+    RELIABILITY_CAPTURE_INTERVAL_SECONDS * 3
+)
+RELIABILITY_WORKERS = ("capture", "delivery")
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -136,6 +140,21 @@ class StockPickerReliabilityService:
         self.delivery_config_provider = delivery_config_provider
         self.webhook_sender = webhook_sender
         self._delivery_lock = threading.Lock()
+        self._worker_lock = threading.Lock()
+        self._worker_started_at = self._as_utc(self.clock())
+        self._worker_states = {
+            worker: {
+                "state": "starting",
+                "last_started_at": None,
+                "last_completed_at": None,
+                "last_succeeded_at": None,
+                "last_failed_at": None,
+                "consecutive_failures": 0,
+                "last_error": None,
+                "last_result": None,
+            }
+            for worker in RELIABILITY_WORKERS
+        }
 
     def capture(self) -> Dict[str, Any]:
         observed_at = self._as_utc(self.clock())
@@ -208,6 +227,7 @@ class StockPickerReliabilityService:
     def get_current(self) -> Dict[str, Any]:
         current = self.snapshot_provider()
         delivery_config = self.delivery_config_provider()
+        worker_health = self.get_worker_health()
         persistence_error = None
         try:
             with self.connection_factory() as conn:
@@ -281,6 +301,138 @@ class StockPickerReliabilityService:
                 "max_attempts": DELIVERY_MAX_ATTEMPTS,
                 **delivery_summary,
             },
+            "worker": worker_health,
+        }
+
+    def mark_worker_started(self, worker: str) -> None:
+        now = self._as_utc(self.clock())
+        with self._worker_lock:
+            state = self._get_worker_state(worker)
+            state["state"] = "running"
+            state["last_started_at"] = now
+
+    def mark_worker_succeeded(
+        self,
+        worker: str,
+        result: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        now = self._as_utc(self.clock())
+        with self._worker_lock:
+            state = self._get_worker_state(worker)
+            state["state"] = "ok"
+            state["last_completed_at"] = now
+            state["last_succeeded_at"] = now
+            state["consecutive_failures"] = 0
+            state["last_error"] = None
+            state["last_result"] = dict(result or {})
+
+    def mark_worker_failed(
+        self,
+        worker: str,
+        exc: BaseException,
+    ) -> None:
+        now = self._as_utc(self.clock())
+        with self._worker_lock:
+            state = self._get_worker_state(worker)
+            state["state"] = "failed"
+            state["last_completed_at"] = now
+            state["last_failed_at"] = now
+            state["consecutive_failures"] += 1
+            state["last_error"] = type(exc).__name__
+            state["last_result"] = None
+
+    def get_worker_health(self) -> Dict[str, Any]:
+        now = self._as_utc(self.clock())
+        with self._worker_lock:
+            started_at = self._worker_started_at
+            states = {
+                worker: {
+                    **state,
+                    "last_result": (
+                        dict(state["last_result"])
+                        if state["last_result"] is not None
+                        else None
+                    ),
+                }
+                for worker, state in self._worker_states.items()
+            }
+
+        workers = {}
+        any_stale = False
+        any_failed = False
+        any_starting = False
+        any_running = False
+        for worker, state in states.items():
+            last_completed_at = state["last_completed_at"]
+            heartbeat_at = last_completed_at or started_at
+            heartbeat_age_seconds = round(
+                max(0.0, (now - heartbeat_at).total_seconds()),
+                3,
+            )
+            stale = (
+                heartbeat_age_seconds
+                > RELIABILITY_WORKER_STALE_SECONDS
+            )
+            any_stale = any_stale or stale
+            any_failed = (
+                any_failed
+                or state["state"] == "failed"
+            )
+            any_starting = (
+                any_starting
+                or last_completed_at is None
+            )
+            any_running = (
+                any_running
+                or state["state"] == "running"
+            )
+            workers[worker] = {
+                "state": state["state"],
+                "stale": stale,
+                "heartbeat_age_seconds": heartbeat_age_seconds,
+                "last_started_at": self._optional_isoformat(
+                    state["last_started_at"]
+                ),
+                "last_completed_at": self._optional_isoformat(
+                    last_completed_at
+                ),
+                "last_succeeded_at": self._optional_isoformat(
+                    state["last_succeeded_at"]
+                ),
+                "last_failed_at": self._optional_isoformat(
+                    state["last_failed_at"]
+                ),
+                "consecutive_failures": state[
+                    "consecutive_failures"
+                ],
+                "last_error": state["last_error"],
+                "last_result": state["last_result"],
+            }
+
+        if any_stale:
+            status = "stale"
+        elif any_failed:
+            status = "degraded"
+        elif any_starting:
+            status = "starting"
+        elif any_running:
+            status = "running"
+        else:
+            status = "healthy"
+        return {
+            "status": status,
+            "healthy": status not in ("stale", "degraded"),
+            "ready": not any_starting,
+            "process_id": self.process_id,
+            "started_at": self._isoformat(started_at),
+            "checked_at": self._isoformat(now),
+            "interval_seconds": (
+                RELIABILITY_CAPTURE_INTERVAL_SECONDS
+            ),
+            "stale_after_seconds": (
+                RELIABILITY_WORKER_STALE_SECONDS
+            ),
+            "workers": workers,
         }
 
     def get_history(
@@ -1128,6 +1280,18 @@ class StockPickerReliabilityService:
                 f"{type(exc).__name__}"
             )
         return message[:500]
+
+    def _get_worker_state(self, worker: str) -> Dict[str, Any]:
+        if worker not in self._worker_states:
+            raise ValueError(f"未知可靠性 worker: {worker}")
+        return self._worker_states[worker]
+
+    @classmethod
+    def _optional_isoformat(
+        cls,
+        value: Optional[datetime],
+    ) -> Optional[str]:
+        return cls._isoformat(value) if value is not None else None
 
     @staticmethod
     def _counter_delta(

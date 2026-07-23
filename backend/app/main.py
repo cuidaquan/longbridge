@@ -278,7 +278,17 @@ async def _persist_stock_picker_reliability() -> None:
     service = get_stock_picker_reliability_service()
     while True:
         try:
+            service.mark_worker_started("capture")
             result = await asyncio.to_thread(service.capture)
+            service.mark_worker_succeeded(
+                "capture",
+                {
+                    "alert_count": len(result["alerts"]),
+                    "transition_count": len(
+                        result.get("alert_transitions", [])
+                    ),
+                },
+            )
             if result["alerts"]:
                 logger.warning(
                     "stock-picker reliability: %s active alerts",
@@ -287,12 +297,23 @@ async def _persist_stock_picker_reliability() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            service.mark_worker_failed("capture", exc)
             logger.warning(
                 "stock-picker reliability persistence failed: %s",
                 exc,
             )
         try:
+            service.mark_worker_started("delivery")
             delivery = await asyncio.to_thread(service.deliver_due)
+            service.mark_worker_succeeded(
+                "delivery",
+                {
+                    "selected": delivery["selected"],
+                    "delivered": delivery["delivered"],
+                    "failed": delivery["failed"],
+                    "dead_letter": delivery["dead_letter"],
+                },
+            )
             if delivery["failed"] or delivery["dead_letter"]:
                 logger.warning(
                     "stock-picker reliability delivery: "
@@ -303,6 +324,7 @@ async def _persist_stock_picker_reliability() -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            service.mark_worker_failed("delivery", exc)
             logger.warning(
                 "stock-picker reliability delivery failed: %s",
                 exc,
