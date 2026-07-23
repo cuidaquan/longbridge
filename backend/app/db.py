@@ -149,6 +149,7 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_STOCK_PICKER_CONFIG_TABLE_SQL)
     conn.execute(_STOCK_PICKER_BACKTEST_TABLE_SQL)
     conn.execute(_STOCK_PICKER_FACTOR_EXPERIMENT_TABLE_SQL)
+    conn.execute(_STOCK_PICKER_FACTOR_SNAPSHOT_TABLE_SQL)
 
     # 板块轮动表
     conn.execute(_SECTOR_ETFS_TABLE_SQL)
@@ -183,6 +184,19 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     _ensure_column(conn, "stock_picker_config", "ai_top_n_per_pool", "INTEGER DEFAULT 10")
     _ensure_column(conn, "stock_picker_config", "history_retention_days", "INTEGER DEFAULT 90")
     _ensure_column(conn, "stock_picker_config", "max_history_per_stock", "INTEGER DEFAULT 30")
+    _ensure_column(
+        conn,
+        "stock_picker_factor_snapshots",
+        "observation_date",
+        "DATE",
+    )
+    conn.execute(
+        """
+        UPDATE stock_picker_factor_snapshots
+        SET observation_date = CAST(observed_at AS DATE)
+        WHERE observation_date IS NULL
+        """
+    )
     conn.execute("""
         UPDATE stock_picker_analysis
         SET score_support_resistance = GREATEST(
@@ -447,6 +461,35 @@ CREATE TABLE IF NOT EXISTS stock_picker_factor_experiments (
 );
 CREATE INDEX IF NOT EXISTS idx_stock_picker_factor_experiment_created
 ON stock_picker_factor_experiments(created_at DESC);
+"""
+
+_STOCK_PICKER_FACTOR_SNAPSHOT_TABLE_SQL = """
+CREATE SEQUENCE IF NOT EXISTS stock_picker_factor_snapshot_seq START 1;
+CREATE TABLE IF NOT EXISTS stock_picker_factor_snapshots (
+    id INTEGER PRIMARY KEY DEFAULT nextval(
+        'stock_picker_factor_snapshot_seq'
+    ),
+    request_id TEXT NOT NULL,
+    observed_at TIMESTAMP NOT NULL,
+    observation_date DATE NOT NULL,
+    snapshot_version TEXT NOT NULL,
+    market TEXT NOT NULL,
+    target_direction TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    benchmark_symbol TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_versions TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    UNIQUE(request_id, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_stock_picker_factor_snapshot_observed
+ON stock_picker_factor_snapshots(observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_stock_picker_factor_snapshot_symbol
+ON stock_picker_factor_snapshots(symbol, observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_stock_picker_factor_snapshot_group
+ON stock_picker_factor_snapshots(
+    market, target_direction, observed_at DESC
+);
 """
 
 # ============================================

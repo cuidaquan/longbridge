@@ -19,6 +19,9 @@ from ..external_service_resilience import (
 from ..models import SecuritySearchResponse
 from ..security_catalog import get_security_catalog_service
 from ..stock_picker_backtest import get_stock_picker_backtest_service
+from ..stock_picker_factor_snapshots import (
+    get_stock_picker_factor_snapshot_service,
+)
 from ..stock_screener import get_stock_screener_service
 
 logger = logging.getLogger(__name__)
@@ -186,6 +189,13 @@ class StockPickerBacktestRequest(BaseModel):
     train_ratio: float = Field(default=0.7, ge=0.5, le=0.9)
     walk_forward_folds: int = Field(default=3, ge=1, le=10)
     transaction_cost_bps: float = Field(default=10, ge=0, le=1000)
+
+
+class StockPickerFactorSnapshotCaptureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    market: Literal["US", "HK"]
+    target_direction: Literal["LONG", "SHORT"]
 
 
 def _utc_now() -> datetime:
@@ -458,6 +468,48 @@ async def get_stock_picker_backtests(
         }
     except Exception as exc:
         logger.error("获取智能选股回测历史失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/factor-snapshots/capture")
+async def capture_stock_picker_factor_snapshots(
+    request: StockPickerFactorSnapshotCaptureRequest,
+):
+    try:
+        return await asyncio.to_thread(
+            get_stock_picker_factor_snapshot_service().capture_baseline,
+            market=request.market,
+            target_direction=request.target_direction,
+            persist=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(
+            "采集智能选股因子点时快照失败: %s",
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/factor-snapshots/coverage")
+async def get_stock_picker_factor_snapshot_coverage(
+    days: int = Query(default=365, ge=1, le=3650),
+):
+    try:
+        return await asyncio.to_thread(
+            get_stock_picker_factor_snapshot_service().get_coverage,
+            days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(
+            "获取智能选股因子快照覆盖率失败: %s",
+            exc,
+            exc_info=True,
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
