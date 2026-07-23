@@ -3,12 +3,13 @@ from __future__ import annotations
 from contextlib import contextmanager
 import logging
 import math
+from statistics import median
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from .exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
 from .longbridge_compat import close_longbridge_context
 from .repositories import load_credentials
-from .services import get_security_calc_indexes
+from .services import get_security_calc_indexes, get_short_risk_metrics
 
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,12 @@ _STRATEGY_NAME_KEYS = (
 )
 _SYMBOL_KEYS = ("symbol", "stock_symbol", "stockSymbol", "stock_code", "stockCode")
 _NAME_KEYS = ("name", "stock_name", "stockName", "name_cn", "name_en")
+DEFAULT_MARKET_BENCHMARKS = {
+    "US": "SPY.US",
+    "HK": "2800.HK",
+    "CN": "510300.SH",
+    "SG": "ES3.SG",
+}
 
 
 class StockScreenerService:
@@ -39,8 +46,13 @@ class StockScreenerService:
             [List[str]],
             Dict[str, Dict[str, Optional[float]]],
         ] = get_security_calc_indexes,
+        short_risk_loader: Callable[
+            [List[str]],
+            Dict[str, Dict[str, object]],
+        ] = get_short_risk_metrics,
     ) -> None:
         self._index_loader = index_loader
+        self._short_risk_loader = short_risk_loader
 
     @staticmethod
     def normalize_market(market: str) -> str:
@@ -146,8 +158,19 @@ class StockScreenerService:
         size: int = 20,
         filters: Optional[Dict[str, Any]] = None,
         include_indexes: bool = True,
+        target_direction: str = "LONG",
+        benchmark_symbol: Optional[str] = None,
+        include_short_risk: bool = True,
     ) -> Dict[str, Any]:
         normalized_market = self.normalize_market(market)
+        normalized_direction = target_direction.strip().upper()
+        if normalized_direction not in {"LONG", "SHORT"}:
+            raise ValueError("target_direction 必须是 LONG 或 SHORT")
+        benchmark = (
+            benchmark_symbol.strip().upper()
+            if benchmark_symbol and benchmark_symbol.strip()
+            else DEFAULT_MARKET_BENCHMARKS[normalized_market]
+        )
         if isinstance(strategy_id, bool) or int(strategy_id) <= 0:
             raise ValueError("strategy_id 必须是正整数")
         if page < 0:
@@ -155,6 +178,16 @@ class StockScreenerService:
         if not 1 <= size <= 100:
             raise ValueError("size 必须在 1～100 之间")
         normalized_filters = self._normalize_filters(filters or {})
+        short_filter_keys = {
+            "max_days_to_cover",
+            "max_short_ratio",
+            "max_short_ratio_change",
+        }
+        if (
+            normalized_direction != "SHORT"
+            and short_filter_keys.intersection(normalized_filters)
+        ):
+            raise ValueError("做空拥挤度过滤仅适用于 SHORT 方向")
 
         try:
             with self._context() as context:
@@ -183,10 +216,13 @@ class StockScreenerService:
         }
         if candidates and (include_indexes or normalized_filters):
             try:
-                indexes = self._index_loader([
+                index_symbols = [
                     candidate["symbol"]
                     for candidate in candidates
-                ])
+                ]
+                if benchmark not in index_symbols:
+                    index_symbols.append(benchmark)
+                indexes = self._index_loader(index_symbols)
             except Exception as exc:
                 if normalized_filters:
                     if isinstance(exc, LongbridgeAPIError):
@@ -205,6 +241,12 @@ class StockScreenerService:
                         candidate["symbol"],
                         {},
                     )
+                self._attach_relative_strength(
+                    candidates,
+                    indexes.get(benchmark, {}),
+                    normalized_direction,
+                    benchmark,
+                )
                 enrichment = {
                     "status": "available",
                     "error": None,
@@ -212,6 +254,88 @@ class StockScreenerService:
         else:
             for candidate in candidates:
                 candidate["indexes"] = {}
+                candidate["relative_strength"] = self._empty_relative_strength(
+                    benchmark,
+                    normalized_direction,
+                )
+        for candidate in candidates:
+            candidate.setdefault("indexes", {})
+            candidate.setdefault(
+                "relative_strength",
+                self._empty_relative_strength(
+                    benchmark,
+                    normalized_direction,
+                ),
+            )
+
+        relative_filter_keys = {
+            "min_market_rs_10d",
+            "min_market_rs_half_year",
+        }
+        for filter_key in relative_filter_keys.intersection(
+            normalized_filters
+        ):
+            metric_key = filter_key.replace("min_", "")
+            if candidates and not any(
+                (candidate.get("relative_strength") or {}).get(metric_key)
+                is not None
+                for candidate in candidates
+            ):
+                raise LongbridgeAPIError(
+                    f"市场基准 {benchmark} 的 {metric_key} 数据不可用"
+                )
+
+        short_risk_status = {
+            "status": "not_applicable"
+            if normalized_direction != "SHORT"
+            else "disabled",
+            "error": None,
+        }
+        needs_short_risk = (
+            normalized_direction == "SHORT"
+            and (
+                include_short_risk
+                or bool(short_filter_keys.intersection(normalized_filters))
+            )
+        )
+        if needs_short_risk and candidates:
+            try:
+                short_risk = self._short_risk_loader([
+                    candidate["symbol"]
+                    for candidate in candidates
+                ])
+            except Exception as exc:
+                if short_filter_keys.intersection(normalized_filters):
+                    if isinstance(exc, LongbridgeAPIError):
+                        raise
+                    raise LongbridgeAPIError(
+                        f"无法应用做空拥挤度过滤: {exc}"
+                    ) from exc
+                logger.warning("Longbridge short-risk metrics unavailable: %s", exc)
+                short_risk_status = {
+                    "status": "fallback",
+                    "error": str(exc),
+                }
+            else:
+                for candidate in candidates:
+                    candidate["short_risk"] = short_risk.get(
+                        candidate["symbol"],
+                        {
+                            "status": "no_data",
+                            "error": None,
+                        },
+                    )
+                short_risk_status = {
+                    "status": "available",
+                    "error": None,
+                }
+        for candidate in candidates:
+            candidate.setdefault("short_risk", {
+                "status": "not_applicable"
+                if normalized_direction != "SHORT"
+                else short_risk_status["status"],
+                "error": short_risk_status["error"],
+            })
 
         before_filter_count = len(candidates)
         candidates, exclusion_reasons = self._apply_index_filters(
@@ -228,7 +352,7 @@ class StockScreenerService:
                 ("total", "total_count", "totalCount", "count"),
             )
         if total is None:
-            total = page * size + len(candidates)
+            total = page * size + before_filter_count
 
         has_more = self._read_bool(
             container,
@@ -246,6 +370,12 @@ class StockScreenerService:
             "total": total,
             "has_more": has_more,
             "enrichment": enrichment,
+            "relative_strength": {
+                "benchmark_symbol": benchmark,
+                "target_direction": normalized_direction,
+                "industry_basis": "current_page_industry_median",
+            },
+            "short_risk": short_risk_status,
             "filters": {
                 "applied": normalized_filters,
                 "before": before_filter_count,
@@ -266,6 +396,13 @@ class StockScreenerService:
             "max_pb": (0, None),
             "min_capital_flow": (None, None),
             "min_volume_ratio": (0, None),
+            "min_market_rs_10d": (None, None),
+            "min_market_rs_half_year": (None, None),
+            "min_industry_rs_10d": (None, None),
+            "min_industry_rs_half_year": (None, None),
+            "max_days_to_cover": (0, None),
+            "max_short_ratio": (0, None),
+            "max_short_ratio_change": (None, None),
         }
         unknown = set(filters) - set(supported)
         if unknown:
@@ -306,25 +443,51 @@ class StockScreenerService:
             return candidates, {}
 
         rules = (
-            ("min_turnover", "turnover", "min"),
-            ("min_market_value", "total_market_value", "min"),
-            ("min_turnover_rate", "turnover_rate", "min"),
-            ("min_pe_ttm", "pe_ttm_ratio", "min"),
-            ("max_pe_ttm", "pe_ttm_ratio", "max"),
-            ("max_pb", "pb_ratio", "max"),
-            ("min_capital_flow", "capital_flow", "min"),
-            ("min_volume_ratio", "volume_ratio", "min"),
+            ("min_turnover", "indexes", "turnover", "min"),
+            ("min_market_value", "indexes", "total_market_value", "min"),
+            ("min_turnover_rate", "indexes", "turnover_rate", "min"),
+            ("min_pe_ttm", "indexes", "pe_ttm_ratio", "min"),
+            ("max_pe_ttm", "indexes", "pe_ttm_ratio", "max"),
+            ("max_pb", "indexes", "pb_ratio", "max"),
+            ("min_capital_flow", "indexes", "capital_flow", "min"),
+            ("min_volume_ratio", "indexes", "volume_ratio", "min"),
+            ("min_market_rs_10d", "relative_strength", "market_rs_10d", "min"),
+            (
+                "min_market_rs_half_year",
+                "relative_strength",
+                "market_rs_half_year",
+                "min",
+            ),
+            (
+                "min_industry_rs_10d",
+                "relative_strength",
+                "industry_rs_10d",
+                "min",
+            ),
+            (
+                "min_industry_rs_half_year",
+                "relative_strength",
+                "industry_rs_half_year",
+                "min",
+            ),
+            ("max_days_to_cover", "short_risk", "days_to_cover", "max"),
+            ("max_short_ratio", "short_risk", "short_ratio", "max"),
+            (
+                "max_short_ratio_change",
+                "short_risk",
+                "short_ratio_change",
+                "max",
+            ),
         )
         kept = []
         reasons: Dict[str, int] = {}
         for candidate in candidates:
-            indexes = candidate.get("indexes") or {}
             failure_reason = None
-            for filter_key, metric_key, comparison in rules:
+            for filter_key, section, metric_key, comparison in rules:
                 threshold = filters.get(filter_key)
                 if threshold is None:
                     continue
-                value = indexes.get(metric_key)
+                value = (candidate.get(section) or {}).get(metric_key)
                 if value is None:
                     failure_reason = f"missing_{metric_key}"
                     break
@@ -339,6 +502,103 @@ class StockScreenerService:
             else:
                 kept.append(candidate)
         return kept, reasons
+
+    def _attach_relative_strength(
+        self,
+        candidates: List[Dict[str, Any]],
+        benchmark_indexes: Dict[str, Optional[float]],
+        target_direction: str,
+        benchmark_symbol: str,
+    ) -> None:
+        direction = 1 if target_direction == "LONG" else -1
+        horizons = {
+            "10d": "ten_day_change_rate",
+            "half_year": "half_year_change_rate",
+        }
+        industry_groups: Dict[str, Dict[str, List[float]]] = {}
+        for candidate in candidates:
+            industry = str(
+                candidate.get("indicators", {}).get("industry") or ""
+            ).strip()
+            if not industry:
+                continue
+            industry_groups.setdefault(
+                industry,
+                {horizon: [] for horizon in horizons},
+            )
+            for horizon, metric in horizons.items():
+                value = (candidate.get("indexes") or {}).get(metric)
+                if value is not None:
+                    industry_groups[industry][horizon].append(value)
+
+        industry_medians = {
+            industry: {
+                horizon: median(values) if values else None
+                for horizon, values in by_horizon.items()
+            }
+            for industry, by_horizon in industry_groups.items()
+        }
+        for candidate in candidates:
+            indexes = candidate.get("indexes") or {}
+            industry = str(
+                candidate.get("indicators", {}).get("industry") or ""
+            ).strip()
+            peer_count = max(
+                (
+                    len(values)
+                    for values in industry_groups.get(industry, {}).values()
+                ),
+                default=0,
+            )
+            relative = self._empty_relative_strength(
+                benchmark_symbol,
+                target_direction,
+            )
+            relative["industry"] = industry or None
+            relative["industry_peer_count"] = peer_count
+            for horizon, metric in horizons.items():
+                stock_return = indexes.get(metric)
+                market_return = benchmark_indexes.get(metric)
+                industry_return = (
+                    industry_medians.get(industry, {}).get(horizon)
+                    if (
+                        industry
+                        and len(
+                            industry_groups.get(industry, {}).get(
+                                horizon,
+                                [],
+                            )
+                        ) >= 2
+                    )
+                    else None
+                )
+                if stock_return is not None and market_return is not None:
+                    relative[f"market_rs_{horizon}"] = round(
+                        direction * (stock_return - market_return),
+                        6,
+                    )
+                if stock_return is not None and industry_return is not None:
+                    relative[f"industry_rs_{horizon}"] = round(
+                        direction * (stock_return - industry_return),
+                        6,
+                    )
+            candidate["relative_strength"] = relative
+
+    @staticmethod
+    def _empty_relative_strength(
+        benchmark_symbol: str,
+        target_direction: str,
+    ) -> Dict[str, Any]:
+        return {
+            "benchmark_symbol": benchmark_symbol,
+            "target_direction": target_direction,
+            "industry": None,
+            "industry_peer_count": 0,
+            "market_rs_10d": None,
+            "market_rs_half_year": None,
+            "industry_rs_10d": None,
+            "industry_rs_half_year": None,
+        }
 
     def _normalize_strategies(
         self,

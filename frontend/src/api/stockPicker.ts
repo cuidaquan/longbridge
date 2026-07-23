@@ -112,6 +112,29 @@ export interface ScreenerCandidate {
   market: ScreenerMarket;
   indicators: Record<string, string | number | boolean | null>;
   indexes: Record<string, number | null>;
+  relative_strength: {
+    benchmark_symbol: string;
+    target_direction: 'LONG' | 'SHORT';
+    industry?: string | null;
+    industry_peer_count: number;
+    market_rs_10d?: number | null;
+    market_rs_half_year?: number | null;
+    industry_rs_10d?: number | null;
+    industry_rs_half_year?: number | null;
+  };
+  short_risk: {
+    status: 'available' | 'no_data' | 'unsupported' | 'error' | 'fallback' | 'not_applicable';
+    error?: string | null;
+    data_as_of?: string;
+    short_ratio?: number | null;
+    short_ratio_change?: number | null;
+    days_to_cover?: number | null;
+    shares_short?: number | null;
+    avg_daily_volume?: number | null;
+    short_amount?: number | null;
+    short_balance?: number | null;
+    short_cost?: number | null;
+  };
 }
 
 export interface ScreenerIndexFilters {
@@ -123,6 +146,13 @@ export interface ScreenerIndexFilters {
   max_pb?: number;
   min_capital_flow?: number;
   min_volume_ratio?: number;
+  min_market_rs_10d?: number;
+  min_market_rs_half_year?: number;
+  min_industry_rs_10d?: number;
+  min_industry_rs_half_year?: number;
+  max_days_to_cover?: number;
+  max_short_ratio?: number;
+  max_short_ratio_change?: number;
 }
 
 export interface ScreenerSearchResponse {
@@ -135,6 +165,15 @@ export interface ScreenerSearchResponse {
   has_more: boolean;
   enrichment: {
     status: 'available' | 'fallback' | 'disabled';
+    error?: string;
+  };
+  relative_strength: {
+    benchmark_symbol: string;
+    target_direction: 'LONG' | 'SHORT';
+    industry_basis: 'current_page_industry_median';
+  };
+  short_risk: {
+    status: 'available' | 'fallback' | 'disabled' | 'not_applicable';
     error?: string;
   };
   filters: {
@@ -245,6 +284,9 @@ export async function searchScreenerCandidates(params: {
   size?: number;
   includeIndexes?: boolean;
   filters?: ScreenerIndexFilters;
+  targetDirection?: 'LONG' | 'SHORT';
+  benchmarkSymbol?: string;
+  includeShortRisk?: boolean;
 }): Promise<ScreenerSearchResponse> {
   const response = await fetch(`${API_BASE}/api/stock-picker/screener/search`, {
     method: 'POST',
@@ -256,6 +298,9 @@ export async function searchScreenerCandidates(params: {
       size: params.size ?? 20,
       include_indexes: params.includeIndexes ?? true,
       filters: params.filters,
+      target_direction: params.targetDirection ?? 'LONG',
+      benchmark_symbol: params.benchmarkSymbol,
+      include_short_risk: params.includeShortRisk ?? true,
     }),
   });
   if (!response.ok) {

@@ -17,8 +17,19 @@ class _Response:
 
 
 class _ServiceWithContext(StockScreenerService):
-    def __init__(self, context, index_loader=None) -> None:
-        super().__init__(index_loader=index_loader or (lambda _symbols: {}))
+    def __init__(
+        self,
+        context,
+        index_loader=None,
+        short_risk_loader=None,
+    ) -> None:
+        super().__init__(
+            index_loader=index_loader or (lambda _symbols: {}),
+            short_risk_loader=(
+                short_risk_loader
+                or (lambda _symbols: {})
+            ),
+        )
         self.context = context
 
     @contextmanager
@@ -217,6 +228,7 @@ class StockScreenerServiceTest(unittest.TestCase):
             "AAPL.US",
             "PENNY.US",
             "MISSING.US",
+            "SPY.US",
         ])
         self.assertEqual([item["symbol"] for item in result["items"]], ["AAPL.US"])
         self.assertEqual(result["items"][0]["indexes"]["pe_ttm_ratio"], 30)
@@ -229,6 +241,124 @@ class StockScreenerServiceTest(unittest.TestCase):
             },
         )
         self.assertEqual(result["enrichment"]["status"], "available")
+
+    def test_relative_strength_is_directional_and_uses_industry_median(self) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "items": [
+                {
+                    "symbol": "LEADER.US",
+                    "name": "Leader",
+                    "indicators": [{"key": "industry", "value": "Technology"}],
+                },
+                {
+                    "symbol": "LAGGARD.US",
+                    "name": "Laggard",
+                    "indicators": [{"key": "industry", "value": "Technology"}],
+                },
+            ],
+        })
+        indexes = {
+            "LEADER.US": {
+                "ten_day_change_rate": 0.10,
+                "half_year_change_rate": 0.30,
+            },
+            "LAGGARD.US": {
+                "ten_day_change_rate": 0.04,
+                "half_year_change_rate": 0.10,
+            },
+            "SPY.US": {
+                "ten_day_change_rate": 0.05,
+                "half_year_change_rate": 0.15,
+            },
+        }
+        service = _ServiceWithContext(
+            context,
+            index_loader=lambda _symbols: indexes,
+        )
+
+        long_result = service.search(
+            "US",
+            101,
+            target_direction="LONG",
+            filters={
+                "min_market_rs_10d": 0,
+                "min_industry_rs_10d": 0,
+            },
+        )
+        short_result = service.search(
+            "US",
+            101,
+            target_direction="SHORT",
+            filters={
+                "min_market_rs_10d": 0,
+                "min_industry_rs_10d": 0,
+            },
+        )
+
+        self.assertEqual(
+            [item["symbol"] for item in long_result["items"]],
+            ["LEADER.US"],
+        )
+        self.assertEqual(
+            long_result["items"][0]["relative_strength"]["market_rs_10d"],
+            0.05,
+        )
+        self.assertEqual(
+            long_result["items"][0]["relative_strength"]["industry_rs_10d"],
+            0.03,
+        )
+        self.assertEqual(
+            [item["symbol"] for item in short_result["items"]],
+            ["LAGGARD.US"],
+        )
+        self.assertEqual(
+            short_result["items"][0]["relative_strength"]["market_rs_10d"],
+            0.01,
+        )
+
+    def test_short_risk_filter_is_explicit_and_does_not_claim_availability(self) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "items": [
+                {"symbol": "SAFE.US", "name": "Safe"},
+                {"symbol": "CROWDED.US", "name": "Crowded"},
+            ],
+        })
+        indexes = {
+            "SAFE.US": {"ten_day_change_rate": -0.02},
+            "CROWDED.US": {"ten_day_change_rate": -0.03},
+            "SPY.US": {"ten_day_change_rate": 0.01},
+        }
+        short_loader = MagicMock(return_value={
+            "SAFE.US": {
+                "status": "available",
+                "days_to_cover": 2.0,
+                "short_ratio": 0.1,
+            },
+            "CROWDED.US": {
+                "status": "available",
+                "days_to_cover": 8.0,
+                "short_ratio": 0.3,
+            },
+        })
+        service = _ServiceWithContext(
+            context,
+            index_loader=lambda _symbols: indexes,
+            short_risk_loader=short_loader,
+        )
+
+        result = service.search(
+            "US",
+            101,
+            target_direction="SHORT",
+            filters={"max_days_to_cover": 5},
+        )
+
+        self.assertEqual([item["symbol"] for item in result["items"]], ["SAFE.US"])
+        self.assertEqual(result["short_risk"]["status"], "available")
+        self.assertNotIn("borrow_available", result["items"][0]["short_risk"])
+        short_loader.assert_called_once_with(["SAFE.US", "CROWDED.US"])
 
     def test_index_failure_only_degrades_when_no_hard_filter_is_requested(self) -> None:
         context = MagicMock()
@@ -276,6 +406,12 @@ class StockScreenerRouteTest(unittest.TestCase):
             "total": 1,
             "has_more": False,
             "enrichment": {"status": "available", "error": None},
+            "relative_strength": {
+                "benchmark_symbol": "SPY.US",
+                "target_direction": "LONG",
+                "industry_basis": "current_page_industry_median",
+            },
+            "short_risk": {"status": "not_applicable", "error": None},
             "filters": {
                 "applied": {"min_turnover": 1000000},
                 "before": 1,
@@ -290,6 +426,20 @@ class StockScreenerRouteTest(unittest.TestCase):
                 "market": "US",
                 "indicators": {},
                 "indexes": {"turnover": 2000000},
+                "relative_strength": {
+                    "benchmark_symbol": "SPY.US",
+                    "target_direction": "LONG",
+                    "industry": None,
+                    "industry_peer_count": 0,
+                    "market_rs_10d": None,
+                    "market_rs_half_year": None,
+                    "industry_rs_10d": None,
+                    "industry_rs_half_year": None,
+                },
+                "short_risk": {
+                    "status": "not_applicable",
+                    "error": None,
+                },
             }],
         }
 
@@ -332,6 +482,9 @@ class StockScreenerRouteTest(unittest.TestCase):
             0,
             20,
             {"min_turnover": 1000000.0},
+            True,
+            "LONG",
+            None,
             True,
         )
 

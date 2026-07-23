@@ -60,6 +60,61 @@ class QuoteHistoryPeriodTest(unittest.TestCase):
         self.assertEqual(result["AAA.US"]["turnover"], 1_500_000.0)
         self.assertEqual(result["AAA.US"]["pe_ttm_ratio"], 18.5)
 
+    def test_short_risk_metrics_reuse_context_and_keep_market_limits_explicit(self) -> None:
+        latest = MagicMock(
+            timestamp="2026-07-20T00:00:00Z",
+            rate="0.18",
+            days_to_cover="3.5",
+            current_shares_short="1200000",
+            avg_daily_share_volume="400000",
+            amount="",
+            balance="",
+            cost="",
+        )
+        previous = MagicMock(
+            timestamp="2026-07-10T00:00:00Z",
+            rate="0.15",
+            days_to_cover="3.0",
+            current_shares_short="1000000",
+            avg_daily_share_volume="350000",
+            amount="",
+            balance="",
+            cost="",
+        )
+        context = MagicMock()
+        context.short_positions.return_value = MagicMock(
+            data=[previous, latest],
+        )
+
+        @contextmanager
+        def quote_context(_credentials):
+            yield context
+
+        with (
+            patch.object(
+                services,
+                "load_credentials",
+                return_value={
+                    "LONGPORT_APP_KEY": "key",
+                    "LONGPORT_APP_SECRET": "secret",
+                    "LONGPORT_ACCESS_TOKEN": "token",
+                },
+            ),
+            patch.object(services, "_quote_context", side_effect=quote_context),
+        ):
+            result = services.get_short_risk_metrics([
+                "AAA.US",
+                "700.HK",
+                "600519.SH",
+            ])
+
+        self.assertEqual(context.short_positions.call_count, 2)
+        self.assertEqual(result["AAA.US"]["status"], "available")
+        self.assertEqual(result["AAA.US"]["days_to_cover"], 3.5)
+        self.assertAlmostEqual(result["AAA.US"]["short_ratio_change"], 0.03)
+        self.assertEqual(result["600519.SH"]["status"], "unsupported")
+        self.assertNotIn("borrow_available", result["AAA.US"])
+
     def test_incremental_daily_sync_reuses_one_context_for_all_symbols(self) -> None:
         context = MagicMock()
         context.history_candlesticks_by_date.return_value = [object()]

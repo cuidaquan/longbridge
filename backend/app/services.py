@@ -181,6 +181,119 @@ def get_security_calc_indexes(
     }
 
 
+def get_short_risk_metrics(
+    symbols: Iterable[str],
+    count: int = 5,
+) -> Dict[str, Dict[str, object]]:
+    """Fetch recent US/HK short-interest metrics with one reused quote context."""
+    if not 1 <= count <= 100:
+        raise ValueError("count 必须在 1～100 之间")
+    symbol_list = list(dict.fromkeys(
+        symbol.strip().upper()
+        for symbol in symbols
+        if symbol and symbol.strip()
+    ))
+    results: Dict[str, Dict[str, object]] = {
+        symbol: {
+            "status": "unsupported",
+            "error": None,
+        }
+        for symbol in symbol_list
+        if not symbol.endswith((".US", ".HK"))
+    }
+    supported = [
+        symbol
+        for symbol in symbol_list
+        if symbol.endswith((".US", ".HK"))
+    ]
+    if not supported:
+        return results
+
+    credentials = load_credentials()
+    if not credentials or any(
+        not credentials.get(key)
+        for key in (
+            "LONGPORT_APP_KEY",
+            "LONGPORT_APP_SECRET",
+            "LONGPORT_ACCESS_TOKEN",
+        )
+    ):
+        raise ValueError("请先在基础配置中保存完整的 Longbridge 凭据")
+
+    try:
+        with _quote_context(credentials) as context:
+            for symbol in supported:
+                try:
+                    response = context.short_positions(symbol, count)
+                    rows = sorted(
+                        list(getattr(response, "data", []) or []),
+                        key=lambda item: str(getattr(item, "timestamp", "")),
+                        reverse=True,
+                    )
+                    if not rows:
+                        results[symbol] = {
+                            "status": "no_data",
+                            "error": None,
+                        }
+                        continue
+
+                    latest = rows[0]
+                    previous = rows[1] if len(rows) > 1 else None
+                    latest_rate = _safe_float(getattr(latest, "rate", None))
+                    previous_rate = (
+                        _safe_float(getattr(previous, "rate", None))
+                        if previous
+                        else None
+                    )
+                    results[symbol] = {
+                        "status": "available",
+                        "error": None,
+                        "data_as_of": str(getattr(latest, "timestamp", "") or ""),
+                        "short_ratio": latest_rate,
+                        "short_ratio_change": (
+                            latest_rate - previous_rate
+                            if latest_rate is not None
+                            and previous_rate is not None
+                            else None
+                        ),
+                        "days_to_cover": _safe_float(
+                            getattr(latest, "days_to_cover", None)
+                        ),
+                        "shares_short": _safe_float(
+                            getattr(latest, "current_shares_short", None)
+                        ),
+                        "avg_daily_volume": _safe_float(
+                            getattr(latest, "avg_daily_share_volume", None)
+                        ),
+                        "short_amount": _safe_float(
+                            getattr(latest, "amount", None)
+                        ),
+                        "short_balance": _safe_float(
+                            getattr(latest, "balance", None)
+                        ),
+                        "short_cost": _safe_float(
+                            getattr(latest, "cost", None)
+                        ),
+                    }
+                except Exception as exc:
+                    logger.warning(
+                        "Short-position metrics unavailable for %s: %s",
+                        symbol,
+                        exc,
+                    )
+                    results[symbol] = {
+                        "status": "error",
+                        "error": str(exc),
+                    }
+    except (LongbridgeDependencyMissing, ValueError):
+        raise
+    except Exception as exc:
+        raise LongbridgeAPIError(
+            f"获取 Longbridge 做空拥挤度指标失败: {exc}"
+        ) from exc
+    return results
+
+
 def sync_history_candlesticks(
     symbols: Optional[Iterable[str]] = None,
     period: str = "day",

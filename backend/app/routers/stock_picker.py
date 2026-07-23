@@ -77,6 +77,13 @@ class ScreenerIndexFilters(BaseModel):
     max_pb: Optional[float] = Field(default=None, gt=0)
     min_capital_flow: Optional[float] = None
     min_volume_ratio: Optional[float] = Field(default=None, ge=0)
+    min_market_rs_10d: Optional[float] = None
+    min_market_rs_half_year: Optional[float] = None
+    min_industry_rs_10d: Optional[float] = None
+    min_industry_rs_half_year: Optional[float] = None
+    max_days_to_cover: Optional[float] = Field(default=None, ge=0)
+    max_short_ratio: Optional[float] = Field(default=None, ge=0)
+    max_short_ratio_change: Optional[float] = None
 
 
 class ScreenerSearchRequest(BaseModel):
@@ -88,6 +95,13 @@ class ScreenerSearchRequest(BaseModel):
     size: int = Field(default=20, ge=1, le=100)
     include_indexes: bool = True
     filters: Optional[ScreenerIndexFilters] = None
+    target_direction: Literal["LONG", "SHORT"] = "LONG"
+    benchmark_symbol: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=32,
+    )
+    include_short_risk: bool = True
 
 
 class ScreenerImportItem(BaseModel):
@@ -276,6 +290,9 @@ async def search_screener_candidates(request: ScreenerSearchRequest):
                 else None
             ),
             request.include_indexes,
+            request.target_direction,
+            request.benchmark_symbol,
+            request.include_short_risk,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

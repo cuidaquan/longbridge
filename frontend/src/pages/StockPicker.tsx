@@ -769,6 +769,13 @@ function StockDiscoveryDialog({
     max_pb: '',
     min_capital_flow: '',
     min_volume_ratio: '',
+    min_market_rs_10d: '',
+    min_market_rs_half_year: '',
+    min_industry_rs_10d: '',
+    min_industry_rs_half_year: '',
+    max_days_to_cover: '',
+    max_short_ratio: '',
+    max_short_ratio_change: '',
   });
 
   useEffect(() => {
@@ -823,6 +830,7 @@ function StockDiscoveryDialog({
         page,
         size: 20,
         filters,
+        targetDirection: poolType,
       });
       setResult(response);
       setSelectedSymbols(new Set(response.items.map((item) => item.symbol)));
@@ -886,6 +894,29 @@ function StockDiscoveryDialog({
     const number = Number(value);
     return Number.isFinite(number) ? number : null;
   };
+  const filterDefinitions: Array<
+    [keyof typeof filterInputs, string, string]
+  > = [
+    ['min_turnover', '最低成交额', '市场币种'],
+    ['min_market_value', '最低总市值', '市场币种'],
+    ['min_turnover_rate', '最低换手率', 'SDK 数值'],
+    ['min_volume_ratio', '最低量比', '例如 1'],
+    ['min_pe_ttm', '最低 PE(TTM)', '例如 0'],
+    ['max_pe_ttm', '最高 PE(TTM)', '例如 40'],
+    ['max_pb', '最高 PB', '例如 8'],
+    ['min_capital_flow', '最低资金流', '可输入负数'],
+    ['min_market_rs_10d', '最低市场 RS(10日)', '方向化差值'],
+    ['min_market_rs_half_year', '最低市场 RS(半年)', '方向化差值'],
+    ['min_industry_rs_10d', '最低行业 RS(10日)', '同页行业中位数'],
+    ['min_industry_rs_half_year', '最低行业 RS(半年)', '同页行业中位数'],
+    ...(poolType === 'SHORT'
+      ? [
+          ['max_days_to_cover', '最高回补天数', '例如 5'],
+          ['max_short_ratio', '最高做空比例', 'SDK 数值'],
+          ['max_short_ratio_change', '最高做空比例增量', '可输入负数'],
+        ] as Array<[keyof typeof filterInputs, string, string]>
+      : []),
+  ];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -948,7 +979,19 @@ function StockDiscoveryDialog({
                 <button
                   key={value}
                   type="button"
-                  onClick={() => setPoolType(value)}
+                  onClick={() => {
+                    setPoolType(value);
+                    setResult(null);
+                    setSelectedSymbols(new Set());
+                    if (value === 'LONG') {
+                      setFilterInputs((current) => ({
+                        ...current,
+                        max_days_to_cover: '',
+                        max_short_ratio: '',
+                        max_short_ratio_change: '',
+                      }));
+                    }
+                  }}
                   className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
                     poolType === value
                       ? value === 'LONG'
@@ -1028,16 +1071,7 @@ function StockDiscoveryDialog({
           </button>
           {showFilters && (
             <div className="grid gap-3 border-t border-slate-200 p-3 sm:grid-cols-2 lg:grid-cols-4 dark:border-slate-700">
-              {([
-                ['min_turnover', '最低成交额', '市场币种'],
-                ['min_market_value', '最低总市值', '市场币种'],
-                ['min_turnover_rate', '最低换手率', 'SDK 数值'],
-                ['min_volume_ratio', '最低量比', '例如 1'],
-                ['min_pe_ttm', '最低 PE(TTM)', '例如 0'],
-                ['max_pe_ttm', '最高 PE(TTM)', '例如 40'],
-                ['max_pb', '最高 PB', '例如 8'],
-                ['min_capital_flow', '最低资金流', '可输入负数'],
-              ] as Array<[keyof typeof filterInputs, string, string]>).map(
+              {filterDefinitions.map(
                 ([key, label, placeholder]) => (
                   <label key={key} className="text-xs text-slate-500">
                     <span className="mb-1 block">{label}</span>
@@ -1073,6 +1107,13 @@ function StockDiscoveryDialog({
                     max_pb: '',
                     min_capital_flow: '',
                     min_volume_ratio: '',
+                    min_market_rs_10d: '',
+                    min_market_rs_half_year: '',
+                    min_industry_rs_10d: '',
+                    min_industry_rs_half_year: '',
+                    max_days_to_cover: '',
+                    max_short_ratio: '',
+                    max_short_ratio_change: '',
                   });
                   setResult(null);
                   setSelectedSymbols(new Set());
@@ -1097,6 +1138,10 @@ function StockDiscoveryDialog({
               <div>
                 <p className="text-sm text-slate-600 dark:text-slate-400">
                   第 {result.page + 1} 页，共 {result.total} 个候选；已选择 {selectedCount} 个
+                </p>
+                <p className="text-xs text-slate-500">
+                  市场基准 {result.relative_strength.benchmark_symbol}；
+                  行业 RS 为本页同行中位数差
                 </p>
                 {result.filters.excluded > 0 && (
                   <p className="text-xs text-amber-600 dark:text-amber-400">
@@ -1124,6 +1169,18 @@ function StockDiscoveryDialog({
               <div className="mb-2">
                 <Alert type="warning">
                   实时指标暂不可用，当前仅展示 Screener 原始结果。
+                </Alert>
+              </div>
+            )}
+            {poolType === 'SHORT' && (
+              <p className="mb-2 text-xs text-amber-600 dark:text-amber-400">
+                做空指标仅用于衡量拥挤度与逼空风险，不代表可借券、融券成本或实际可成交性。
+              </p>
+            )}
+            {poolType === 'SHORT' && result.short_risk.status === 'fallback' && (
+              <div className="mb-2">
+                <Alert type="warning">
+                  做空拥挤度数据暂不可用，未应用相关过滤。
                 </Alert>
               </div>
             )}
@@ -1165,6 +1222,16 @@ function StockDiscoveryDialog({
                         <span>换手 {formatIndex(candidate.indexes.turnover_rate)}</span>
                         <span>资金流 {formatIndex(candidate.indexes.capital_flow)}</span>
                         <span>
+                          市场RS(10日) {formatIndex(
+                            candidate.relative_strength.market_rs_10d,
+                          )}
+                        </span>
+                        <span>
+                          行业RS(10日) {formatIndex(
+                            candidate.relative_strength.industry_rs_10d,
+                          )}
+                        </span>
+                        <span>
                           PE {formatIndex(
                             candidate.indexes.pe_ttm_ratio
                               ?? indicatorNumber(candidate.indicators.pettm),
@@ -1178,6 +1245,16 @@ function StockDiscoveryDialog({
                         </span>
                         {candidate.indicators.industry != null && (
                           <span>行业 {String(candidate.indicators.industry)}</span>
+                        )}
+                        {poolType === 'SHORT' && (
+                          <>
+                            <span>
+                              做空比例 {formatIndex(candidate.short_risk.short_ratio)}
+                            </span>
+                            <span>
+                              回补天数 {formatIndex(candidate.short_risk.days_to_cover)}
+                            </span>
+                          </>
                         )}
                       </div>
                     </div>
