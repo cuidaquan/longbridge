@@ -5,6 +5,8 @@ from typing import Dict, List, Optional
 import logging
 from datetime import datetime, timedelta
 
+from .external_service_resilience import run_external_call
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -68,20 +70,23 @@ class NewsAnalyzer:
             logger.info(f"🔍 搜索新闻: {query}")
             
             # 调用Tavily搜索
-            response = self.client.search(
+            response = run_external_call(
+                "news",
+                "search_stock_news",
+                self.client.search,
                 query=query,
                 search_depth="advanced",  # 深度搜索
                 max_results=10,
                 include_domains=[
                     "finance.yahoo.com",
-                    "seekingalpha.com", 
+                    "seekingalpha.com",
                     "marketwatch.com",
                     "bloomberg.com",
                     "reuters.com",
                     "cnbc.com",
-                    "investing.com"
+                    "investing.com",
                 ],
-                days=days  # 最近N天
+                days=days,  # 最近N天
             )
             
             # 解析搜索结果
@@ -321,7 +326,6 @@ def get_news_analyzer(api_key: str) -> Optional[NewsAnalyzer]:
     except Exception as e:
         logger.error(f"❌ 无法初始化新闻分析器: {e}")
         return None
-
 
 
 

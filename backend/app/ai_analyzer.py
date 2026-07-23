@@ -17,6 +17,8 @@ except ImportError:
 import pandas as pd
 import numpy as np
 
+from .external_service_resilience import run_external_call
+
 logger = logging.getLogger(__name__)
 
 
@@ -130,7 +132,9 @@ class DeepSeekAnalyzer:
         
         self.client = OpenAI(
             api_key=api_key,
-            base_url=base_url
+            base_url=base_url,
+            timeout=25.0,
+            max_retries=0,
         )
         self.model = model
         self.temperature = temperature
@@ -219,20 +223,23 @@ class DeepSeekAnalyzer:
             # 4. 调用 DeepSeek
             logger.info(f"🤖 调用 DeepSeek 分析 {symbol} (场景: {scenario})...")
             
-            response = self.client.chat.completions.create(
+            response = run_external_call(
+                "ai",
+                "chat_completion",
+                self.client.chat.completions.create,
                 model=self.model,
                 messages=[
                     {
                         "role": "system",
-                        "content": self._get_system_prompt(scenario)
+                        "content": self._get_system_prompt(scenario),
                     },
                     {
                         "role": "user",
-                        "content": prompt
-                    }
+                        "content": prompt,
+                    },
                 ],
                 temperature=self.temperature,
-                response_format={"type": "json_object"}  # 强制返回 JSON
+                response_format={"type": "json_object"},  # 强制返回 JSON
             )
             
             ai_response = response.choices[0].message.content

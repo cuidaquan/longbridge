@@ -16,6 +16,11 @@ import re
 import numpy as np
 
 from .db import get_connection
+from .external_service_resilience import (
+    record_stock_picker_ai,
+    record_stock_picker_cache,
+    run_external_call,
+)
 from .services import get_cached_candlesticks
 from .repositories import load_ai_credentials
 
@@ -365,6 +370,9 @@ class StockPickerService:
                 if progress_callback:
                     progress_callback({'log': f'📥 增量同步 {len(symbols)} 只股票日 K...'})
                 sync_result = await asyncio.to_thread(
+                    run_external_call,
+                    "quote",
+                    "candlestick_sync",
                     sync_history_candlesticks,
                     symbols=symbols,
                     period='day',
@@ -518,6 +526,9 @@ class StockPickerService:
                     progress_callback({'log': f'📥 同步K线: {symbol}...'})
 
                 sync_result = await asyncio.to_thread(
+                    run_external_call,
+                    "quote",
+                    "candlestick_sync",
                     sync_history_candlesticks,
                     symbols=[symbol],
                     period='day',
@@ -632,6 +643,7 @@ class StockPickerService:
             'config': config,
             'force_refresh': force_refresh,
             'job_id': job_id,
+            'cache_checked': not bool(ai_creds.get('DEEPSEEK_API_KEY')),
         }
 
     def _build_cache_key(
@@ -674,14 +686,18 @@ class StockPickerService:
         cache_duration: Optional[int] = None,
     ) -> Optional[Dict]:
         if force_refresh:
+            record_stock_picker_cache("bypass")
             return None
         cached = self.cache.get(cache_key)
         if not cached:
+            record_stock_picker_cache("miss")
             return None
         duration = cache_duration if cache_duration is not None else self.cache_duration
         if datetime.now() - cached['time'] < timedelta(seconds=duration):
+            record_stock_picker_cache("hit")
             return cached['data']
         del self.cache[cache_key]
+        record_stock_picker_cache("miss")
         return None
 
     async def _finalize_prepared_analysis(
@@ -712,14 +728,15 @@ class StockPickerService:
             config,
             analysis_mode=analysis_mode,
         )
-        cached_result = self._get_cached_result(
-            cache_key,
-            prepared.get('force_refresh', False),
-            config['cache_duration'],
-        )
-        if cached_result is not None:
-            logger.info("📋 使用版本化缓存: %s (%s)", symbol, analysis_mode)
-            return cached_result
+        if not prepared.get('cache_checked'):
+            cached_result = self._get_cached_result(
+                cache_key,
+                prepared.get('force_refresh', False),
+                config['cache_duration'],
+            )
+            if cached_result is not None:
+                logger.info("📋 使用版本化缓存: %s (%s)", symbol, analysis_mode)
+                return cached_result
 
         if use_ai and api_key:
             logger.info(
@@ -729,24 +746,34 @@ class StockPickerService:
             )
             if progress_callback:
                 progress_callback({'log': f'🤖 DeepSeek分析: {symbol}...'})
-            analyzer = DeepSeekAnalyzer(
-                api_key=api_key,
-                model=self.AI_MODEL,
-                base_url=ai_creds.get(
-                    'DEEPSEEK_BASE_URL',
-                    'https://api.deepseek.com',
-                ),
-                tavily_api_key=tavily_api_key,
-            )
-            analysis = await asyncio.to_thread(
-                analyzer.analyze_trading_opportunity,
-                symbol=symbol,
-                klines=klines,
-                scenario="buy_focus" if pool_type == 'LONG' else "sell_focus",
-                technical_indicators=indicators,
-                quant_score=score,
-            )
+            try:
+                analyzer = DeepSeekAnalyzer(
+                    api_key=api_key,
+                    model=self.AI_MODEL,
+                    base_url=ai_creds.get(
+                        'DEEPSEEK_BASE_URL',
+                        'https://api.deepseek.com',
+                    ),
+                    tavily_api_key=tavily_api_key,
+                )
+                analysis = await asyncio.to_thread(
+                    analyzer.analyze_trading_opportunity,
+                    symbol=symbol,
+                    klines=klines,
+                    scenario=(
+                        "buy_focus"
+                        if pool_type == 'LONG'
+                        else "sell_focus"
+                    ),
+                    technical_indicators=indicators,
+                    quant_score=score,
+                )
+            except Exception as exc:
+                analysis = {
+                    "error": str(exc),
+                }
             if analysis.get('error'):
+                record_stock_picker_ai(degraded=True)
                 ai_error = analysis['error']
                 logger.warning(
                     "⚠️ AI分析失败，回退到量化结论: %s - %s",
@@ -760,6 +787,8 @@ class StockPickerService:
                     ai_status='fallback',
                     ai_error=ai_error,
                 )
+            else:
+                record_stock_picker_ai(degraded=False)
         else:
             ai_status = 'disabled' if not api_key else 'skipped'
             if ai_status == 'disabled':

@@ -7,6 +7,7 @@ from statistics import median
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from .exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
+from .external_service_resilience import run_external_call
 from .longbridge_compat import close_longbridge_context
 from .repositories import load_credentials
 from .services import get_security_calc_indexes, get_short_risk_metrics
@@ -100,7 +101,8 @@ class StockScreenerService:
         include_user: bool = True,
     ) -> Dict[str, Any]:
         normalized_market = self.normalize_market(market)
-        try:
+
+        def fetch_strategies():
             with self._context() as context:
                 recommended = context.screener_recommend_strategies(
                     normalized_market
@@ -117,6 +119,14 @@ class StockScreenerService:
                             normalized_market,
                             exc,
                         )
+                return recommended, user
+
+        try:
+            recommended, user = run_external_call(
+                "screener",
+                "list_strategies",
+                fetch_strategies,
+            )
         except (ValueError, LongbridgeDependencyMissing, LongbridgeAPIError):
             raise
         except Exception as exc:
@@ -189,9 +199,9 @@ class StockScreenerService:
         ):
             raise ValueError("做空拥挤度过滤仅适用于 SHORT 方向")
 
-        try:
+        def fetch_candidates():
             with self._context() as context:
-                payload = context.screener_search(
+                return context.screener_search(
                     normalized_market,
                     int(strategy_id),
                     [],
@@ -199,6 +209,13 @@ class StockScreenerService:
                     page,
                     size,
                 ).data
+
+        try:
+            payload = run_external_call(
+                "screener",
+                "search",
+                fetch_candidates,
+            )
         except (ValueError, LongbridgeDependencyMissing, LongbridgeAPIError):
             raise
         except Exception as exc:
@@ -222,7 +239,12 @@ class StockScreenerService:
                 ]
                 if benchmark not in index_symbols:
                     index_symbols.append(benchmark)
-                indexes = self._index_loader(index_symbols)
+                indexes = run_external_call(
+                    "quote",
+                    "calc_indexes",
+                    self._index_loader,
+                    index_symbols,
+                )
             except Exception as exc:
                 if normalized_filters:
                     if isinstance(exc, LongbridgeAPIError):
@@ -300,10 +322,15 @@ class StockScreenerService:
         )
         if needs_short_risk and candidates:
             try:
-                short_risk = self._short_risk_loader([
-                    candidate["symbol"]
-                    for candidate in candidates
-                ])
+                short_risk = run_external_call(
+                    "quote",
+                    "short_positions",
+                    self._short_risk_loader,
+                    [
+                        candidate["symbol"]
+                        for candidate in candidates
+                    ],
+                )
             except Exception as exc:
                 if short_filter_keys.intersection(normalized_filters):
                     if isinstance(exc, LongbridgeAPIError):
