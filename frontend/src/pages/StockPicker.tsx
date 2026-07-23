@@ -13,6 +13,7 @@ import {
   ExpandMore,
   ExpandLess,
   Close,
+  Search as SearchIcon,
 } from '@mui/icons-material';
 import {
   PageHeader,
@@ -35,10 +36,13 @@ import {
   removeStock,
   clearPool,
   analyzeStocks,
+  searchSecurities,
   type Stock,
   type Analysis,
   type PoolsResponse,
   type AnalysisResponse,
+  type SecurityMarket,
+  type SecuritySearchItem,
 } from '../api/stockPicker';
 import { API_BASE } from '../api/client';
 
@@ -580,13 +584,76 @@ function AddStockDialog({
   onSuccess: () => void;
 }) {
   const [batchMode, setBatchMode] = useState(false);
+  const [manualMode, setManualMode] = useState(false);
+  const [market, setMarket] = useState<SecurityMarket>('US');
+  const [securityQuery, setSecurityQuery] = useState('');
+  const [securityOptions, setSecurityOptions] = useState<SecuritySearchItem[]>([]);
+  const [selectedSecurity, setSelectedSecurity] = useState<SecuritySearchItem | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [activeOption, setActiveOption] = useState(0);
   const [symbol, setSymbol] = useState('');
   const [batchSymbols, setBatchSymbols] = useState('');
   const [name, setName] = useState('');
   const [reason, setReason] = useState('');
-  const [clearBeforeAdd, setClearBeforeAdd] = useState(true);
+  const [clearBeforeAdd, setClearBeforeAdd] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (batchMode || manualMode || selectedSecurity || !securityQuery.trim()) {
+      setSecurityOptions([]);
+      setHasSearched(false);
+      setSearching(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setSearching(true);
+      setSearchError(null);
+      try {
+        const response = await searchSecurities({
+          market,
+          query: securityQuery.trim(),
+          signal: controller.signal,
+        });
+        setSecurityOptions(response.items);
+        setActiveOption(0);
+        setHasSearched(true);
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        setSecurityOptions([]);
+        setHasSearched(true);
+        setSearchError(err instanceof Error ? err.message : '搜索股票失败');
+      } finally {
+        if (!controller.signal.aborted) setSearching(false);
+      }
+    }, 300);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [batchMode, manualMode, market, securityQuery, selectedSecurity]);
+
+  const selectSecurity = (security: SecuritySearchItem) => {
+    setSelectedSecurity(security);
+    setSecurityQuery(security.symbol);
+    setSecurityOptions([]);
+    setSearchError(null);
+    setError(null);
+  };
+
+  const changeMarket = (nextMarket: SecurityMarket) => {
+    setMarket(nextMarket);
+    setSelectedSecurity(null);
+    setSecurityQuery('');
+    setSecurityOptions([]);
+    setSearchError(null);
+    setHasSearched(false);
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -629,8 +696,13 @@ function AddStockDialog({
         setLoading(false);
       }
     } else {
-      if (!symbol.trim()) {
-        setError('请输入股票代码');
+      const resolvedSymbol = manualMode ? symbol.trim().toUpperCase() : selectedSecurity?.symbol;
+      const resolvedName = manualMode
+        ? name.trim() || undefined
+        : selectedSecurity?.name || selectedSecurity?.name_en || undefined;
+
+      if (!resolvedSymbol) {
+        setError(manualMode ? '请输入股票代码' : '请先搜索并选择一只股票');
         return;
       }
 
@@ -640,8 +712,8 @@ function AddStockDialog({
       try {
         await addStock({
           pool_type: type,
-          symbol: symbol.trim().toUpperCase(),
-          name: name.trim() || undefined,
+          symbol: resolvedSymbol,
+          name: resolvedName,
           added_reason: reason.trim() || undefined,
         });
         onSuccess();
@@ -705,19 +777,207 @@ function AddStockDialog({
             </>
           ) : (
             <>
-              <Input
-                label="股票代码"
-                value={symbol}
-                onChange={(e) => setSymbol(e.target.value)}
-                placeholder="例如: AAPL.US"
-                required
-              />
-              <Input
-                label="股票名称（可选）"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="例如: Apple Inc."
-              />
+              {!manualMode ? (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
+                      市场
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                      {([
+                        ['US', '美股'],
+                        ['HK', '港股'],
+                        ['CN', 'A股'],
+                      ] as Array<[SecurityMarket, string]>).map(([value, label]) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => changeMarket(value)}
+                          className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+                            market === value
+                              ? 'border-cyan-500 bg-cyan-50 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300'
+                              : 'border-slate-200 text-slate-600 hover:border-slate-300 dark:border-slate-600 dark:text-slate-300'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="relative">
+                    <label
+                      htmlFor="security-search"
+                      className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1"
+                    >
+                      搜索股票
+                    </label>
+                    <div className="relative">
+                      <SearchIcon className="absolute left-3 top-2.5 w-5 h-5 text-slate-400" />
+                      <input
+                        id="security-search"
+                        role="combobox"
+                        aria-autocomplete="list"
+                        aria-expanded={securityOptions.length > 0}
+                        aria-controls="security-search-options"
+                        aria-activedescendant={
+                          securityOptions.length > 0
+                            ? `security-option-${activeOption}`
+                            : undefined
+                        }
+                        value={securityQuery}
+                        onChange={(event) => {
+                          setSecurityQuery(event.target.value);
+                          setSelectedSecurity(null);
+                          setHasSearched(false);
+                          setError(null);
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === 'ArrowDown' && securityOptions.length > 0) {
+                            event.preventDefault();
+                            setActiveOption((current) => (current + 1) % securityOptions.length);
+                          } else if (event.key === 'ArrowUp' && securityOptions.length > 0) {
+                            event.preventDefault();
+                            setActiveOption((current) => (
+                              current === 0 ? securityOptions.length - 1 : current - 1
+                            ));
+                          } else if (event.key === 'Enter' && securityOptions[activeOption]) {
+                            event.preventDefault();
+                            selectSecurity(securityOptions[activeOption]);
+                          } else if (event.key === 'Escape') {
+                            setSecurityOptions([]);
+                          }
+                        }}
+                        placeholder="输入代码、中文或英文名称"
+                        autoComplete="off"
+                        className="w-full rounded-lg border border-slate-300 bg-white py-2 pl-10 pr-20
+                          text-slate-900 placeholder:text-slate-400 focus:border-cyan-500 focus:outline-none
+                          focus:ring-2 focus:ring-cyan-500/50 dark:border-slate-600 dark:bg-slate-900
+                          dark:text-white"
+                      />
+                      {searching && (
+                        <span className="absolute right-3 top-2.5 text-xs text-cyan-600 dark:text-cyan-400">
+                          搜索中…
+                        </span>
+                      )}
+                    </div>
+
+                    {securityOptions.length > 0 && (
+                      <div
+                        id="security-search-options"
+                        role="listbox"
+                        className="absolute z-20 mt-1 max-h-64 w-full overflow-y-auto rounded-lg border
+                          border-slate-200 bg-white p-1 shadow-xl dark:border-slate-600 dark:bg-slate-900"
+                      >
+                        {securityOptions.map((option, index) => (
+                          <button
+                            id={`security-option-${index}`}
+                            key={option.symbol}
+                            type="button"
+                            role="option"
+                            aria-selected={index === activeOption}
+                            onMouseEnter={() => setActiveOption(index)}
+                            onMouseDown={(event) => event.preventDefault()}
+                            onClick={() => selectSecurity(option)}
+                            className={`w-full rounded-md px-3 py-2 text-left transition-colors ${
+                              index === activeOption
+                                ? 'bg-cyan-50 dark:bg-cyan-900/30'
+                                : 'hover:bg-slate-50 dark:hover:bg-slate-800'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <span className="font-medium text-slate-900 dark:text-white">
+                                {option.name}
+                              </span>
+                              <span className="font-mono text-sm text-cyan-700 dark:text-cyan-300">
+                                {option.symbol}
+                              </span>
+                            </div>
+                            {option.name_en && option.name_en !== option.name && (
+                              <p className="mt-0.5 truncate text-xs text-slate-500 dark:text-slate-400">
+                                {option.name_en}
+                              </p>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                    {!searching && hasSearched && securityOptions.length === 0 && !searchError && (
+                      <p className="mt-1.5 text-sm text-slate-500 dark:text-slate-400">
+                        没有找到匹配标的，可尝试完整代码或切换市场。
+                      </p>
+                    )}
+                    {searchError && (
+                      <p className="mt-1.5 text-sm text-red-500">{searchError}</p>
+                    )}
+                  </div>
+
+                  {selectedSecurity && (
+                    <div className="rounded-lg border border-cyan-200 bg-cyan-50 p-3 dark:border-cyan-800 dark:bg-cyan-900/20">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="font-medium text-cyan-900 dark:text-cyan-100">
+                            {selectedSecurity.name}
+                          </p>
+                          <p className="mt-0.5 font-mono text-sm text-cyan-700 dark:text-cyan-300">
+                            {selectedSecurity.symbol}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          aria-label="清除已选择股票"
+                          onClick={() => {
+                            setSelectedSecurity(null);
+                            setSecurityQuery('');
+                          }}
+                          className="rounded p-1 text-cyan-600 hover:bg-cyan-100 dark:hover:bg-cyan-900/50"
+                        >
+                          <Close className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setManualMode(true);
+                      setSearchError(null);
+                      setError(null);
+                    }}
+                    className="text-sm text-cyan-600 hover:text-cyan-700 dark:text-cyan-400"
+                  >
+                    找不到股票？手动输入代码
+                  </button>
+                </>
+              ) : (
+                <>
+                  <Input
+                    label="股票代码"
+                    value={symbol}
+                    onChange={(e) => setSymbol(e.target.value)}
+                    placeholder="例如: AAPL.US"
+                    required
+                  />
+                  <Input
+                    label="股票名称（可选）"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="例如: Apple Inc."
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setManualMode(false);
+                      setError(null);
+                    }}
+                    className="text-sm text-cyan-600 hover:text-cyan-700 dark:text-cyan-400"
+                  >
+                    返回官方股票搜索
+                  </button>
+                </>
+              )}
               <div>
                 <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
                   添加理由（可选）

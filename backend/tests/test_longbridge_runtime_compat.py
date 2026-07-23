@@ -8,23 +8,23 @@ from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = BACKEND_ROOT.parent
-LONGPORT_CALL_FILES = (
+LONGBRIDGE_CALL_FILES = (
     BACKEND_ROOT / "app" / "services.py",
     BACKEND_ROOT / "app" / "trading_api.py",
     BACKEND_ROOT / "app" / "streaming.py",
 )
 
 
-class LongportRuntimeCompatTest(unittest.TestCase):
+class LongbridgeRuntimeCompatTest(unittest.TestCase):
     def _load_close_helper(self):
         try:
-            module = importlib.import_module("app.longport_compat")
+            module = importlib.import_module("app.longbridge_compat")
         except ModuleNotFoundError as exc:
-            self.fail(f"Longport compatibility module is missing: {exc}")
-        return module.close_longport_context
+            self.fail(f"Longbridge compatibility module is missing: {exc}")
+        return module.close_longbridge_context
 
     def test_close_helper_calls_supported_close_method(self) -> None:
-        close_longport_context = self._load_close_helper()
+        close_longbridge_context = self._load_close_helper()
 
         class ClosableContext:
             def __init__(self) -> None:
@@ -34,20 +34,20 @@ class LongportRuntimeCompatTest(unittest.TestCase):
                 self.close_count += 1
 
         context = ClosableContext()
-        close_longport_context(context)
+        close_longbridge_context(context)
 
         self.assertEqual(1, context.close_count)
 
     def test_close_helper_accepts_context_without_close_method(self) -> None:
-        close_longport_context = self._load_close_helper()
+        close_longbridge_context = self._load_close_helper()
 
-        close_longport_context(object())
+        close_longbridge_context(object())
 
-    def test_longport_calls_do_not_use_removed_sdk_apis(self) -> None:
+    def test_longbridge_calls_do_not_use_removed_sdk_apis(self) -> None:
         first_push_calls: list[str] = []
         direct_close_calls: list[str] = []
 
-        for path in LONGPORT_CALL_FILES:
+        for path in LONGBRIDGE_CALL_FILES:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
@@ -71,7 +71,7 @@ class LongportRuntimeCompatTest(unittest.TestCase):
 
         for name, script in (("start.bat", windows_script), ("start.sh", linux_script)):
             with self.subTest(script=name):
-                self.assertIn(".longport.env", script)
+                self.assertIn(".longbridge.env", script)
                 self.assertIn("--env-file", script)
                 self.assertIn("--host 127.0.0.1", script)
                 self.assertNotIn("--reload", script)
@@ -80,16 +80,16 @@ class LongportRuntimeCompatTest(unittest.TestCase):
         self.assertIn("logs/frontend.pid", linux_script)
 
     def test_endpoint_example_contains_no_credentials(self) -> None:
-        example_path = BACKEND_ROOT / "longport.env.example"
+        example_path = BACKEND_ROOT / "longbridge.env.example"
         self.assertTrue(example_path.exists())
         content = example_path.read_text(encoding="utf-8")
 
-        self.assertIn("LONGPORT_HTTP_URL=https://openapi.longbridge.com", content)
-        self.assertIn("LONGPORT_QUOTE_WS_URL=wss://openapi-quote.longbridge.com/v2", content)
-        self.assertIn("LONGPORT_TRADE_WS_URL=wss://openapi-trade.longbridge.com/v2", content)
-        self.assertNotIn("LONGPORT_APP_KEY", content)
-        self.assertNotIn("LONGPORT_APP_SECRET", content)
-        self.assertNotIn("LONGPORT_ACCESS_TOKEN", content)
+        self.assertIn("LONGBRIDGE_HTTP_URL=https://openapi.longbridge.com", content)
+        self.assertIn("LONGBRIDGE_QUOTE_WS_URL=wss://openapi-quote.longbridge.com/v2", content)
+        self.assertIn("LONGBRIDGE_TRADE_WS_URL=wss://openapi-trade.longbridge.com/v2", content)
+        self.assertNotIn("LONGBRIDGE_APP_KEY", content)
+        self.assertNotIn("LONGBRIDGE_APP_SECRET", content)
+        self.assertNotIn("LONGBRIDGE_ACCESS_TOKEN", content)
 
 
 if __name__ == "__main__":

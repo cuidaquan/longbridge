@@ -19,7 +19,7 @@ dependencies = [
     "openai>=1.30,<3",
     "pandas>=2.0.0",
     "tavily-python>=0.5,<1",
-    "longport>=4.3,<5"
+    "longbridge>=4.4.1,<5"
 ]
 
 [build-system]

@@ -42,7 +42,7 @@ class _RecordingConnection(_FakeConnection):
 
 
 class SectorRotationServiceTest(unittest.TestCase):
-    def test_sync_uses_longport_when_eodhd_is_not_configured(self):
+    def test_sync_uses_longbridge_when_eodhd_is_not_configured(self):
         service = SectorRotationService()
         start = datetime(2026, 1, 1)
         bars = [
@@ -76,7 +76,7 @@ class SectorRotationServiceTest(unittest.TestCase):
             finally:
                 loop.close()
 
-        self.assertEqual(result["source"], "longport")
+        self.assertEqual(result["source"], "longbridge")
         self.assertEqual(result["success"], ["XLK"])
         sync_history.assert_called_once_with(["XLK.US"], "day", "no_adjust", 61)
         self.assertEqual(saved[0][0], "XLK")

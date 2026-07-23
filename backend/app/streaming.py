@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 from .exceptions import LongbridgeDependencyMissing
-from .longport_compat import close_longport_context
+from .longbridge_compat import close_longbridge_context
 from .repositories import load_credentials, load_symbols, store_tick_event
 from .services import get_portfolio_overview
 from .strategy_engine import get_strategy_engine, MarketData
@@ -212,10 +212,10 @@ class QuoteStreamManager:
                 continue
 
             try:
-                from longport.openapi import Config, QuoteContext, SubType, Period
+                from longbridge.openapi import Config, QuoteContext, SubType, Period
             except ModuleNotFoundError as exc:
-                self._update_status("error", "未找到 longport SDK，请安装后重试")
-                logger.exception("Missing longport SDK", exc_info=exc)
+                self._update_status("error", "未找到 longbridge SDK，请安装后重试")
+                logger.exception("Missing longbridge SDK", exc_info=exc)
                 time.sleep(10.0)
                 continue
 
@@ -298,7 +298,7 @@ class QuoteStreamManager:
             except Exception as exc:
                 self._update_status("error", f"订阅失败: {exc}")
                 logger.exception("Subscribe failed", exc_info=exc)
-                close_longport_context(ctx)
+                close_longbridge_context(ctx)
                 time.sleep(5.0)
                 continue
 
@@ -333,7 +333,7 @@ class QuoteStreamManager:
                 # passive wait
 
             try:
-                close_longport_context(ctx)
+                close_longbridge_context(ctx)
             except Exception:  # noqa: S110 - cleanup
                 pass
 

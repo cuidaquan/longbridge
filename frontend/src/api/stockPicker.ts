@@ -59,6 +59,23 @@ export interface PoolsResponse {
   short_pool: Stock[];
 }
 
+export type SecurityMarket = 'US' | 'HK' | 'CN';
+
+export interface SecuritySearchItem {
+  symbol: string;
+  name: string;
+  name_en: string;
+  name_hk: string;
+  market: SecurityMarket;
+}
+
+export interface SecuritySearchResponse {
+  market: SecurityMarket;
+  query: string;
+  source: 'longbridge';
+  items: SecuritySearchItem[];
+}
+
 export interface AnalysisResponse {
   long_analysis: Analysis[];
   short_analysis: Analysis[];
@@ -68,6 +85,32 @@ export interface AnalysisResponse {
     long_avg_score: number;
     short_avg_score: number;
   };
+}
+
+/**
+ * 搜索 Longbridge 官方证券列表
+ */
+export async function searchSecurities(params: {
+  market: SecurityMarket;
+  query: string;
+  limit?: number;
+  signal?: AbortSignal;
+}): Promise<SecuritySearchResponse> {
+  const queryParams = new URLSearchParams({
+    market: params.market,
+    q: params.query,
+    limit: String(params.limit || 20),
+  });
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/securities?${queryParams.toString()}`,
+    { signal: params.signal },
+  );
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '搜索股票失败');
+  }
+  return response.json();
 }
 
 /**

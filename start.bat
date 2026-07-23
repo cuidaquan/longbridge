@@ -157,7 +157,11 @@ pushd backend
 call .venv\Scripts\activate.bat
 
 set "UVICORN_ENV_FILE="
-if exist ".longport.env" set "UVICORN_ENV_FILE=--env-file .longport.env"
+if exist ".longbridge.env" (
+    set "UVICORN_ENV_FILE=--env-file .longbridge.env"
+) else if exist ".longport.env" (
+    set "UVICORN_ENV_FILE=--env-file .longport.env"
+)
 
 start /B cmd /c "uvicorn app.main:app --host 127.0.0.1 --port 8000 %UVICORN_ENV_FILE% > ..\logs\backend.log 2>&1"
 popd

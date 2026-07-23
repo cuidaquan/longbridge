@@ -12,7 +12,7 @@ from fastapi import HTTPException
 
 from .db import get_connection
 from .exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
-from .longport_compat import close_longport_context
+from .longbridge_compat import close_longbridge_context
 from .repositories import (
     fetch_latest_prices,
     load_credentials,
@@ -58,10 +58,10 @@ _ADJUST_NAME_MAP = {
 @contextmanager
 def _quote_context(creds: Dict[str, str]):
     try:
-        from longport.openapi import QuoteContext, Config
+        from longbridge.openapi import QuoteContext, Config
     except ModuleNotFoundError as exc:  # pragma: no cover - depends on environment
         raise LongbridgeDependencyMissing(
-            "未找到 longport Python SDK，请先运行 `pip install longport`。"
+            "未找到 longbridge Python SDK，请先运行 `pip install longbridge`。"
         ) from exc
 
     config = Config.from_apikey(
@@ -74,7 +74,7 @@ def _quote_context(creds: Dict[str, str]):
         yield ctx
     finally:  # pragma: no branch
         try:
-            close_longport_context(ctx)
+            close_longbridge_context(ctx)
         except Exception:  # noqa: S110 - best effort cleanup
             pass
 
@@ -128,10 +128,10 @@ def sync_history_candlesticks(
         raise ValueError(f"不支持的复权类型: {adjust_type}") from exc
 
     try:
-        from longport.openapi import Period, AdjustType
+        from longbridge.openapi import Period, AdjustType
     except ModuleNotFoundError as exc:  # pragma: no cover - depends on environment
         raise LongbridgeDependencyMissing(
-            "未找到 longport Python SDK，请先运行 `pip install longport`。"
+            "未找到 longbridge Python SDK，请先运行 `pip install longbridge`。"
         ) from exc
 
     period_enum = getattr(Period, period_enum_name)
@@ -245,16 +245,16 @@ def get_cached_candlesticks(symbol: str, period: str = "day", limit: int = 200) 
     return bars
 
 
-def _build_longport_config(creds: Dict[str, str]):
+def _build_longbridge_config(creds: Dict[str, str]):
     missing = [key for key in ("LONGPORT_APP_KEY", "LONGPORT_APP_SECRET", "LONGPORT_ACCESS_TOKEN") if not creds.get(key)]
     if missing:
         raise HTTPException(status_code=400, detail="请先配置完整的 Longbridge 凭据。")
 
     try:
-        from longport.openapi import Config
+        from longbridge.openapi import Config
     except ModuleNotFoundError as exc:  # pragma: no cover - depends on environment
         raise LongbridgeDependencyMissing(
-            "未找到 longport Python SDK，请先运行 `pip install longport`。"
+            "未找到 longbridge Python SDK，请先运行 `pip install longbridge`。"
         ) from exc
 
     return Config.from_apikey(
@@ -270,14 +270,14 @@ def get_positions() -> List[Dict[str, object]]:
         "get_positions: loaded credentials (keys present: %s)",
         {key: bool(creds.get(key)) for key in ("LONGPORT_APP_KEY", "LONGPORT_APP_SECRET", "LONGPORT_ACCESS_TOKEN")},
     )
-    config = _build_longport_config(creds)
-    logger.info("get_positions: built longport Config, requesting stock positions")
+    config = _build_longbridge_config(creds)
+    logger.info("get_positions: built Longbridge Config, requesting stock positions")
 
     try:
-        from longport.openapi import TradeContext
+        from longbridge.openapi import TradeContext
     except ModuleNotFoundError as exc:  # pragma: no cover
         raise LongbridgeDependencyMissing(
-            "未找到 longport Python SDK，请先运行 `pip install longport`。"
+            "未找到 longbridge Python SDK，请先运行 `pip install longbridge`。"
         ) from exc
 
     ctx = TradeContext(config)
@@ -290,7 +290,7 @@ def get_positions() -> List[Dict[str, object]]:
         raise LongbridgeAPIError(f"获取持仓信息失败: {exc}") from exc
     finally:  # ensure context close
         try:
-            close_longport_context(ctx)
+            close_longbridge_context(ctx)
         except Exception:  # noqa: S110 - cleanup best effort
             pass
 
@@ -405,13 +405,13 @@ def get_positions() -> List[Dict[str, object]]:
 def get_account_balance() -> Dict[str, object]:
     """获取账户资金余额信息（优先返回 USD；若无 USD 则返回所有币种并标注 usd_missing）"""
     creds = load_credentials()
-    config = _build_longport_config(creds)
+    config = _build_longbridge_config(creds)
 
     try:
-        from longport.openapi import TradeContext
+        from longbridge.openapi import TradeContext
     except ModuleNotFoundError as exc:
         raise LongbridgeDependencyMissing(
-            "未找到 longport Python SDK，请先运行 `pip install longport`。"
+            "未找到 longbridge Python SDK，请先运行 `pip install longbridge`。"
         ) from exc
 
     def _normalize_currency(cur: object) -> str:
@@ -539,7 +539,7 @@ def get_account_balance() -> Dict[str, object]:
         raise LongbridgeAPIError(f"获取账户资金失败: {exc}") from exc
     finally:
         try:
-            close_longport_context(ctx)
+            close_longbridge_context(ctx)
         except Exception:
             pass
 

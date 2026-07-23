@@ -39,6 +39,21 @@ class SymbolResponse(BaseModel):
     symbols: List[str] = Field(default_factory=list)
 
 
+class SecuritySearchItem(BaseModel):
+    symbol: str
+    name: str
+    name_en: str
+    name_hk: str
+    market: str
+
+
+class SecuritySearchResponse(BaseModel):
+    market: str
+    query: str
+    source: str = "longbridge"
+    items: List[SecuritySearchItem] = Field(default_factory=list)
+
+
 class VerifyPayload(BaseModel):
     symbols: List[str] = Field(default_factory=list)
 

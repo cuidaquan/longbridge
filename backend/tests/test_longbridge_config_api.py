@@ -4,7 +4,7 @@ import ast
 import unittest
 from pathlib import Path
 
-from app.services import _build_longport_config
+from app.services import _build_longbridge_config
 
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -15,9 +15,9 @@ CONFIG_CALL_FILES = (
 )
 
 
-class LongportConfigApiTest(unittest.TestCase):
-    def test_build_longport_config_uses_supported_sdk_factory(self) -> None:
-        config = _build_longport_config(
+class LongbridgeConfigApiTest(unittest.TestCase):
+    def test_build_longbridge_config_uses_supported_sdk_factory(self) -> None:
+        config = _build_longbridge_config(
             {
                 "LONGPORT_APP_KEY": "test-app-key",
                 "LONGPORT_APP_SECRET": "test-app-secret",

@@ -172,7 +172,7 @@ def verify_settings(
             detail={
                 "error": "dependency_missing",
                 "message": "Longbridge SDK 未安装或不可用",
-                "solution": "请运行 pip install longport 安装 Longbridge SDK",
+                "solution": "请运行 pip install longbridge 安装 Longbridge SDK",
                 "raw_error": str(exc)
             }
         ) from exc

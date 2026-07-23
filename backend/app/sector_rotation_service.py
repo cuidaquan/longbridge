@@ -59,7 +59,7 @@ class SectorRotationService:
             {"success": [...], "failed": [...]}
         """
         client = self._get_client()
-        source = "eodhd" if client else "longport"
+        source = "eodhd" if client else "longbridge"
 
         try:
             results = {"success": [], "failed": []}
@@ -85,25 +85,25 @@ class SectorRotationService:
                 try:
                     logger.info(f"📥 [{idx}/{total}] 正在同步 {symbol}...")
 
-                    # EODHD 未配置时使用现有 LongPort 行情凭据作为回退。
+                    # EODHD 未配置时使用现有 Longbridge 行情凭据作为回退。
                     if client:
                         data = client.get_etf_eod(symbol, days)
                     else:
-                        longport_symbol = f"{symbol}.US"
+                        longbridge_symbol = f"{symbol}.US"
                         await asyncio.to_thread(
                             sync_history_candlesticks,
-                            [longport_symbol],
+                            [longbridge_symbol],
                             "day",
                             "no_adjust",
                             min(days + 1, 1000),
                         )
                         cached = await asyncio.to_thread(
                             get_cached_candlesticks,
-                            longport_symbol,
+                            longbridge_symbol,
                             "day",
                             min(days + 1, 1000),
                         )
-                        data = [self._longport_bar_to_etf_data(bar) for bar in cached]
+                        data = [self._longbridge_bar_to_etf_data(bar) for bar in cached]
                     if not data:
                         logger.warning(f"⚠️ [{idx}/{total}] {symbol} 无数据返回")
                         results["failed"].append(symbol)
@@ -146,7 +146,7 @@ class SectorRotationService:
                 client.close()
 
     @staticmethod
-    def _longport_bar_to_etf_data(bar: Dict) -> Dict:
+    def _longbridge_bar_to_etf_data(bar: Dict) -> Dict:
         """把 LongPort 缓存 K 线转换为板块指标计算所需格式。"""
         timestamp = bar.get("ts")
         if isinstance(timestamp, datetime):

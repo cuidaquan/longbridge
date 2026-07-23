@@ -11,7 +11,7 @@ from enum import Enum
 
 from .repositories import load_credentials
 from .exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
-from .longport_compat import close_longport_context
+from .longbridge_compat import close_longbridge_context
 
 logger = logging.getLogger(__name__)
 
@@ -109,10 +109,10 @@ class LongbridgeTradingAPI:
     def _get_trade_context(self):
         """Get TradeContext instance"""
         try:
-            from longport.openapi import TradeContext, Config
+            from longbridge.openapi import TradeContext, Config
         except ModuleNotFoundError as exc:
             raise LongbridgeDependencyMissing(
-                "longport Python SDK not found. Please run `pip install longport`."
+                "longbridge Python SDK not found. Please run `pip install longbridge`."
             ) from exc
 
         if not self.credentials:
@@ -153,10 +153,10 @@ class LongbridgeTradingAPI:
                         logger.error(f"❌ All retries exhausted for TradeContext: {error_msg}")
                         raise LongbridgeAPIError(error_msg)
 
-                # Import required enums from longport
-                from longport.openapi import OrderSide as LBOrderSide, OrderType as LBOrderType
+                # Import required enums from Longbridge
+                from longbridge.openapi import OrderSide as LBOrderSide, OrderType as LBOrderType
 
-                # Convert our enums to longport enums
+                # Convert our enums to Longbridge enums
                 lb_side = LBOrderSide.Buy if order_request.side == OrderSide.BUY else LBOrderSide.Sell
 
                 # Map order types
@@ -219,7 +219,7 @@ class LongbridgeTradingAPI:
                 finally:
                     try:
                         if ctx:
-                            close_longport_context(ctx)
+                            close_longbridge_context(ctx)
                     except:
                         pass
                     
@@ -258,7 +258,7 @@ class LongbridgeTradingAPI:
             return False
         finally:
             try:
-                close_longport_context(ctx)
+                close_longbridge_context(ctx)
             except:
                 pass
 
@@ -276,7 +276,7 @@ class LongbridgeTradingAPI:
 
                 for order in orders:
                     if order.order_id == order_id:
-                        # Map longport status to our status
+                        # Map Longbridge status to our status
                         status_map = {
                             "PendingSubmit": OrderStatus.PENDING,
                             "Submitted": OrderStatus.SUBMITTED,
@@ -315,7 +315,7 @@ class LongbridgeTradingAPI:
             return None
         finally:
             try:
-                close_longport_context(ctx)
+                close_longbridge_context(ctx)
             except:
                 pass
 
@@ -360,7 +360,7 @@ class LongbridgeTradingAPI:
             return {}
         finally:
             try:
-                close_longport_context(ctx)
+                close_longbridge_context(ctx)
             except:
                 pass
 
@@ -409,7 +409,7 @@ class LongbridgeTradingAPI:
             return []
         finally:
             try:
-                close_longport_context(ctx)
+                close_longbridge_context(ctx)
             except:
                 pass
 

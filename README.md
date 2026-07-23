@@ -10,7 +10,7 @@ Longbridge Quant Console 是一个在本机运行的量化交易控制台。后�
 | --- | --- |
 | AI 交易 | AI 分析、策略参数、模拟或实盘执行、运行日志 |
 | 智能仓位 | 仓位计算、持仓选择、自动仓位管理 |
-| 智能选股 | 多空股票池、量化评分和 AI 分析 |
+| 智能选股 | 官方证券列表搜索、多空股票池、量化评分和 AI 分析 |
 | 板块轮动 | 板块热力图、因子分析和持仓关联 |
 | 策略盯盘 | 策略信号、实时 K 线和运行状态 |
 | 持仓监控 | 持仓盈亏、止盈止损与监控设置 |
@@ -77,7 +77,7 @@ CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 # ENCRYPTION_KEY=<Fernet key；不设置时首次运行自动生成>
 ```
 
-`backend/longport.env.example` 提供 Longbridge 官方服务端点示例。需要覆盖 SDK 默认端点时，将其复制为 `backend/.longport.env` 后再启动。前端 API 地址由 `VITE_API_BASE` 控制，默认是 `http://localhost:8000`。
+`backend/longbridge.env.example` 提供 Longbridge 官方服务端点示例。需要覆盖 SDK 默认端点时，将其复制为 `backend/.longbridge.env` 后再启动；已有的 `.longport.env` 仍可兼容加载。前端 API 地址由 `VITE_API_BASE` 控制，默认是 `http://localhost:8000`。
 
 ## 实盘保护
 

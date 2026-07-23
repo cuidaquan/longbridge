@@ -100,7 +100,9 @@ start_backend() {
     # 启动后端（后台运行）
     echo "🔄 启动 FastAPI 服务器..."
     UVICORN_ENV_FILE=()
-    if [ -f ".longport.env" ]; then
+    if [ -f ".longbridge.env" ]; then
+        UVICORN_ENV_FILE=(--env-file .longbridge.env)
+    elif [ -f ".longport.env" ]; then
         UVICORN_ENV_FILE=(--env-file .longport.env)
     fi
     nohup uvicorn app.main:app --host 127.0.0.1 --port 8000 "${UVICORN_ENV_FILE[@]}" > ../logs/backend.log 2>&1 &

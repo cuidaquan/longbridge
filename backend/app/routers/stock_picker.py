@@ -1,7 +1,7 @@
 """
 选股系统 API 路由
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional, AsyncGenerator
@@ -10,6 +10,9 @@ import json
 import asyncio
 
 from ..stock_picker import get_stock_picker_service
+from ..exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
+from ..models import SecuritySearchResponse
+from ..security_catalog import get_security_catalog_service
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,31 @@ class AnalyzeRequest(BaseModel):
 
 
 # ========== API 端点 ==========
+
+
+@router.get("/securities", response_model=SecuritySearchResponse)
+async def search_securities(
+    market: str = Query(default="US", pattern="^(US|HK|CN)$"),
+    q: str = Query(default="", max_length=80),
+    limit: int = Query(default=20, ge=1, le=50),
+):
+    """按代码、中英文名称搜索 Longbridge 官方证券列表。"""
+    try:
+        service = get_security_catalog_service()
+        items = await asyncio.to_thread(service.search, market, q, limit)
+        return {
+            "market": market,
+            "query": q,
+            "source": "longbridge",
+            "items": items,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeDependencyMissing as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
 
 @router.get("/pools")
 async def get_pools(pool_type: Optional[str] = None):
@@ -324,4 +352,3 @@ async def get_statistics():
     except Exception as e:
         logger.error(f"获取统计信息失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
