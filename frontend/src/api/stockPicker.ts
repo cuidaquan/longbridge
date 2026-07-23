@@ -135,6 +135,56 @@ export interface ScreenerCandidate {
     short_balance?: number | null;
     short_cost?: number | null;
   };
+  tradeability: {
+    status: 'available' | 'no_data' | 'error' | 'fallback' | 'disabled';
+    error?: string | null;
+    trade_status?: string | null;
+    is_tradable?: boolean | null;
+    last_done?: number | null;
+    volume?: number | null;
+    turnover?: number | null;
+    data_as_of?: string;
+    best_bid?: number | null;
+    best_ask?: number | null;
+    spread_bps?: number | null;
+    top_of_book_notional?: number | null;
+    depth_error?: string;
+    impact_cost_status: 'requires_order_size';
+  };
+  fundamentals: {
+    status: 'available' | 'partial' | 'no_data' | 'error' | 'fallback' | 'disabled';
+    errors: string[];
+    revenue_yoy?: number | null;
+    net_profit_yoy?: number | null;
+    operating_cash_flow_yoy?: number | null;
+    analyst_alignment?: number | null;
+    analyst_total?: number | null;
+    target_price?: number | null;
+    eps_revision_alignment?: number | null;
+    days_to_financial_event?: number | null;
+    financial_event?: {
+      date: string;
+      content: string;
+      market_time: string;
+      star: number;
+    } | null;
+    days_to_corporate_action?: number | null;
+    corporate_action?: {
+      date: string;
+      type: string;
+      description: string;
+    } | null;
+  };
+  margin_requirements: {
+    status: 'available' | 'no_data' | 'error' | 'fallback' | 'disabled';
+    error?: string | null;
+    initial_margin_ratio?: number | null;
+    maintenance_margin_ratio?: number | null;
+    forced_close_margin_ratio?: number | null;
+    borrow_availability: 'unknown';
+    borrow_fee_rate?: number | null;
+    note?: string;
+  };
 }
 
 export interface ScreenerIndexFilters {
@@ -153,6 +203,18 @@ export interface ScreenerIndexFilters {
   max_days_to_cover?: number;
   max_short_ratio?: number;
   max_short_ratio_change?: number;
+  max_spread_bps?: number;
+  min_top_of_book_notional?: number;
+  min_revenue_yoy?: number;
+  max_revenue_yoy?: number;
+  min_net_profit_yoy?: number;
+  max_net_profit_yoy?: number;
+  min_operating_cash_flow_yoy?: number;
+  min_analyst_alignment?: number;
+  min_eps_revision_alignment?: number;
+  min_days_to_financial_event?: number;
+  min_days_to_corporate_action?: number;
+  max_initial_margin_ratio?: number;
 }
 
 export interface ScreenerSearchResponse {
@@ -176,8 +238,27 @@ export interface ScreenerSearchResponse {
     status: 'available' | 'fallback' | 'disabled' | 'not_applicable';
     error?: string;
   };
+  tradeability: {
+    status: 'available' | 'fallback' | 'disabled';
+    error?: string | null;
+    require_normal_trade_status: boolean;
+    depth_included: boolean;
+  };
+  fundamentals: {
+    status: 'available' | 'fallback' | 'disabled';
+    error?: string | null;
+    event_window_days: number;
+    corporate_actions_included: boolean;
+  };
+  margin_requirements: {
+    status: 'available' | 'fallback' | 'disabled';
+    error?: string | null;
+    borrow_availability: 'unknown';
+  };
   filters: {
-    applied: ScreenerIndexFilters;
+    applied: ScreenerIndexFilters & {
+      require_normal_trade_status?: boolean;
+    };
     before: number;
     after: number;
     excluded: number;
@@ -375,6 +456,12 @@ export async function searchScreenerCandidates(params: {
   targetDirection?: 'LONG' | 'SHORT';
   benchmarkSymbol?: string;
   includeShortRisk?: boolean;
+  includeTradeability?: boolean;
+  requireNormalTradeStatus?: boolean;
+  includeFundamentals?: boolean;
+  includeMarginRequirements?: boolean;
+  fundamentalEventWindowDays?: number;
+  includeCorporateActions?: boolean;
 }): Promise<ScreenerSearchResponse> {
   const response = await fetch(`${API_BASE}/api/stock-picker/screener/search`, {
     method: 'POST',
@@ -389,6 +476,12 @@ export async function searchScreenerCandidates(params: {
       target_direction: params.targetDirection ?? 'LONG',
       benchmark_symbol: params.benchmarkSymbol,
       include_short_risk: params.includeShortRisk ?? true,
+      include_tradeability: params.includeTradeability ?? true,
+      require_normal_trade_status: params.requireNormalTradeStatus ?? true,
+      include_fundamentals: params.includeFundamentals ?? false,
+      include_margin_requirements: params.includeMarginRequirements ?? false,
+      fundamental_event_window_days: params.fundamentalEventWindowDays ?? 30,
+      include_corporate_actions: params.includeCorporateActions ?? false,
     }),
   });
   if (!response.ok) {

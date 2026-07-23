@@ -7,6 +7,10 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from app.exceptions import LongbridgeAPIError
+from app.external_service_resilience import (
+    ExternalServiceTimeoutError,
+    reset_stock_picker_reliability_metrics,
+)
 from app.main import app
 from app.stock_screener import StockScreenerService
 
@@ -22,6 +26,9 @@ class _ServiceWithContext(StockScreenerService):
         context,
         index_loader=None,
         short_risk_loader=None,
+        tradeability_loader=None,
+        fundamental_loader=None,
+        margin_loader=None,
     ) -> None:
         super().__init__(
             index_loader=index_loader or (lambda _symbols: {}),
@@ -29,6 +36,29 @@ class _ServiceWithContext(StockScreenerService):
                 short_risk_loader
                 or (lambda _symbols: {})
             ),
+            tradeability_loader=(
+                tradeability_loader
+                or (
+                    lambda symbols, _include_depth=False: {
+                        symbol: {
+                            "status": "available",
+                            "trade_status": "normal",
+                            "is_tradable": True,
+                            "spread_bps": None,
+                            "top_of_book_notional": None,
+                            "impact_cost_status": (
+                                "requires_order_size"
+                            ),
+                        }
+                        for symbol in symbols
+                    }
+                )
+            ),
+            fundamental_loader=(
+                fundamental_loader
+                or (lambda *_args, **_kwargs: {})
+            ),
+            margin_loader=margin_loader or (lambda _symbols: {}),
         )
         self.context = context
 
@@ -38,6 +68,12 @@ class _ServiceWithContext(StockScreenerService):
 
 
 class StockScreenerServiceTest(unittest.TestCase):
+    def setUp(self) -> None:
+        reset_stock_picker_reliability_metrics()
+
+    def tearDown(self) -> None:
+        reset_stock_picker_reliability_metrics()
+
     def test_strategy_lists_are_normalized_and_deduplicated(self) -> None:
         context = MagicMock()
         context.screener_recommend_strategies.return_value = _Response({
@@ -163,6 +199,47 @@ class StockScreenerServiceTest(unittest.TestCase):
         self.assertEqual(result["items"][0]["indicators"]["marketcap"], "3.8T")
         self.assertTrue(result["has_more"])
 
+    def test_search_normalizes_real_sdk_counter_ids(self) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "total": 2,
+            "items": [
+                {
+                    "counter_id": "ST/US/RGBP",
+                    "name": "Regen BioPharma",
+                    "indicators": [
+                        {
+                            "key": "industry",
+                            "value": "Biotechnology",
+                        },
+                    ],
+                },
+                {
+                    "counter_id": "ST/HK/00700",
+                    "name": "Tencent",
+                    "indicators": [],
+                },
+            ],
+        })
+        service = _ServiceWithContext(context)
+
+        result = service.search(
+            "US",
+            19,
+            include_indexes=False,
+        )
+
+        self.assertEqual(
+            [item["symbol"] for item in result["items"]],
+            ["RGBP.US", "700.HK"],
+        )
+        self.assertEqual(result["items"][0]["market"], "US")
+        self.assertEqual(result["items"][1]["market"], "HK")
+        self.assertEqual(
+            result["items"][0]["indicators"]["industry"],
+            "Biotechnology",
+        )
+
     def test_installed_sdk_exposes_required_screener_methods(self) -> None:
         from longbridge.openapi import ScreenerCondition, ScreenerContext
 
@@ -182,6 +259,24 @@ class StockScreenerServiceTest(unittest.TestCase):
             service.search("US", 1, size=101)
         with self.assertRaisesRegex(ValueError, "有限数字"):
             service.search("US", 1, filters={"min_turnover": float("nan")})
+        with self.assertRaisesRegex(
+            ValueError,
+            "min_revenue_yoy 不能大于 max_revenue_yoy",
+        ):
+            service.search(
+                "US",
+                1,
+                filters={
+                    "min_revenue_yoy": 0.2,
+                    "max_revenue_yoy": 0.1,
+                },
+            )
+        with self.assertRaisesRegex(ValueError, "不能大于 1"):
+            service.search(
+                "US",
+                1,
+                filters={"min_analyst_alignment": 1.1},
+            )
         service.context.screener_search.assert_not_called()
 
     def test_sdk_failure_is_exposed_as_longbridge_api_error(self) -> None:
@@ -360,6 +455,406 @@ class StockScreenerServiceTest(unittest.TestCase):
         self.assertNotIn("borrow_available", result["items"][0]["short_risk"])
         short_loader.assert_called_once_with(["SAFE.US", "CROWDED.US"])
 
+    def test_trade_status_and_depth_filters_skip_unrelated_indexes(self) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "items": [
+                {"symbol": "GOOD.US", "name": "Good"},
+                {"symbol": "HALT.US", "name": "Halted"},
+                {"symbol": "WIDE.US", "name": "Wide"},
+            ],
+        })
+        index_loader = MagicMock(return_value={})
+        tradeability_loader = MagicMock(return_value={
+            "GOOD.US": {
+                "status": "available",
+                "trade_status": "normal",
+                "is_tradable": True,
+                "spread_bps": 20,
+                "top_of_book_notional": 200_000,
+                "impact_cost_status": "requires_order_size",
+            },
+            "HALT.US": {
+                "status": "available",
+                "trade_status": "halted",
+                "is_tradable": False,
+                "spread_bps": 10,
+                "top_of_book_notional": 300_000,
+                "impact_cost_status": "requires_order_size",
+            },
+            "WIDE.US": {
+                "status": "available",
+                "trade_status": "normal",
+                "is_tradable": True,
+                "spread_bps": 80,
+                "top_of_book_notional": 300_000,
+                "impact_cost_status": "requires_order_size",
+            },
+        })
+        service = _ServiceWithContext(
+            context,
+            index_loader=index_loader,
+            tradeability_loader=tradeability_loader,
+        )
+
+        result = service.search(
+            "US",
+            101,
+            include_indexes=False,
+            filters={
+                "max_spread_bps": 50,
+                "min_top_of_book_notional": 100_000,
+            },
+        )
+
+        self.assertEqual(
+            [item["symbol"] for item in result["items"]],
+            ["GOOD.US"],
+        )
+        self.assertEqual(
+            result["filters"]["reasons"],
+            {
+                "trade_status_halted": 1,
+                "above_max_spread_bps": 1,
+            },
+        )
+        self.assertTrue(result["tradeability"]["depth_included"])
+        self.assertEqual(
+            result["items"][0]["tradeability"]["spread_bps"],
+            20,
+        )
+        tradeability_loader.assert_called_once_with(
+            ["GOOD.US", "HALT.US", "WIDE.US"],
+            True,
+        )
+        index_loader.assert_not_called()
+
+    def test_tradeability_without_depth_and_failure_semantics(self) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "items": [{"symbol": "AAA.US", "name": "Alpha"}],
+        })
+        tradeability_loader = MagicMock(return_value={
+            "AAA.US": {
+                "status": "available",
+                "trade_status": "normal",
+                "is_tradable": True,
+            },
+        })
+        service = _ServiceWithContext(
+            context,
+            tradeability_loader=tradeability_loader,
+        )
+
+        result = service.search(
+            "US",
+            101,
+            include_indexes=False,
+        )
+
+        tradeability_loader.assert_called_once_with(["AAA.US"], False)
+        self.assertFalse(result["tradeability"]["depth_included"])
+
+        def fail_tradeability(_symbols, _include_depth):
+            raise RuntimeError("quote unavailable")
+
+        failing_service = _ServiceWithContext(
+            context,
+            tradeability_loader=fail_tradeability,
+        )
+        degraded = failing_service.search(
+            "US",
+            101,
+            include_indexes=False,
+            require_normal_trade_status=False,
+        )
+        self.assertEqual(degraded["tradeability"]["status"], "fallback")
+        self.assertEqual(
+            [item["symbol"] for item in degraded["items"]],
+            ["AAA.US"],
+        )
+
+        with self.assertRaisesRegex(
+            LongbridgeAPIError,
+            "无法应用交易可执行性过滤",
+        ):
+            failing_service.search(
+                "US",
+                101,
+                include_indexes=False,
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "include_tradeability=true",
+        ):
+            service.search(
+                "US",
+                101,
+                include_tradeability=False,
+                require_normal_trade_status=True,
+            )
+
+    def test_candidate_batches_do_not_retry_after_timeout(self) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "items": [{"symbol": "AAA.US", "name": "Alpha"}],
+        })
+        service = _ServiceWithContext(context)
+        candidate_retry_predicates = {}
+
+        def call_external(
+            service_name,
+            operation,
+            callback,
+            *args,
+            retry_if=None,
+            **kwargs,
+        ):
+            if operation in {
+                "candidate_tradeability",
+                "candidate_profiles",
+                "margin_requirements",
+            }:
+                candidate_retry_predicates[operation] = retry_if
+            return callback(*args, **kwargs)
+
+        with patch(
+            "app.stock_screener.run_external_call",
+            side_effect=call_external,
+        ):
+            service.search(
+                "US",
+                101,
+                include_indexes=False,
+                target_direction="SHORT",
+                include_short_risk=False,
+                include_fundamentals=True,
+                include_margin_requirements=True,
+            )
+
+        self.assertEqual(
+            set(candidate_retry_predicates),
+            {
+                "candidate_tradeability",
+                "candidate_profiles",
+                "margin_requirements",
+            },
+        )
+        timeout = ExternalServiceTimeoutError("batch timed out")
+        for retry_if in candidate_retry_predicates.values():
+            self.assertIsNotNone(retry_if)
+            self.assertFalse(retry_if(timeout))
+            self.assertTrue(retry_if(RuntimeError("temporary outage")))
+
+    def test_fundamental_filters_are_directional_and_event_aware(self) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "items": [
+                {"symbol": "GOOD.US", "name": "Good"},
+                {"symbol": "WEAK.US", "name": "Weak"},
+                {"symbol": "MISSING.US", "name": "Missing"},
+            ],
+        })
+        index_loader = MagicMock(return_value={})
+        fundamental_loader = MagicMock(return_value={
+            "GOOD.US": {
+                "status": "available",
+                "revenue_yoy": 0.2,
+                "net_profit_yoy": 0.3,
+                "operating_cash_flow_yoy": 0.15,
+                "analyst_alignment": 0.6,
+                "eps_revision_alignment": 0.4,
+                "days_to_financial_event": 60,
+                "days_to_corporate_action": 20,
+            },
+            "WEAK.US": {
+                "status": "available",
+                "revenue_yoy": 0.05,
+                "net_profit_yoy": 0.2,
+                "operating_cash_flow_yoy": 0.1,
+                "analyst_alignment": 0.3,
+                "eps_revision_alignment": 0.2,
+                "days_to_financial_event": 60,
+                "days_to_corporate_action": 20,
+            },
+            "MISSING.US": {
+                "status": "partial",
+                "revenue_yoy": None,
+                "net_profit_yoy": 0.3,
+                "analyst_alignment": 0.5,
+                "eps_revision_alignment": 0.5,
+                "days_to_financial_event": 60,
+                "days_to_corporate_action": 20,
+            },
+        })
+        service = _ServiceWithContext(
+            context,
+            index_loader=index_loader,
+            fundamental_loader=fundamental_loader,
+        )
+
+        result = service.search(
+            "US",
+            101,
+            include_indexes=False,
+            target_direction="LONG",
+            filters={
+                "min_revenue_yoy": 0.1,
+                "min_analyst_alignment": 0.5,
+                "min_eps_revision_alignment": 0.3,
+                "min_days_to_financial_event": 45,
+                "min_days_to_corporate_action": 10,
+            },
+        )
+
+        self.assertEqual(
+            [item["symbol"] for item in result["items"]],
+            ["GOOD.US"],
+        )
+        self.assertEqual(
+            result["filters"]["reasons"],
+            {
+                "below_min_revenue_yoy": 1,
+                "missing_revenue_yoy": 1,
+            },
+        )
+        fundamental_loader.assert_called_once_with(
+            ["GOOD.US", "WEAK.US", "MISSING.US"],
+            "US",
+            "LONG",
+            45,
+            True,
+        )
+        self.assertEqual(
+            result["fundamentals"]["event_window_days"],
+            45,
+        )
+        self.assertTrue(
+            result["fundamentals"]["corporate_actions_included"]
+        )
+        index_loader.assert_not_called()
+
+    def test_margin_filter_preserves_borrow_unknown_boundary(self) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "items": [
+                {"symbol": "LOW.US", "name": "Low"},
+                {"symbol": "HIGH.US", "name": "High"},
+            ],
+        })
+        margin_loader = MagicMock(return_value={
+            "LOW.US": {
+                "status": "available",
+                "initial_margin_ratio": 0.5,
+                "borrow_availability": "unknown",
+                "borrow_fee_rate": None,
+                "note": "保证金比例不代表实时券源可借或融券费率",
+            },
+            "HIGH.US": {
+                "status": "available",
+                "initial_margin_ratio": 0.8,
+                "borrow_availability": "unknown",
+                "borrow_fee_rate": None,
+            },
+        })
+        service = _ServiceWithContext(
+            context,
+            margin_loader=margin_loader,
+        )
+
+        result = service.search(
+            "US",
+            101,
+            include_indexes=False,
+            include_short_risk=False,
+            target_direction="SHORT",
+            filters={"max_initial_margin_ratio": 0.6},
+        )
+
+        self.assertEqual(
+            [item["symbol"] for item in result["items"]],
+            ["LOW.US"],
+        )
+        margin = result["items"][0]["margin_requirements"]
+        self.assertEqual(margin["borrow_availability"], "unknown")
+        self.assertIsNone(margin["borrow_fee_rate"])
+        self.assertEqual(
+            result["margin_requirements"]["borrow_availability"],
+            "unknown",
+        )
+        margin_loader.assert_called_once_with(["LOW.US", "HIGH.US"])
+
+    def test_fundamental_and_margin_failures_only_degrade_without_filters(
+        self,
+    ) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "items": [{"symbol": "AAA.US", "name": "Alpha"}],
+        })
+
+        def fail_fundamentals(*_args):
+            raise RuntimeError("fundamental unavailable")
+
+        service = _ServiceWithContext(
+            context,
+            fundamental_loader=fail_fundamentals,
+        )
+        degraded = service.search(
+            "US",
+            101,
+            include_indexes=False,
+            include_fundamentals=True,
+        )
+        self.assertEqual(degraded["fundamentals"]["status"], "fallback")
+        self.assertEqual(
+            [item["symbol"] for item in degraded["items"]],
+            ["AAA.US"],
+        )
+
+        reset_stock_picker_reliability_metrics()
+        with self.assertRaisesRegex(
+            LongbridgeAPIError,
+            "无法应用财务或事件过滤",
+        ):
+            service.search(
+                "US",
+                101,
+                include_indexes=False,
+                filters={"min_revenue_yoy": 0.1},
+            )
+
+        def fail_margin(_symbols):
+            raise RuntimeError("trade unavailable")
+
+        reset_stock_picker_reliability_metrics()
+        margin_service = _ServiceWithContext(
+            context,
+            margin_loader=fail_margin,
+        )
+        degraded_margin = margin_service.search(
+            "US",
+            101,
+            include_indexes=False,
+            include_margin_requirements=True,
+        )
+        self.assertEqual(
+            degraded_margin["margin_requirements"]["status"],
+            "fallback",
+        )
+
+        reset_stock_picker_reliability_metrics()
+        with self.assertRaisesRegex(
+            LongbridgeAPIError,
+            "无法应用保证金比例过滤",
+        ):
+            margin_service.search(
+                "US",
+                101,
+                include_indexes=False,
+                filters={"max_initial_margin_ratio": 0.6},
+            )
+
     def test_index_failure_only_degrades_when_no_hard_filter_is_requested(self) -> None:
         context = MagicMock()
         context.screener_search.return_value = _Response({
@@ -460,7 +955,16 @@ class StockScreenerRouteTest(unittest.TestCase):
                         "strategy_id": 101,
                         "page": 0,
                         "size": 20,
-                        "filters": {"min_turnover": 1000000},
+                        "filters": {
+                            "min_turnover": 1000000,
+                            "max_spread_bps": 50,
+                            "min_revenue_yoy": 0.1,
+                            "max_initial_margin_ratio": 0.6,
+                        },
+                        "include_fundamentals": True,
+                        "include_margin_requirements": True,
+                        "fundamental_event_window_days": 60,
+                        "include_corporate_actions": True,
                     },
                 )
                 invalid = client.post(
@@ -477,15 +981,26 @@ class StockScreenerRouteTest(unittest.TestCase):
         self.assertEqual(invalid.status_code, 422)
         screener.list_strategies.assert_called_once_with("US", False)
         screener.search.assert_called_once_with(
-            "US",
-            101,
-            0,
-            20,
-            {"min_turnover": 1000000.0},
-            True,
-            "LONG",
-            None,
-            True,
+            market="US",
+            strategy_id=101,
+            page=0,
+            size=20,
+            filters={
+                "min_turnover": 1000000.0,
+                "max_spread_bps": 50.0,
+                "min_revenue_yoy": 0.1,
+                "max_initial_margin_ratio": 0.6,
+            },
+            include_indexes=True,
+            target_direction="LONG",
+            benchmark_symbol=None,
+            include_short_risk=True,
+            include_tradeability=True,
+            require_normal_trade_status=True,
+            include_fundamentals=True,
+            include_margin_requirements=True,
+            fundamental_event_window_days=60,
+            include_corporate_actions=True,
         )
 
     def test_import_keeps_manual_pool_and_records_strategy_source(self) -> None:

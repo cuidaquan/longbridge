@@ -193,7 +193,26 @@ class StockPickerReliabilityMetricsTests(unittest.TestCase):
         self.assertEqual(payload["scope"], "process")
         self.assertEqual(
             set(payload["services"]),
-            {"quote", "screener", "news", "ai"},
+            {
+                "quote",
+                "screener",
+                "news",
+                "ai",
+                "fundamental",
+                "trade",
+            },
+        )
+        self.assertEqual(
+            payload["services"]["fundamental"]["policy"][
+                "max_concurrency"
+            ],
+            3,
+        )
+        self.assertEqual(
+            payload["services"]["trade"]["policy"][
+                "max_concurrency"
+            ],
+            2,
         )
         self.assertEqual(payload["stock_picker"]["cache"]["requests"], 2)
         self.assertEqual(payload["stock_picker"]["cache"]["hit_rate"], 0.5)

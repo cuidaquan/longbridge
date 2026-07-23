@@ -1061,6 +1061,8 @@ function StockDiscoveryDialog({
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showFilters, setShowFilters] = useState(false);
+  const [includeFundamentalDetails, setIncludeFundamentalDetails] = useState(false);
+  const [includeMarginDetails, setIncludeMarginDetails] = useState(false);
   const [filterInputs, setFilterInputs] = useState({
     min_turnover: '',
     min_market_value: '',
@@ -1077,6 +1079,18 @@ function StockDiscoveryDialog({
     max_days_to_cover: '',
     max_short_ratio: '',
     max_short_ratio_change: '',
+    max_spread_bps: '',
+    min_top_of_book_notional: '',
+    min_revenue_yoy: '',
+    max_revenue_yoy: '',
+    min_net_profit_yoy: '',
+    max_net_profit_yoy: '',
+    min_operating_cash_flow_yoy: '',
+    min_analyst_alignment: '',
+    min_eps_revision_alignment: '',
+    min_days_to_financial_event: '',
+    min_days_to_corporate_action: '',
+    max_initial_margin_ratio: '',
   });
 
   useEffect(() => {
@@ -1132,6 +1146,11 @@ function StockDiscoveryDialog({
         size: 20,
         filters,
         targetDirection: poolType,
+        includeTradeability: true,
+        requireNormalTradeStatus: true,
+        includeFundamentals: includeFundamentalDetails,
+        includeMarginRequirements: poolType === 'SHORT' && includeMarginDetails,
+        includeCorporateActions: includeFundamentalDetails,
       });
       setResult(response);
       setSelectedSymbols(new Set(response.items.map((item) => item.symbol)));
@@ -1195,6 +1214,9 @@ function StockDiscoveryDialog({
     const number = Number(value);
     return Number.isFinite(number) ? number : null;
   };
+  const formatRatio = (value: number | null | undefined) => (
+    value == null ? '-' : `${(value * 100).toFixed(1)}%`
+  );
   const filterDefinitions: Array<
     [keyof typeof filterInputs, string, string]
   > = [
@@ -1210,11 +1232,23 @@ function StockDiscoveryDialog({
     ['min_market_rs_half_year', '最低市场 RS(半年)', '方向化差值'],
     ['min_industry_rs_10d', '最低行业 RS(10日)', '同页行业中位数'],
     ['min_industry_rs_half_year', '最低行业 RS(半年)', '同页行业中位数'],
+    ['max_spread_bps', '最高买卖点差', 'bps，例如 50'],
+    ['min_top_of_book_notional', '最低一档盘口金额', '市场币种'],
+    ['min_revenue_yoy', '最低收入同比', '小数，例如 0.1'],
+    ['max_revenue_yoy', '最高收入同比', '小数，例如 0.5'],
+    ['min_net_profit_yoy', '最低净利润同比', '小数，例如 0.1'],
+    ['max_net_profit_yoy', '最高净利润同比', '小数，例如 0.8'],
+    ['min_operating_cash_flow_yoy', '最低经营现金流同比', '小数'],
+    ['min_analyst_alignment', '最低分析师方向一致性', '-1 到 1'],
+    ['min_eps_revision_alignment', '最低 EPS 修正一致性', '-1 到 1'],
+    ['min_days_to_financial_event', '距财报至少天数', '0 到 365'],
+    ['min_days_to_corporate_action', '距公司行动至少天数', '0 到 365'],
     ...(poolType === 'SHORT'
       ? [
           ['max_days_to_cover', '最高回补天数', '例如 5'],
           ['max_short_ratio', '最高做空比例', 'SDK 数值'],
           ['max_short_ratio_change', '最高做空比例增量', '可输入负数'],
+          ['max_initial_margin_ratio', '最高初始保证金比例', '小数，例如 0.6'],
         ] as Array<[keyof typeof filterInputs, string, string]>
       : []),
   ];
@@ -1285,11 +1319,13 @@ function StockDiscoveryDialog({
                     setResult(null);
                     setSelectedSymbols(new Set());
                     if (value === 'LONG') {
+                      setIncludeMarginDetails(false);
                       setFilterInputs((current) => ({
                         ...current,
                         max_days_to_cover: '',
                         max_short_ratio: '',
                         max_short_ratio_change: '',
+                        max_initial_margin_ratio: '',
                       }));
                     }
                   }}
@@ -1359,13 +1395,58 @@ function StockDiscoveryDialog({
           </p>
         )}
 
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+            <input
+              type="checkbox"
+              checked={includeFundamentalDetails}
+              onChange={(event) => {
+                setIncludeFundamentalDetails(event.target.checked);
+                setResult(null);
+                setSelectedSymbols(new Set());
+              }}
+              className="mt-0.5 h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500"
+            />
+            <span>
+              <span className="block text-sm text-slate-700 dark:text-slate-300">
+                补充财务与事件
+              </span>
+              <span className="block text-xs text-slate-500">
+                可选，可能显著增加等待时间；设置相关过滤时会自动加载
+              </span>
+            </span>
+          </label>
+          {poolType === 'SHORT' && (
+            <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+              <input
+                type="checkbox"
+                checked={includeMarginDetails}
+                onChange={(event) => {
+                  setIncludeMarginDetails(event.target.checked);
+                  setResult(null);
+                  setSelectedSymbols(new Set());
+                }}
+                className="mt-0.5 h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500"
+              />
+              <span>
+                <span className="block text-sm text-slate-700 dark:text-slate-300">
+                  补充保证金比例
+                </span>
+                <span className="block text-xs text-slate-500">
+                  可选；不代表实时券源或融券费，设置保证金过滤时会自动加载
+                </span>
+              </span>
+            </label>
+          )}
+        </div>
+
         <div className="mt-3 rounded-lg border border-slate-200 dark:border-slate-700">
           <button
             type="button"
             onClick={() => setShowFilters((value) => !value)}
             className="flex w-full items-center justify-between px-3 py-2 text-left text-sm font-medium text-slate-700 dark:text-slate-300"
           >
-            <span>流动性与估值过滤（可选）</span>
+            <span>流动性、财务、事件与风险过滤（可选）</span>
             {showFilters
               ? <ExpandLess className="h-4 w-4" />
               : <ExpandMore className="h-4 w-4" />}
@@ -1415,6 +1496,18 @@ function StockDiscoveryDialog({
                     max_days_to_cover: '',
                     max_short_ratio: '',
                     max_short_ratio_change: '',
+                    max_spread_bps: '',
+                    min_top_of_book_notional: '',
+                    min_revenue_yoy: '',
+                    max_revenue_yoy: '',
+                    min_net_profit_yoy: '',
+                    max_net_profit_yoy: '',
+                    min_operating_cash_flow_yoy: '',
+                    min_analyst_alignment: '',
+                    min_eps_revision_alignment: '',
+                    min_days_to_financial_event: '',
+                    min_days_to_corporate_action: '',
+                    max_initial_margin_ratio: '',
                   });
                   setResult(null);
                   setSelectedSymbols(new Set());
@@ -1444,9 +1537,13 @@ function StockDiscoveryDialog({
                   市场基准 {result.relative_strength.benchmark_symbol}；
                   行业 RS 为本页同行中位数差
                 </p>
+                <p className="text-xs text-slate-500">
+                  已排除非正常交易标的；点差与盘口仅在设置对应阈值时请求，
+                  冲击成本仍需订单规模才能评估
+                </p>
                 {result.filters.excluded > 0 && (
                   <p className="text-xs text-amber-600 dark:text-amber-400">
-                    本页按指标过滤 {result.filters.excluded} 只，
+                    本页按候选约束过滤 {result.filters.excluded} 只，
                     保留 {result.filters.after}/{result.filters.before} 只
                   </p>
                 )}
@@ -1454,7 +1551,10 @@ function StockDiscoveryDialog({
               <button
                 type="button"
                 onClick={() => {
-                  if (selectedCount === result.items.length) {
+                  if (
+                    result.items.length > 0
+                    && selectedCount === result.items.length
+                  ) {
                     setSelectedSymbols(new Set());
                   } else {
                     setSelectedSymbols(new Set(result.items.map((item) => item.symbol)));
@@ -1462,7 +1562,12 @@ function StockDiscoveryDialog({
                 }}
                 className="text-sm text-cyan-600 hover:text-cyan-700 dark:text-cyan-400"
               >
-                {selectedCount === result.items.length ? '取消全选' : '全选本页'}
+                {
+                  result.items.length > 0
+                  && selectedCount === result.items.length
+                    ? '取消全选'
+                    : '全选本页'
+                }
               </button>
             </div>
 
@@ -1473,9 +1578,24 @@ function StockDiscoveryDialog({
                 </Alert>
               </div>
             )}
+            {result.fundamentals.status === 'fallback' && (
+              <div className="mb-2">
+                <Alert type="warning">
+                  财务与事件数据暂不可用，当前候选未应用相关补充信息。
+                </Alert>
+              </div>
+            )}
+            {result.margin_requirements.status === 'fallback' && (
+              <div className="mb-2">
+                <Alert type="warning">
+                  保证金比例暂不可用；券源和融券费仍保持未知。
+                </Alert>
+              </div>
+            )}
             {poolType === 'SHORT' && (
               <p className="mb-2 text-xs text-amber-600 dark:text-amber-400">
-                做空指标仅用于衡量拥挤度与逼空风险，不代表可借券、融券成本或实际可成交性。
+                做空拥挤度和保证金比例都不代表实时可借券或融券费率；
+                当前券源与融券费明确标记为未知。
               </p>
             )}
             {poolType === 'SHORT' && result.short_risk.status === 'fallback' && (
@@ -1518,6 +1638,23 @@ function StockDiscoveryDialog({
                         <span className="text-xs text-slate-400">#{candidate.rank}</span>
                       </div>
                       <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                        <span>
+                          交易状态 {
+                            candidate.tradeability.trade_status === 'normal'
+                              ? '正常'
+                              : candidate.tradeability.trade_status || '-'
+                          }
+                        </span>
+                        <span>
+                          点差 {candidate.tradeability.spread_bps == null
+                            ? '-'
+                            : `${candidate.tradeability.spread_bps.toFixed(1)} bps`}
+                        </span>
+                        <span>
+                          一档盘口 {formatIndex(
+                            candidate.tradeability.top_of_book_notional,
+                          )}
+                        </span>
                         <span>成交额 {formatIndex(candidate.indexes.turnover)}</span>
                         <span>市值 {formatIndex(candidate.indexes.total_market_value)}</span>
                         <span>换手 {formatIndex(candidate.indexes.turnover_rate)}</span>
@@ -1547,6 +1684,66 @@ function StockDiscoveryDialog({
                         {candidate.indicators.industry != null && (
                           <span>行业 {String(candidate.indicators.industry)}</span>
                         )}
+                        {candidate.fundamentals.status !== 'disabled' && (
+                          <>
+                            <span>
+                              收入同比 {formatRatio(
+                                candidate.fundamentals.revenue_yoy,
+                              )}
+                            </span>
+                            <span>
+                              净利润同比 {formatRatio(
+                                candidate.fundamentals.net_profit_yoy,
+                              )}
+                            </span>
+                            <span>
+                              经营现金流同比 {formatRatio(
+                                candidate.fundamentals.operating_cash_flow_yoy,
+                              )}
+                            </span>
+                            <span>
+                              分析师一致性 {formatRatio(
+                                candidate.fundamentals.analyst_alignment,
+                              )}
+                            </span>
+                            <span>
+                              EPS 修正一致性 {formatRatio(
+                                candidate.fundamentals.eps_revision_alignment,
+                              )}
+                            </span>
+                            {candidate.fundamentals.financial_event ? (
+                              <span>
+                                财报 {candidate.fundamentals.days_to_financial_event} 天后
+                                （{candidate.fundamentals.financial_event.content
+                                  || '财报事件'}）
+                              </span>
+                            ) : candidate.fundamentals.days_to_financial_event != null ? (
+                              <span>
+                                未来 {result.fundamentals.event_window_days} 天无财报事件
+                              </span>
+                            ) : (
+                              <span>财报事件 -</span>
+                            )}
+                            {candidate.fundamentals.corporate_action ? (
+                              <span>
+                                公司行动 {candidate.fundamentals.days_to_corporate_action} 天后
+                                （{candidate.fundamentals.corporate_action.description
+                                  || candidate.fundamentals.corporate_action.type}）
+                              </span>
+                            ) : candidate.fundamentals.days_to_corporate_action != null ? (
+                              <span>
+                                未来 {result.fundamentals.event_window_days} 天无公司行动
+                              </span>
+                            ) : (
+                              <span>公司行动 -</span>
+                            )}
+                            {candidate.fundamentals.status === 'partial' && (
+                              <span className="text-amber-600 dark:text-amber-400">
+                                部分财务数据缺失
+                              </span>
+                            )}
+                          </>
+                        )}
                         {poolType === 'SHORT' && (
                           <>
                             <span>
@@ -1555,6 +1752,16 @@ function StockDiscoveryDialog({
                             <span>
                               回补天数 {formatIndex(candidate.short_risk.days_to_cover)}
                             </span>
+                            {candidate.margin_requirements.status !== 'disabled' && (
+                              <>
+                                <span>
+                                  初始保证金 {formatRatio(
+                                    candidate.margin_requirements.initial_margin_ratio,
+                                  )}
+                                </span>
+                                <span>券源/融券费 未知</span>
+                              </>
+                            )}
                           </>
                         )}
                       </div>

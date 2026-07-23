@@ -83,6 +83,20 @@ DEFAULT_EXTERNAL_SERVICE_POLICIES = {
         failure_threshold=3,
         recovery_seconds=60,
     ),
+    "fundamental": ExternalServicePolicy(
+        timeout_seconds=20,
+        max_attempts=2,
+        max_concurrency=3,
+        failure_threshold=3,
+        recovery_seconds=60,
+    ),
+    "trade": ExternalServicePolicy(
+        timeout_seconds=15,
+        max_attempts=2,
+        max_concurrency=2,
+        failure_threshold=3,
+        recovery_seconds=60,
+    ),
 }
 
 

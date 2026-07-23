@@ -7,10 +7,18 @@ from statistics import median
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from .exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
-from .external_service_resilience import run_external_call
+from .external_service_resilience import (
+    ExternalServiceTimeoutError,
+    run_external_call,
+)
 from .longbridge_compat import close_longbridge_context
 from .repositories import load_credentials
 from .services import get_security_calc_indexes, get_short_risk_metrics
+from .stock_candidate_data import (
+    get_fundamental_profiles,
+    get_margin_requirements,
+    get_security_tradeability,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -36,6 +44,48 @@ DEFAULT_MARKET_BENCHMARKS = {
     "CN": "510300.SH",
     "SG": "ES3.SG",
 }
+INDEX_FILTER_KEYS = {
+    "min_turnover",
+    "min_market_value",
+    "min_turnover_rate",
+    "min_pe_ttm",
+    "max_pe_ttm",
+    "max_pb",
+    "min_capital_flow",
+    "min_volume_ratio",
+    "min_market_rs_10d",
+    "min_market_rs_half_year",
+    "min_industry_rs_10d",
+    "min_industry_rs_half_year",
+}
+SHORT_RISK_FILTER_KEYS = {
+    "max_days_to_cover",
+    "max_short_ratio",
+    "max_short_ratio_change",
+}
+TRADEABILITY_FILTER_KEYS = {
+    "max_spread_bps",
+    "min_top_of_book_notional",
+}
+FUNDAMENTAL_FILTER_KEYS = {
+    "min_revenue_yoy",
+    "max_revenue_yoy",
+    "min_net_profit_yoy",
+    "max_net_profit_yoy",
+    "min_operating_cash_flow_yoy",
+    "min_analyst_alignment",
+    "min_eps_revision_alignment",
+    "min_days_to_financial_event",
+    "min_days_to_corporate_action",
+}
+MARGIN_FILTER_KEYS = {
+    "max_initial_margin_ratio",
+}
+
+
+def _retry_candidate_batch(error: BaseException) -> bool:
+    """Retry transient failures, but never duplicate a timed-out full batch."""
+    return not isinstance(error, ExternalServiceTimeoutError)
 
 
 class StockScreenerService:
@@ -51,9 +101,21 @@ class StockScreenerService:
             [List[str]],
             Dict[str, Dict[str, object]],
         ] = get_short_risk_metrics,
+        tradeability_loader: Callable[..., Dict[str, Dict[str, Any]]] = (
+            get_security_tradeability
+        ),
+        fundamental_loader: Callable[..., Dict[str, Dict[str, Any]]] = (
+            get_fundamental_profiles
+        ),
+        margin_loader: Callable[..., Dict[str, Dict[str, Any]]] = (
+            get_margin_requirements
+        ),
     ) -> None:
         self._index_loader = index_loader
         self._short_risk_loader = short_risk_loader
+        self._tradeability_loader = tradeability_loader
+        self._fundamental_loader = fundamental_loader
+        self._margin_loader = margin_loader
 
     @staticmethod
     def normalize_market(market: str) -> str:
@@ -171,6 +233,12 @@ class StockScreenerService:
         target_direction: str = "LONG",
         benchmark_symbol: Optional[str] = None,
         include_short_risk: bool = True,
+        include_tradeability: bool = True,
+        require_normal_trade_status: bool = True,
+        include_fundamentals: bool = False,
+        include_margin_requirements: bool = False,
+        fundamental_event_window_days: int = 30,
+        include_corporate_actions: bool = False,
     ) -> Dict[str, Any]:
         normalized_market = self.normalize_market(market)
         normalized_direction = target_direction.strip().upper()
@@ -187,17 +255,28 @@ class StockScreenerService:
             raise ValueError("page 不能小于 0")
         if not 1 <= size <= 100:
             raise ValueError("size 必须在 1～100 之间")
+        if not 1 <= fundamental_event_window_days <= 365:
+            raise ValueError(
+                "fundamental_event_window_days 必须在 1～365 之间"
+            )
         normalized_filters = self._normalize_filters(filters or {})
-        short_filter_keys = {
-            "max_days_to_cover",
-            "max_short_ratio",
-            "max_short_ratio_change",
-        }
         if (
             normalized_direction != "SHORT"
-            and short_filter_keys.intersection(normalized_filters)
+            and SHORT_RISK_FILTER_KEYS.intersection(normalized_filters)
         ):
             raise ValueError("做空拥挤度过滤仅适用于 SHORT 方向")
+        if (
+            not include_tradeability
+            and (
+                require_normal_trade_status
+                or TRADEABILITY_FILTER_KEYS.intersection(
+                    normalized_filters
+                )
+            )
+        ):
+            raise ValueError(
+                "交易状态或盘口过滤要求 include_tradeability=true"
+            )
 
         def fetch_candidates():
             with self._context() as context:
@@ -231,7 +310,10 @@ class StockScreenerService:
             "status": "disabled",
             "error": None,
         }
-        if candidates and (include_indexes or normalized_filters):
+        hard_index_filters = INDEX_FILTER_KEYS.intersection(
+            normalized_filters
+        )
+        if candidates and (include_indexes or hard_index_filters):
             try:
                 index_symbols = [
                     candidate["symbol"]
@@ -246,7 +328,7 @@ class StockScreenerService:
                     index_symbols,
                 )
             except Exception as exc:
-                if normalized_filters:
+                if hard_index_filters:
                     if isinstance(exc, LongbridgeAPIError):
                         raise
                     raise LongbridgeAPIError(
@@ -317,7 +399,11 @@ class StockScreenerService:
             normalized_direction == "SHORT"
             and (
                 include_short_risk
-                or bool(short_filter_keys.intersection(normalized_filters))
+                or bool(
+                    SHORT_RISK_FILTER_KEYS.intersection(
+                        normalized_filters
+                    )
+                )
             )
         )
         if needs_short_risk and candidates:
@@ -332,7 +418,9 @@ class StockScreenerService:
                     ],
                 )
             except Exception as exc:
-                if short_filter_keys.intersection(normalized_filters):
+                if SHORT_RISK_FILTER_KEYS.intersection(
+                    normalized_filters
+                ):
                     if isinstance(exc, LongbridgeAPIError):
                         raise
                     raise LongbridgeAPIError(
@@ -364,10 +452,207 @@ class StockScreenerService:
                 "error": short_risk_status["error"],
             })
 
+        candidate_symbols = [
+            candidate["symbol"]
+            for candidate in candidates
+        ]
+        hard_tradeability = bool(
+            require_normal_trade_status
+            or TRADEABILITY_FILTER_KEYS.intersection(normalized_filters)
+        )
+        include_depth = bool(
+            TRADEABILITY_FILTER_KEYS.intersection(normalized_filters)
+        )
+        tradeability_status = {
+            "status": "disabled",
+            "error": None,
+            "require_normal_trade_status": require_normal_trade_status,
+            "depth_included": include_depth,
+        }
+        if include_tradeability and candidates:
+            try:
+                tradeability = run_external_call(
+                    "quote",
+                    "candidate_tradeability",
+                    self._tradeability_loader,
+                    candidate_symbols,
+                    include_depth,
+                    retry_if=_retry_candidate_batch,
+                )
+            except Exception as exc:
+                if hard_tradeability:
+                    raise LongbridgeAPIError(
+                        f"无法应用交易可执行性过滤: {exc}"
+                    ) from exc
+                logger.warning(
+                    "Longbridge candidate tradeability unavailable: %s",
+                    exc,
+                )
+                tradeability_status["status"] = "fallback"
+                tradeability_status["error"] = str(exc)
+            else:
+                for candidate in candidates:
+                    candidate["tradeability"] = tradeability.get(
+                        candidate["symbol"],
+                        {
+                            "status": "no_data",
+                            "error": None,
+                            "trade_status": None,
+                            "is_tradable": None,
+                            "spread_bps": None,
+                            "top_of_book_notional": None,
+                            "impact_cost_status": (
+                                "requires_order_size"
+                            ),
+                        },
+                    )
+                tradeability_status["status"] = "available"
+        for candidate in candidates:
+            candidate.setdefault("tradeability", {
+                "status": tradeability_status["status"],
+                "error": tradeability_status["error"],
+                "trade_status": None,
+                "is_tradable": None,
+                "spread_bps": None,
+                "top_of_book_notional": None,
+                "impact_cost_status": "requires_order_size",
+            })
+
+        event_thresholds = [
+            normalized_filters[key]
+            for key in (
+                "min_days_to_financial_event",
+                "min_days_to_corporate_action",
+            )
+            if key in normalized_filters
+        ]
+        effective_event_window = max([
+            fundamental_event_window_days,
+            *(
+                math.ceil(value)
+                for value in event_thresholds
+            ),
+        ])
+        corporate_actions_requested = bool(
+            include_corporate_actions
+            or "min_days_to_corporate_action" in normalized_filters
+        )
+        hard_fundamental_filters = (
+            FUNDAMENTAL_FILTER_KEYS.intersection(normalized_filters)
+        )
+        needs_fundamentals = bool(
+            include_fundamentals or hard_fundamental_filters
+        )
+        fundamental_status = {
+            "status": "disabled",
+            "error": None,
+            "event_window_days": effective_event_window,
+            "corporate_actions_included": (
+                corporate_actions_requested
+            ),
+        }
+        if needs_fundamentals and candidates:
+            try:
+                fundamentals = run_external_call(
+                    "fundamental",
+                    "candidate_profiles",
+                    self._fundamental_loader,
+                    candidate_symbols,
+                    normalized_market,
+                    normalized_direction,
+                    effective_event_window,
+                    corporate_actions_requested,
+                    retry_if=_retry_candidate_batch,
+                )
+            except Exception as exc:
+                if hard_fundamental_filters:
+                    raise LongbridgeAPIError(
+                        f"无法应用财务或事件过滤: {exc}"
+                    ) from exc
+                logger.warning(
+                    "Longbridge candidate fundamentals unavailable: %s",
+                    exc,
+                )
+                fundamental_status["status"] = "fallback"
+                fundamental_status["error"] = str(exc)
+            else:
+                for candidate in candidates:
+                    candidate["fundamentals"] = fundamentals.get(
+                        candidate["symbol"],
+                        {
+                            "status": "no_data",
+                            "errors": [],
+                        },
+                    )
+                fundamental_status["status"] = "available"
+        for candidate in candidates:
+            candidate.setdefault("fundamentals", {
+                "status": fundamental_status["status"],
+                "errors": (
+                    [fundamental_status["error"]]
+                    if fundamental_status["error"]
+                    else []
+                ),
+            })
+
+        hard_margin_filters = MARGIN_FILTER_KEYS.intersection(
+            normalized_filters
+        )
+        needs_margin = bool(
+            include_margin_requirements or hard_margin_filters
+        )
+        margin_status = {
+            "status": "disabled",
+            "error": None,
+            "borrow_availability": "unknown",
+        }
+        if needs_margin and candidates:
+            try:
+                margin_requirements = run_external_call(
+                    "trade",
+                    "margin_requirements",
+                    self._margin_loader,
+                    candidate_symbols,
+                    retry_if=_retry_candidate_batch,
+                )
+            except Exception as exc:
+                if hard_margin_filters:
+                    raise LongbridgeAPIError(
+                        f"无法应用保证金比例过滤: {exc}"
+                    ) from exc
+                logger.warning(
+                    "Longbridge margin requirements unavailable: %s",
+                    exc,
+                )
+                margin_status["status"] = "fallback"
+                margin_status["error"] = str(exc)
+            else:
+                for candidate in candidates:
+                    candidate[
+                        "margin_requirements"
+                    ] = margin_requirements.get(
+                        candidate["symbol"],
+                        {
+                            "status": "no_data",
+                            "error": None,
+                            "borrow_availability": "unknown",
+                            "borrow_fee_rate": None,
+                        },
+                    )
+                margin_status["status"] = "available"
+        for candidate in candidates:
+            candidate.setdefault("margin_requirements", {
+                "status": margin_status["status"],
+                "error": margin_status["error"],
+                "borrow_availability": "unknown",
+                "borrow_fee_rate": None,
+            })
+
         before_filter_count = len(candidates)
-        candidates, exclusion_reasons = self._apply_index_filters(
+        candidates, exclusion_reasons = self._apply_candidate_filters(
             candidates,
             normalized_filters,
+            require_normal_trade_status,
         )
         total = self._read_int(
             container,
@@ -403,8 +688,16 @@ class StockScreenerService:
                 "industry_basis": "current_page_industry_median",
             },
             "short_risk": short_risk_status,
+            "tradeability": tradeability_status,
+            "fundamentals": fundamental_status,
+            "margin_requirements": margin_status,
             "filters": {
-                "applied": normalized_filters,
+                "applied": {
+                    **normalized_filters,
+                    "require_normal_trade_status": (
+                        require_normal_trade_status
+                    ),
+                },
                 "before": before_filter_count,
                 "after": len(candidates),
                 "excluded": before_filter_count - len(candidates),
@@ -430,6 +723,18 @@ class StockScreenerService:
             "max_days_to_cover": (0, None),
             "max_short_ratio": (0, None),
             "max_short_ratio_change": (None, None),
+            "max_spread_bps": (0, None),
+            "min_top_of_book_notional": (0, None),
+            "min_revenue_yoy": (None, None),
+            "max_revenue_yoy": (None, None),
+            "min_net_profit_yoy": (None, None),
+            "max_net_profit_yoy": (None, None),
+            "min_operating_cash_flow_yoy": (None, None),
+            "min_analyst_alignment": (-1, 1),
+            "min_eps_revision_alignment": (-1, 1),
+            "min_days_to_financial_event": (0, 365),
+            "min_days_to_corporate_action": (0, 365),
+            "max_initial_margin_ratio": (0, None),
         }
         unknown = set(filters) - set(supported)
         if unknown:
@@ -459,14 +764,27 @@ class StockScreenerService:
             and normalized["min_pe_ttm"] > normalized["max_pe_ttm"]
         ):
             raise ValueError("min_pe_ttm 不能大于 max_pe_ttm")
+        for minimum_key, maximum_key in (
+            ("min_revenue_yoy", "max_revenue_yoy"),
+            ("min_net_profit_yoy", "max_net_profit_yoy"),
+        ):
+            if (
+                minimum_key in normalized
+                and maximum_key in normalized
+                and normalized[minimum_key] > normalized[maximum_key]
+            ):
+                raise ValueError(
+                    f"{minimum_key} 不能大于 {maximum_key}"
+                )
         return normalized
 
-    def _apply_index_filters(
+    def _apply_candidate_filters(
         self,
         candidates: List[Dict[str, Any]],
         filters: Dict[str, float],
+        require_normal_trade_status: bool,
     ) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
-        if not filters:
+        if not filters and not require_normal_trade_status:
             return candidates, {}
 
         rules = (
@@ -505,12 +823,95 @@ class StockScreenerService:
                 "short_ratio_change",
                 "max",
             ),
+            (
+                "max_spread_bps",
+                "tradeability",
+                "spread_bps",
+                "max",
+            ),
+            (
+                "min_top_of_book_notional",
+                "tradeability",
+                "top_of_book_notional",
+                "min",
+            ),
+            (
+                "min_revenue_yoy",
+                "fundamentals",
+                "revenue_yoy",
+                "min",
+            ),
+            (
+                "max_revenue_yoy",
+                "fundamentals",
+                "revenue_yoy",
+                "max",
+            ),
+            (
+                "min_net_profit_yoy",
+                "fundamentals",
+                "net_profit_yoy",
+                "min",
+            ),
+            (
+                "max_net_profit_yoy",
+                "fundamentals",
+                "net_profit_yoy",
+                "max",
+            ),
+            (
+                "min_operating_cash_flow_yoy",
+                "fundamentals",
+                "operating_cash_flow_yoy",
+                "min",
+            ),
+            (
+                "min_analyst_alignment",
+                "fundamentals",
+                "analyst_alignment",
+                "min",
+            ),
+            (
+                "min_eps_revision_alignment",
+                "fundamentals",
+                "eps_revision_alignment",
+                "min",
+            ),
+            (
+                "min_days_to_financial_event",
+                "fundamentals",
+                "days_to_financial_event",
+                "min",
+            ),
+            (
+                "min_days_to_corporate_action",
+                "fundamentals",
+                "days_to_corporate_action",
+                "min",
+            ),
+            (
+                "max_initial_margin_ratio",
+                "margin_requirements",
+                "initial_margin_ratio",
+                "max",
+            ),
         )
         kept = []
         reasons: Dict[str, int] = {}
         for candidate in candidates:
             failure_reason = None
+            if require_normal_trade_status:
+                tradeability = candidate.get("tradeability") or {}
+                if tradeability.get("is_tradable") is not True:
+                    trade_status = tradeability.get("trade_status")
+                    failure_reason = (
+                        f"trade_status_{trade_status}"
+                        if trade_status
+                        else "missing_trade_status"
+                    )
             for filter_key, section, metric_key, comparison in rules:
+                if failure_reason:
+                    break
                 threshold = filters.get(filter_key)
                 if threshold is None:
                     continue
@@ -660,7 +1061,10 @@ class StockScreenerService:
         page: int,
         size: int,
     ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        container = self._find_candidate_container(payload)
+        container = self._find_candidate_container(
+            payload,
+            default_market,
+        )
         records: List[Dict[str, Any]] = []
         if container:
             for key in ("items", "list", "results", "stocks", "securities"):
@@ -675,13 +1079,13 @@ class StockScreenerService:
             records = [
                 record
                 for record in self._walk_dicts(payload)
-                if self._candidate_text(record, _SYMBOL_KEYS)
+                if self._candidate_symbol(record, default_market)
             ]
 
         candidates: List[Dict[str, Any]] = []
         seen_symbols = set()
         for record in records:
-            symbol = self._candidate_text(record, _SYMBOL_KEYS)
+            symbol = self._candidate_symbol(record, default_market)
             if not symbol:
                 continue
             symbol = symbol.strip().upper()
@@ -705,7 +1109,9 @@ class StockScreenerService:
                         indicators[key] = value
 
             candidate_market = (
-                self._candidate_text(record, ("market",)) or default_market
+                self._candidate_text(record, ("market",))
+                or self._market_from_symbol(symbol)
+                or default_market
             )
             candidates.append({
                 "rank": page * size + len(candidates) + 1,
@@ -721,7 +1127,11 @@ class StockScreenerService:
 
         return candidates, container or {}
 
-    def _find_candidate_container(self, payload: Any) -> Optional[Dict[str, Any]]:
+    def _find_candidate_container(
+        self,
+        payload: Any,
+        default_market: str,
+    ) -> Optional[Dict[str, Any]]:
         for record in self._walk_dicts(payload):
             for key in ("items", "list", "results", "stocks", "securities"):
                 value = record.get(key)
@@ -729,7 +1139,10 @@ class StockScreenerService:
                     isinstance(value, list)
                     and any(
                         isinstance(item, dict)
-                        and self._candidate_text(item, _SYMBOL_KEYS)
+                        and self._candidate_symbol(
+                            item,
+                            default_market,
+                        )
                         for item in value
                     )
                 ):
@@ -750,6 +1163,54 @@ class StockScreenerService:
                 value = self._first_text(nested, keys)
                 if value:
                     return value
+        return None
+
+    def _candidate_symbol(
+        self,
+        record: Dict[str, Any],
+        default_market: str,
+    ) -> Optional[str]:
+        symbol = self._candidate_text(record, _SYMBOL_KEYS)
+        if symbol:
+            return symbol
+        counter_id = self._candidate_text(
+            record,
+            ("counter_id", "counterId"),
+        )
+        if not counter_id:
+            return None
+        parts = [
+            part.strip()
+            for part in counter_id.split("/")
+            if part.strip()
+        ]
+        if len(parts) < 3 or parts[0].upper() != "ST":
+            return None
+        market = parts[1].upper()
+        code = "/".join(parts[2:]).upper()
+        if not code:
+            return None
+        suffix = {
+            "US": "US",
+            "HK": "HK",
+            "SG": "SG",
+            "SH": "SH",
+            "SZ": "SZ",
+            "CN": default_market.upper(),
+        }.get(market)
+        if suffix not in {"US", "HK", "SG", "SH", "SZ"}:
+            return None
+        if suffix == "HK":
+            code = code.lstrip("0") or "0"
+        return f"{code}.{suffix}"
+
+    @staticmethod
+    def _market_from_symbol(symbol: str) -> Optional[str]:
+        suffix = symbol.rsplit(".", 1)[-1].upper()
+        if suffix in {"SH", "SZ"}:
+            return "CN"
+        if suffix in SUPPORTED_SCREENER_MARKETS:
+            return suffix
         return None
 
     def _normalize_indicators(self, value: Any) -> Dict[str, Any]:

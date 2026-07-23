@@ -88,6 +88,40 @@ class ScreenerIndexFilters(BaseModel):
     max_days_to_cover: Optional[float] = Field(default=None, ge=0)
     max_short_ratio: Optional[float] = Field(default=None, ge=0)
     max_short_ratio_change: Optional[float] = None
+    max_spread_bps: Optional[float] = Field(default=None, ge=0)
+    min_top_of_book_notional: Optional[float] = Field(
+        default=None,
+        ge=0,
+    )
+    min_revenue_yoy: Optional[float] = None
+    max_revenue_yoy: Optional[float] = None
+    min_net_profit_yoy: Optional[float] = None
+    max_net_profit_yoy: Optional[float] = None
+    min_operating_cash_flow_yoy: Optional[float] = None
+    min_analyst_alignment: Optional[float] = Field(
+        default=None,
+        ge=-1,
+        le=1,
+    )
+    min_eps_revision_alignment: Optional[float] = Field(
+        default=None,
+        ge=-1,
+        le=1,
+    )
+    min_days_to_financial_event: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=365,
+    )
+    min_days_to_corporate_action: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=365,
+    )
+    max_initial_margin_ratio: Optional[float] = Field(
+        default=None,
+        ge=0,
+    )
 
 
 class ScreenerSearchRequest(BaseModel):
@@ -106,6 +140,16 @@ class ScreenerSearchRequest(BaseModel):
         max_length=32,
     )
     include_short_risk: bool = True
+    include_tradeability: bool = True
+    require_normal_trade_status: bool = True
+    include_fundamentals: bool = False
+    include_margin_requirements: bool = False
+    fundamental_event_window_days: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+    )
+    include_corporate_actions: bool = False
 
 
 class ScreenerImportItem(BaseModel):
@@ -304,19 +348,33 @@ async def search_screener_candidates(request: ScreenerSearchRequest):
     try:
         return await asyncio.to_thread(
             get_stock_screener_service().search,
-            request.market,
-            request.strategy_id,
-            request.page,
-            request.size,
-            (
+            market=request.market,
+            strategy_id=request.strategy_id,
+            page=request.page,
+            size=request.size,
+            filters=(
                 request.filters.model_dump(exclude_none=True)
                 if request.filters
                 else None
             ),
-            request.include_indexes,
-            request.target_direction,
-            request.benchmark_symbol,
-            request.include_short_risk,
+            include_indexes=request.include_indexes,
+            target_direction=request.target_direction,
+            benchmark_symbol=request.benchmark_symbol,
+            include_short_risk=request.include_short_risk,
+            include_tradeability=request.include_tradeability,
+            require_normal_trade_status=(
+                request.require_normal_trade_status
+            ),
+            include_fundamentals=request.include_fundamentals,
+            include_margin_requirements=(
+                request.include_margin_requirements
+            ),
+            fundamental_event_window_days=(
+                request.fundamental_event_window_days
+            ),
+            include_corporate_actions=(
+                request.include_corporate_actions
+            ),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
