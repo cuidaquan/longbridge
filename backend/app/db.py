@@ -206,6 +206,35 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
         "observation_date",
         "DATE",
     )
+    _ensure_column(
+        conn,
+        "stock_picker_reliability_deliveries",
+        "claim_id",
+        "TEXT",
+    )
+    _ensure_column(
+        conn,
+        "stock_picker_reliability_deliveries",
+        "claim_owner",
+        "TEXT",
+    )
+    _ensure_column(
+        conn,
+        "stock_picker_reliability_deliveries",
+        "claimed_at",
+        "TIMESTAMP",
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+        idx_stock_picker_reliability_delivery_claim
+        ON stock_picker_reliability_deliveries(
+            status,
+            next_attempt_at,
+            claimed_at
+        )
+        """
+    )
     conn.execute(
         """
         UPDATE stock_picker_factor_snapshots
@@ -587,6 +616,9 @@ CREATE TABLE IF NOT EXISTS stock_picker_reliability_deliveries (
     http_status INTEGER,
     error TEXT,
     payload TEXT NOT NULL,
+    claim_id TEXT,
+    claim_owner TEXT,
+    claimed_at TIMESTAMP,
     CHECK (event_type IN ('triggered', 'resolved')),
     CHECK (destination_type IN ('webhook')),
     CHECK (

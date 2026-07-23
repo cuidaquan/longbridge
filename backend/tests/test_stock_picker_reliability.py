@@ -15,6 +15,7 @@ from app.config import Settings
 from app.db import _run_migrations
 from app.main import _persist_stock_picker_reliability, app
 from app.stock_picker_reliability import (
+    DELIVERY_CLAIM_LEASE_SECONDS,
     DELIVERY_RETRY_SECONDS,
     RELIABILITY_RETENTION_DAYS,
     RELIABILITY_WORKER_STALE_SECONDS,
@@ -167,6 +168,114 @@ class StockPickerReliabilityPersistenceTests(unittest.TestCase):
             "stock_picker_reliability_deliveries",
             tables,
         )
+        delivery_columns = {
+            row[1]
+            for row in self.connection.execute(
+                "PRAGMA table_info("
+                "'stock_picker_reliability_deliveries'"
+                ")"
+            ).fetchall()
+        }
+        self.assertTrue(
+            {"claim_id", "claim_owner", "claimed_at"}
+            <= delivery_columns
+        )
+
+    def test_migration_upgrades_existing_delivery_table_in_place(
+        self,
+    ) -> None:
+        legacy = duckdb.connect(":memory:")
+        try:
+            legacy.execute(
+                """
+                CREATE SEQUENCE
+                stock_picker_reliability_delivery_seq START 1
+                """
+            )
+            legacy.execute(
+                """
+                CREATE TABLE stock_picker_reliability_deliveries (
+                    id BIGINT PRIMARY KEY DEFAULT nextval(
+                        'stock_picker_reliability_delivery_seq'
+                    ),
+                    alert_key TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    destination_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL,
+                    delivered_at TIMESTAMP,
+                    http_status INTEGER,
+                    error TEXT,
+                    payload TEXT NOT NULL
+                )
+                """
+            )
+            legacy.execute(
+                """
+                INSERT INTO stock_picker_reliability_deliveries (
+                    alert_key,
+                    event_type,
+                    destination_type,
+                    status,
+                    created_at,
+                    updated_at,
+                    payload
+                )
+                VALUES (
+                    'service:quote:circuit',
+                    'triggered',
+                    'webhook',
+                    'pending',
+                    TIMESTAMP '2026-07-24 12:00:00',
+                    TIMESTAMP '2026-07-24 12:00:00',
+                    '{"event":"test"}'
+                )
+                """
+            )
+
+            _run_migrations(legacy)
+            _run_migrations(legacy)
+
+            columns = {
+                row[1]
+                for row in legacy.execute(
+                    "PRAGMA table_info("
+                    "'stock_picker_reliability_deliveries'"
+                    ")"
+                ).fetchall()
+            }
+            row = legacy.execute(
+                """
+                SELECT
+                    alert_key,
+                    status,
+                    payload,
+                    claim_id,
+                    claim_owner,
+                    claimed_at
+                FROM stock_picker_reliability_deliveries
+                """
+            ).fetchone()
+            self.assertTrue(
+                {"claim_id", "claim_owner", "claimed_at"}
+                <= columns
+            )
+            self.assertEqual(
+                row,
+                (
+                    "service:quote:circuit",
+                    "pending",
+                    '{"event":"test"}',
+                    None,
+                    None,
+                    None,
+                ),
+            )
+        finally:
+            legacy.close()
 
     def test_capture_uses_interval_deltas_and_resolves_alerts(self) -> None:
         self.current = _snapshot(
@@ -644,6 +753,209 @@ class StockPickerReliabilityPersistenceTests(unittest.TestCase):
         )
         self.assertNotIn("secret-token", json.dumps(delivery))
 
+    def test_claim_lease_blocks_other_worker_until_stale(
+        self,
+    ) -> None:
+        config = {
+            "enabled": True,
+            "configured": True,
+            "signed": False,
+            "url": "https://alerts.example.test/hook",
+            "secret": "",
+            "timeout_seconds": 5,
+        }
+        first_service = StockPickerReliabilityService(
+            snapshot_provider=lambda: self.current,
+            connection_factory=lambda: _ConnectionContext(
+                self.connection
+            ),
+            clock=self.clock,
+            process_id="first-worker",
+            delivery_config_provider=lambda: config,
+            webhook_sender=MagicMock(return_value=204),
+        )
+        second_sender = MagicMock(return_value=204)
+        second_service = StockPickerReliabilityService(
+            snapshot_provider=lambda: self.current,
+            connection_factory=lambda: _ConnectionContext(
+                self.connection
+            ),
+            clock=self.clock,
+            process_id="second-worker",
+            delivery_config_provider=lambda: config,
+            webhook_sender=second_sender,
+        )
+        self.current = _snapshot(
+            requests=1,
+            attempts=1,
+            failures=1,
+            circuit_state="open",
+        )
+        first_service.capture()
+        claim_id, rows = first_service._claim_due_deliveries(
+            self.clock(),
+            20,
+        )
+
+        self.assertEqual(len(rows), 1)
+        claimed = first_service.get_deliveries()
+        self.assertEqual(claimed["claimed_count"], 1)
+        self.assertEqual(claimed["stale_claim_count"], 0)
+        self.assertTrue(claimed["items"][0]["claimed"])
+        self.assertEqual(
+            claimed["items"][0]["claim_owner"],
+            "first-worker",
+        )
+        self.assertNotIn(claim_id, json.dumps(claimed))
+        self.assertEqual(second_service.deliver_due()["selected"], 0)
+        second_sender.assert_not_called()
+
+        self.clock.advance(DELIVERY_CLAIM_LEASE_SECONDS + 1)
+        stale = first_service.get_deliveries()
+        self.assertEqual(stale["stale_claim_count"], 1)
+        self.assertTrue(stale["items"][0]["claim_stale"])
+
+        recovered = second_service.deliver_due()
+        self.assertEqual(recovered["delivered"], 1)
+        second_sender.assert_called_once()
+        delivery = second_service.get_deliveries()
+        self.assertEqual(delivery["claimed_count"], 0)
+        self.assertFalse(delivery["items"][0]["claimed"])
+        self.assertIsNone(delivery["items"][0]["claim_owner"])
+
+    def test_old_worker_cannot_overwrite_reclaimed_delivery(
+        self,
+    ) -> None:
+        config = {
+            "enabled": True,
+            "configured": True,
+            "signed": False,
+            "url": "https://alerts.example.test/hook",
+            "secret": "",
+            "timeout_seconds": 5,
+        }
+        second_sender = MagicMock(return_value=204)
+        second_service = StockPickerReliabilityService(
+            snapshot_provider=lambda: self.current,
+            connection_factory=lambda: _ConnectionContext(
+                self.connection
+            ),
+            clock=self.clock,
+            process_id="new-owner",
+            delivery_config_provider=lambda: config,
+            webhook_sender=second_sender,
+        )
+        second_result = {}
+
+        def first_sender(config_value, payload):
+            self.clock.advance(
+                DELIVERY_CLAIM_LEASE_SECONDS + 1
+            )
+            second_result.update(second_service.deliver_due())
+            return 204
+
+        first_sender_mock = MagicMock(side_effect=first_sender)
+        first_service = StockPickerReliabilityService(
+            snapshot_provider=lambda: self.current,
+            connection_factory=lambda: _ConnectionContext(
+                self.connection
+            ),
+            clock=self.clock,
+            process_id="old-owner",
+            delivery_config_provider=lambda: config,
+            webhook_sender=first_sender_mock,
+        )
+        self.current = _snapshot(
+            requests=1,
+            attempts=1,
+            failures=1,
+            circuit_state="open",
+        )
+        first_service.capture()
+
+        old_result = first_service.deliver_due()
+
+        self.assertEqual(old_result["selected"], 1)
+        self.assertEqual(old_result["delivered"], 0)
+        self.assertEqual(old_result["claim_lost"], 1)
+        self.assertEqual(second_result["delivered"], 1)
+        first_payload = first_sender_mock.call_args.args[1]
+        second_payload = second_sender.call_args.args[1]
+        self.assertEqual(
+            first_payload["delivery_id"],
+            second_payload["delivery_id"],
+        )
+        delivery = second_service.get_deliveries()["items"][0]
+        self.assertEqual(delivery["status"], "delivered")
+        self.assertEqual(delivery["attempt_count"], 1)
+        self.assertFalse(delivery["claimed"])
+
+    def test_batch_claims_each_delivery_only_before_sending(
+        self,
+    ) -> None:
+        config = {
+            "enabled": True,
+            "configured": True,
+            "signed": False,
+            "url": "https://alerts.example.test/hook",
+            "secret": "",
+            "timeout_seconds": 5,
+        }
+        second_sender = MagicMock(return_value=204)
+        second_service = StockPickerReliabilityService(
+            snapshot_provider=lambda: self.current,
+            connection_factory=lambda: _ConnectionContext(
+                self.connection
+            ),
+            clock=self.clock,
+            process_id="parallel-worker",
+            delivery_config_provider=lambda: config,
+            webhook_sender=second_sender,
+        )
+        second_result = {}
+
+        def first_sender(config_value, payload):
+            self.clock.advance(
+                DELIVERY_CLAIM_LEASE_SECONDS - 20
+            )
+            second_result.update(
+                second_service.deliver_due(limit=1)
+            )
+            return 204
+
+        first_service = StockPickerReliabilityService(
+            snapshot_provider=lambda: self.current,
+            connection_factory=lambda: _ConnectionContext(
+                self.connection
+            ),
+            clock=self.clock,
+            process_id="batch-worker",
+            delivery_config_provider=lambda: config,
+            webhook_sender=MagicMock(side_effect=first_sender),
+        )
+        self.current = _snapshot(
+            requests=1,
+            attempts=1,
+            failures=1,
+            in_flight=3,
+            circuit_state="open",
+        )
+        capture = first_service.capture()
+        self.assertEqual(len(capture["delivery_ids"]), 2)
+
+        first_result = first_service.deliver_due(limit=2)
+
+        self.assertEqual(first_result["selected"], 1)
+        self.assertEqual(first_result["delivered"], 1)
+        self.assertEqual(second_result["selected"], 1)
+        self.assertEqual(second_result["delivered"], 1)
+        deliveries = first_service.get_deliveries()
+        self.assertEqual(
+            deliveries["status_counts"],
+            {"delivered": 2},
+        )
+        self.assertEqual(deliveries["claimed_count"], 0)
+
     def test_default_webhook_sender_signs_exact_request_body(
         self,
     ) -> None:
@@ -751,6 +1063,7 @@ class StockPickerReliabilityLoopTests(
             "delivered": 0,
             "failed": 0,
             "dead_letter": 0,
+            "claim_lost": 0,
         }
         with (
             patch(
@@ -787,6 +1100,7 @@ class StockPickerReliabilityLoopTests(
                 ],
                 "failed": 0,
                 "dead_letter": 0,
+                "claim_lost": 0,
             },
         )
         service.mark_worker_failed.assert_not_called()
@@ -805,6 +1119,7 @@ class StockPickerReliabilityLoopTests(
             "delivered": 0,
             "failed": 0,
             "dead_letter": 0,
+            "claim_lost": 0,
         }
         with (
             patch(
@@ -837,6 +1152,7 @@ class StockPickerReliabilityLoopTests(
                 ],
                 "failed": 0,
                 "dead_letter": 0,
+                "claim_lost": 0,
             },
         )
 

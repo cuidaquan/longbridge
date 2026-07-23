@@ -312,14 +312,20 @@ async def _persist_stock_picker_reliability() -> None:
                     "delivered": delivery["delivered"],
                     "failed": delivery["failed"],
                     "dead_letter": delivery["dead_letter"],
+                    "claim_lost": delivery["claim_lost"],
                 },
             )
-            if delivery["failed"] or delivery["dead_letter"]:
+            if (
+                delivery["failed"]
+                or delivery["dead_letter"]
+                or delivery["claim_lost"]
+            ):
                 logger.warning(
                     "stock-picker reliability delivery: "
-                    "failed=%s dead_letter=%s",
+                    "failed=%s dead_letter=%s claim_lost=%s",
                     delivery["failed"],
                     delivery["dead_letter"],
+                    delivery["claim_lost"],
                 )
         except asyncio.CancelledError:
             raise

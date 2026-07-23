@@ -31,6 +31,7 @@ AI_DEGRADATION_WARNING = 0.5
 DELIVERY_MAX_ATTEMPTS = 3
 DELIVERY_RETRY_SECONDS = 60
 DELIVERY_BATCH_SIZE = 20
+DELIVERY_CLAIM_LEASE_SECONDS = 120
 RELIABILITY_WORKER_STALE_SECONDS = (
     RELIABILITY_CAPTURE_INTERVAL_SECONDS * 3
 )
@@ -299,6 +300,9 @@ class StockPickerReliabilityService:
                 ),
                 "signed": bool(delivery_config.get("signed")),
                 "max_attempts": DELIVERY_MAX_ATTEMPTS,
+                "claim_lease_seconds": (
+                    DELIVERY_CLAIM_LEASE_SECONDS
+                ),
                 **delivery_summary,
             },
             "worker": worker_health,
@@ -501,6 +505,7 @@ class StockPickerReliabilityService:
             "configured": bool(config.get("configured")),
             "signed": bool(config.get("signed")),
             "max_attempts": DELIVERY_MAX_ATTEMPTS,
+            "claim_lease_seconds": DELIVERY_CLAIM_LEASE_SECONDS,
             **summary,
             "items": deliveries,
         }
@@ -520,6 +525,7 @@ class StockPickerReliabilityService:
                 "delivered": 0,
                 "failed": 0,
                 "dead_letter": 0,
+                "claim_lost": 0,
             }
         if not config.get("configured"):
             return {
@@ -529,108 +535,185 @@ class StockPickerReliabilityService:
                 "delivered": 0,
                 "failed": 0,
                 "dead_letter": 0,
+                "claim_lost": 0,
             }
 
         with self._delivery_lock:
-            now = self._as_utc(self.clock())
-            with self.connection_factory() as conn:
-                rows = conn.execute(
-                    """
-                    SELECT id, attempt_count, payload
-                    FROM stock_picker_reliability_deliveries
-                    WHERE
-                        status IN ('pending', 'failed')
-                        AND (
-                            next_attempt_at IS NULL
-                            OR next_attempt_at <= ?
-                        )
-                    ORDER BY created_at, id
-                    LIMIT ?
-                    """,
-                    [now.replace(tzinfo=None), limit],
-                ).fetchall()
-
             result = {
                 "enabled": True,
                 "configured": True,
-                "selected": len(rows),
+                "selected": 0,
                 "delivered": 0,
                 "failed": 0,
                 "dead_letter": 0,
+                "claim_lost": 0,
             }
-            for delivery_id, previous_attempts, raw_payload in rows:
-                payload = json.loads(raw_payload)
-                payload["delivery_id"] = int(delivery_id)
-                attempt = int(previous_attempts) + 1
-                status_code = None
-                error = None
-                try:
-                    status_code = self.webhook_sender(
-                        config,
-                        payload,
-                    )
-                    if status_code < 200 or status_code >= 300:
-                        raise RuntimeError(
-                            f"webhook returned HTTP {status_code}"
-                        )
-                except Exception as exc:
-                    error = self._safe_delivery_error(exc)
-
-                if error is None:
-                    status = "delivered"
-                    next_attempt_at = None
-                    delivered_at = now
-                    result["delivered"] += 1
-                elif attempt >= DELIVERY_MAX_ATTEMPTS:
-                    status = "dead_letter"
-                    next_attempt_at = None
-                    delivered_at = None
-                    result["dead_letter"] += 1
-                else:
-                    status = "failed"
-                    next_attempt_at = now + timedelta(
-                        seconds=(
-                            DELIVERY_RETRY_SECONDS
-                            * (2 ** (attempt - 1))
-                        )
-                    )
-                    delivered_at = None
-                    result["failed"] += 1
-
-                with self.connection_factory() as conn:
-                    conn.execute(
-                        """
-                        UPDATE stock_picker_reliability_deliveries
-                        SET
-                            status = ?,
-                            attempt_count = ?,
-                            next_attempt_at = ?,
-                            updated_at = ?,
-                            delivered_at = ?,
-                            http_status = ?,
-                            error = ?
-                        WHERE id = ?
-                        """,
-                        [
-                            status,
-                            attempt,
-                            (
-                                next_attempt_at.replace(tzinfo=None)
-                                if next_attempt_at is not None
-                                else None
-                            ),
-                            now.replace(tzinfo=None),
-                            (
-                                delivered_at.replace(tzinfo=None)
-                                if delivered_at is not None
-                                else None
-                            ),
-                            status_code,
-                            error,
-                            delivery_id,
-                        ],
-                    )
+            for _ in range(limit):
+                now = self._as_utc(self.clock())
+                claim_id, rows = self._claim_due_deliveries(
+                    now,
+                    1,
+                )
+                if not rows:
+                    break
+                result["selected"] += 1
+                outcome = self._deliver_claimed_delivery(
+                    config,
+                    claim_id,
+                    rows[0],
+                )
+                result[outcome] += 1
             return result
+
+    def _deliver_claimed_delivery(
+        self,
+        config: Dict[str, Any],
+        claim_id: str,
+        row: tuple[Any, ...],
+    ) -> str:
+        delivery_id, previous_attempts, raw_payload = row
+        attempt = int(previous_attempts) + 1
+        status_code = None
+        error = None
+        try:
+            payload = json.loads(raw_payload)
+            payload["delivery_id"] = int(delivery_id)
+            status_code = int(
+                self.webhook_sender(
+                    config,
+                    payload,
+                )
+            )
+            if status_code < 200 or status_code >= 300:
+                raise RuntimeError(
+                    f"webhook returned HTTP {status_code}"
+                )
+        except Exception as exc:
+            error = self._safe_delivery_error(exc)
+        completed_at = self._as_utc(self.clock())
+
+        if error is None:
+            status = "delivered"
+            next_attempt_at = None
+            delivered_at = completed_at
+            outcome = "delivered"
+        elif attempt >= DELIVERY_MAX_ATTEMPTS:
+            status = "dead_letter"
+            next_attempt_at = None
+            delivered_at = None
+            outcome = "dead_letter"
+        else:
+            status = "failed"
+            next_attempt_at = completed_at + timedelta(
+                seconds=(
+                    DELIVERY_RETRY_SECONDS
+                    * (2 ** (attempt - 1))
+                )
+            )
+            delivered_at = None
+            outcome = "failed"
+
+        with self.connection_factory() as conn:
+            updated = conn.execute(
+                """
+                UPDATE stock_picker_reliability_deliveries
+                SET
+                    status = ?,
+                    attempt_count = ?,
+                    next_attempt_at = ?,
+                    updated_at = ?,
+                    delivered_at = ?,
+                    http_status = ?,
+                    error = ?,
+                    claim_id = NULL,
+                    claim_owner = NULL,
+                    claimed_at = NULL
+                WHERE id = ? AND claim_id = ?
+                RETURNING id
+                """,
+                [
+                    status,
+                    attempt,
+                    (
+                        next_attempt_at.replace(tzinfo=None)
+                        if next_attempt_at is not None
+                        else None
+                    ),
+                    completed_at.replace(tzinfo=None),
+                    (
+                        delivered_at.replace(tzinfo=None)
+                        if delivered_at is not None
+                        else None
+                    ),
+                    status_code,
+                    error,
+                    delivery_id,
+                    claim_id,
+                ],
+            ).fetchone()
+        return outcome if updated is not None else "claim_lost"
+
+    def _claim_due_deliveries(
+        self,
+        now: datetime,
+        limit: int,
+    ) -> tuple[str, list[tuple[Any, ...]]]:
+        claim_id = uuid4().hex
+        now_db = now.replace(tzinfo=None)
+        stale_before = (
+            now - timedelta(seconds=DELIVERY_CLAIM_LEASE_SECONDS)
+        ).replace(tzinfo=None)
+        with self.connection_factory() as conn:
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                rows = conn.execute(
+                    """
+                    UPDATE stock_picker_reliability_deliveries
+                    SET
+                        claim_id = ?,
+                        claim_owner = ?,
+                        claimed_at = ?,
+                        updated_at = ?
+                    WHERE id IN (
+                        SELECT id
+                        FROM stock_picker_reliability_deliveries
+                        WHERE
+                            status IN ('pending', 'failed')
+                            AND (
+                                next_attempt_at IS NULL
+                                OR next_attempt_at <= ?
+                            )
+                            AND (
+                                claim_id IS NULL
+                                OR claimed_at IS NULL
+                                OR claimed_at <= ?
+                            )
+                        ORDER BY created_at, id
+                        LIMIT ?
+                    )
+                    AND (
+                        claim_id IS NULL
+                        OR claimed_at IS NULL
+                        OR claimed_at <= ?
+                    )
+                    RETURNING id, attempt_count, payload
+                    """,
+                    [
+                        claim_id,
+                        self.process_id,
+                        now_db,
+                        now_db,
+                        now_db,
+                        stale_before,
+                        limit,
+                        stale_before,
+                    ],
+                ).fetchall()
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return claim_id, rows
 
     def _latest_process_payload(self, conn) -> Optional[Dict[str, Any]]:
         row = conn.execute(
@@ -1173,6 +1256,10 @@ class StockPickerReliabilityService:
         conn,
         limit: int,
     ) -> list[Dict[str, Any]]:
+        now = self._as_utc(self.clock())
+        stale_before = now - timedelta(
+            seconds=DELIVERY_CLAIM_LEASE_SECONDS
+        )
         rows = conn.execute(
             """
             SELECT
@@ -1188,15 +1275,21 @@ class StockPickerReliabilityService:
                 delivered_at,
                 http_status,
                 error,
-                payload
+                payload,
+                claim_id IS NOT NULL,
+                claim_owner,
+                claimed_at
             FROM stock_picker_reliability_deliveries
             ORDER BY created_at DESC, id DESC
             LIMIT ?
             """,
             [limit],
         ).fetchall()
-        return [
-            {
+        deliveries = []
+        for row in rows:
+            claimed = bool(row[13])
+            claimed_at = row[15]
+            deliveries.append({
                 "id": int(row[0]),
                 "alert_key": row[1],
                 "event_type": row[2],
@@ -1218,9 +1311,22 @@ class StockPickerReliabilityService:
                 "http_status": row[10],
                 "error": row[11],
                 "payload": json.loads(row[12]),
-            }
-            for row in rows
-        ]
+                "claimed": claimed,
+                "claim_owner": row[14],
+                "claimed_at": (
+                    self._isoformat(claimed_at)
+                    if claimed_at is not None
+                    else None
+                ),
+                "claim_stale": (
+                    claimed
+                    and (
+                        claimed_at is None
+                        or self._as_utc(claimed_at) <= stale_before
+                    )
+                ),
+            })
+        return deliveries
 
     def _delivery_summary(self, conn) -> Dict[str, Any]:
         rows = conn.execute(
@@ -1242,6 +1348,36 @@ class StockPickerReliabilityService:
             LIMIT 1
             """
         ).fetchone()
+        stale_before = (
+            self._as_utc(self.clock())
+            - timedelta(seconds=DELIVERY_CLAIM_LEASE_SECONDS)
+        ).replace(tzinfo=None)
+        claim_row = conn.execute(
+            """
+            SELECT
+                COALESCE(
+                    SUM(CASE WHEN claim_id IS NOT NULL THEN 1 ELSE 0 END),
+                    0
+                ),
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN
+                                claim_id IS NOT NULL
+                                AND (
+                                    claimed_at IS NULL
+                                    OR claimed_at <= ?
+                                )
+                            THEN 1
+                            ELSE 0
+                        END
+                    ),
+                    0
+                )
+            FROM stock_picker_reliability_deliveries
+            """,
+            [stale_before],
+        ).fetchone()
         return {
             "status_counts": status_counts,
             "pending_count": (
@@ -1252,6 +1388,8 @@ class StockPickerReliabilityService:
                 "dead_letter",
                 0,
             ),
+            "claimed_count": int(claim_row[0]),
+            "stale_claim_count": int(claim_row[1]),
             "last_updated_at": (
                 self._isoformat(last_row[0])
                 if last_row is not None
@@ -1265,6 +1403,8 @@ class StockPickerReliabilityService:
             "status_counts": {},
             "pending_count": 0,
             "dead_letter_count": 0,
+            "claimed_count": 0,
+            "stale_claim_count": 0,
             "last_updated_at": None,
         }
 
