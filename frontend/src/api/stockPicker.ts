@@ -391,6 +391,65 @@ export interface StockPickerConfig {
   updated_at?: string;
 }
 
+export interface StockPickerFactorCoverageMetric {
+  available_count: number;
+  total_count: number;
+  coverage: number;
+  missing_reasons: Record<string, number>;
+  coverage_ready: boolean;
+}
+
+export interface StockPickerFactorCoverageGroup {
+  market: 'US' | 'HK';
+  target_direction: 'LONG' | 'SHORT';
+  captured_daily_snapshot_count: number;
+  session_phase_counts: Record<string, number>;
+  snapshot_count: number;
+  observation_dates: number;
+  distinct_symbols: number;
+  latest_observed_at: string | null;
+  snapshot_age_hours: number | null;
+  factors: Record<string, StockPickerFactorCoverageMetric>;
+  ready_for_return_evaluation: boolean;
+}
+
+export interface StockPickerFactorCaptureRun {
+  market: 'US' | 'HK';
+  target_direction: 'LONG' | 'SHORT';
+  observation_date: string;
+  status: 'running' | 'completed' | 'failed';
+  claim_id: string;
+  started_at: string;
+  completed_at: string | null;
+  request_id: string | null;
+  row_count: number;
+  error: string | null;
+  lease_expires_at: string;
+  lease_expired: boolean;
+}
+
+export interface StockPickerFactorCoverage {
+  snapshot_version: string;
+  window_days: number;
+  raw_snapshot_count: number;
+  daily_snapshot_count: number;
+  evaluation_snapshot_count: number;
+  capture_runs: {
+    total_count: number;
+    status_counts: Record<string, number>;
+    active: StockPickerFactorCaptureRun[];
+    recent_failures: StockPickerFactorCaptureRun[];
+  };
+  minimums: {
+    observation_dates: number;
+    factor_coverage: number;
+    distinct_symbols: number;
+    max_snapshot_age_hours: number;
+  };
+  groups: StockPickerFactorCoverageGroup[];
+  ready_for_return_evaluation: boolean;
+}
+
 export async function getStockPickerConfig(): Promise<StockPickerConfig> {
   const response = await fetch(`${API_BASE}/api/stock-picker/config`);
   if (!response.ok) {
@@ -410,6 +469,20 @@ export async function updateStockPickerConfig(
   if (!response.ok) {
     const error = await response.json().catch(() => null);
     throw new Error(error?.detail || '更新选股配置失败');
+  }
+  return response.json();
+}
+
+export async function getStockPickerFactorCoverage(
+  days = 365,
+): Promise<StockPickerFactorCoverage> {
+  const query = new URLSearchParams({ days: String(days) });
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/factor-snapshots/coverage?${query.toString()}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取因子快照覆盖率失败');
   }
   return response.json();
 }

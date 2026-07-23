@@ -15,6 +15,7 @@ import {
   Close,
   Search as SearchIcon,
   Refresh,
+  Storage,
 } from '@mui/icons-material';
 import {
   PageHeader,
@@ -44,6 +45,9 @@ import {
   importScreenerCandidates,
   runStockPickerBacktest,
   getStockPickerBacktests,
+  getStockPickerConfig,
+  updateStockPickerConfig,
+  getStockPickerFactorCoverage,
   type Stock,
   type Analysis,
   type PoolsResponse,
@@ -57,6 +61,8 @@ import {
   type ScreenerIndexFilters,
   type StockPickerBacktestReport,
   type StockPickerBacktestHistoryItem,
+  type StockPickerConfig,
+  type StockPickerFactorCoverage,
 } from '../api/stockPicker';
 import { API_BASE } from '../api/client';
 
@@ -68,6 +74,7 @@ export default function StockPicker() {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showDiscoveryDialog, setShowDiscoveryDialog] = useState(false);
   const [showBacktestDialog, setShowBacktestDialog] = useState(false);
+  const [showSnapshotDialog, setShowSnapshotDialog] = useState(false);
   const [addDialogType, setAddDialogType] = useState<'LONG' | 'SHORT'>('LONG');
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -218,7 +225,14 @@ export default function StockPicker() {
         description="AI驱动的多维度量化评分系统"
         icon={<FilterList />}
         actions={
-          <div className="flex gap-2">
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => setShowSnapshotDialog(true)}
+              icon={<Storage className="w-4 h-4" />}
+            >
+              快照管理
+            </Button>
             <Button
               variant="secondary"
               onClick={() => setShowBacktestDialog(true)}
@@ -404,6 +418,10 @@ export default function StockPicker() {
 
       {showBacktestDialog && (
         <StockPickerBacktestDialog onClose={() => setShowBacktestDialog(false)} />
+      )}
+
+      {showSnapshotDialog && (
+        <StockPickerSnapshotDialog onClose={() => setShowSnapshotDialog(false)} />
       )}
     </div>
   );
@@ -754,6 +772,372 @@ function ScoreRow({ label, value, max }: { label: string; value: number; max: nu
       <span className="text-xs font-medium text-slate-600 dark:text-slate-400 w-12 text-right">
         {value.toFixed(0)}/{max}
       </span>
+    </div>
+  );
+}
+
+function StockPickerSnapshotDialog({ onClose }: { onClose: () => void }) {
+  const [config, setConfig] = useState<StockPickerConfig | null>(null);
+  const [coverage, setCoverage] = useState<StockPickerFactorCoverage | null>(null);
+  const [snapshotEnabled, setSnapshotEnabled] = useState(false);
+  const [pollInterval, setPollInterval] = useState(900);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  const loadData = async () => {
+    setLoading(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const [configResult, coverageResult] = await Promise.allSettled([
+        getStockPickerConfig(),
+        getStockPickerFactorCoverage(365),
+      ]);
+      const loadErrors: string[] = [];
+      if (configResult.status === 'fulfilled') {
+        setConfig(configResult.value);
+        setSnapshotEnabled(configResult.value.factor_snapshot_enabled);
+        setPollInterval(configResult.value.factor_snapshot_poll_interval);
+      } else {
+        setConfig(null);
+        loadErrors.push(
+          configResult.reason instanceof Error
+            ? configResult.reason.message
+            : '加载自动采集配置失败',
+        );
+      }
+      if (coverageResult.status === 'fulfilled') {
+        setCoverage(coverageResult.value);
+      } else {
+        setCoverage(null);
+        loadErrors.push(
+          coverageResult.reason instanceof Error
+            ? coverageResult.reason.message
+            : '加载快照覆盖率失败',
+        );
+      }
+      if (loadErrors.length > 0) {
+        setError(loadErrors.join('；'));
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadData();
+  }, []);
+
+  const saveConfig = async () => {
+    if (!config) {
+      setError('自动采集配置尚未加载成功，请刷新后重试');
+      return;
+    }
+    if (!Number.isInteger(pollInterval) || pollInterval < 300 || pollInterval > 3600) {
+      setError('轮询间隔必须是 300～3600 秒之间的整数');
+      return;
+    }
+    if (
+      !config.factor_snapshot_enabled
+      && snapshotEnabled
+      && !confirm(
+        '启用后，服务会在 US/HK 收盘后持续调用 Longbridge、Fundamental 和交易接口。确认启用吗？',
+      )
+    ) {
+      return;
+    }
+
+    setSaving(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const updated = await updateStockPickerConfig({
+        factor_snapshot_enabled: snapshotEnabled,
+        factor_snapshot_poll_interval: pollInterval,
+      });
+      setConfig(updated);
+      setSnapshotEnabled(updated.factor_snapshot_enabled);
+      setPollInterval(updated.factor_snapshot_poll_interval);
+      setSuccess(
+        updated.factor_snapshot_enabled
+          ? '自动快照已启用，服务会在真实交易日收盘后执行'
+          : '自动快照保持关闭',
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '保存快照配置失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const formatPercent = (value: number) => `${(value * 100).toFixed(0)}%`;
+  const formatDateTime = (value: string | null) => (
+    value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '-'
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="max-h-[calc(100vh-2rem)] w-full max-w-5xl overflow-y-auto rounded-xl bg-white p-6 shadow-2xl dark:bg-slate-800">
+        <div className="mb-5 flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-bold text-slate-900 dark:text-white">
+              因子快照管理
+            </h3>
+            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+              查看 Fundamental 与执行风险点时覆盖；自动采集默认关闭。
+            </p>
+          </div>
+          <button
+            aria-label="关闭因子快照管理弹窗"
+            onClick={onClose}
+            className="rounded p-1 hover:bg-slate-100 dark:hover:bg-slate-700"
+          >
+            <Close className="h-5 w-5 text-slate-500" />
+          </button>
+        </div>
+
+        {error && (
+          <div className="mb-4">
+            <Alert type="error" onClose={() => setError(null)}>
+              {error}
+            </Alert>
+          </div>
+        )}
+        {success && (
+          <div className="mb-4">
+            <Alert type="success" onClose={() => setSuccess(null)}>
+              {success}
+            </Alert>
+          </div>
+        )}
+
+        {loading && !coverage ? (
+          <LoadingSpinner size="md" text="加载快照覆盖与配置..." />
+        ) : (
+          <div className="space-y-5">
+            <Card className="shadow-none hover:shadow-none">
+              <CardHeader
+                title="自动采集配置"
+                description="只有真实交易日当地 17:00 后才会采集；日历不可用时失败关闭。"
+                action={
+                  <Badge
+                    variant={snapshotEnabled ? 'success' : 'default'}
+                    dot
+                  >
+                    {snapshotEnabled ? '已启用' : '已关闭'}
+                  </Badge>
+                }
+              />
+              <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_220px]">
+                <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-4 dark:border-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={snapshotEnabled}
+                    disabled={saving || loading || !config}
+                    onChange={(event) => setSnapshotEnabled(event.target.checked)}
+                    className="mt-1 h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500"
+                  />
+                  <span>
+                    <span className="block text-sm font-semibold text-slate-900 dark:text-white">
+                      启用收盘后自动快照
+                    </span>
+                    <span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">
+                      会持续消耗 Longbridge、Fundamental 与交易接口额度；启用时需要再次确认。
+                    </span>
+                  </span>
+                </label>
+                <Input
+                  label="轮询间隔（秒）"
+                  type="number"
+                  min={300}
+                  max={3600}
+                  step={60}
+                  value={pollInterval}
+                  disabled={saving || loading || !config}
+                  onChange={(event) => setPollInterval(Number(event.target.value))}
+                  hint="允许 300～3600 秒，默认 900 秒"
+                />
+              </div>
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  当前配置更新时间：{formatDateTime(config?.updated_at || null)}
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={loadData}
+                    loading={loading}
+                    disabled={saving}
+                    icon={<Refresh className="h-4 w-4" />}
+                  >
+                    刷新
+                  </Button>
+                  <Button
+                    type="button"
+                    onClick={saveConfig}
+                    loading={saving}
+                    disabled={loading || !config}
+                  >
+                    保存配置
+                  </Button>
+                </div>
+              </div>
+            </Card>
+
+            {coverage && (
+              <>
+                <Alert
+                  type={coverage.ready_for_return_evaluation ? 'success' : 'warning'}
+                  title={
+                    coverage.ready_for_return_evaluation
+                      ? '已满足收益评估门禁'
+                      : '尚未满足收益评估门禁'
+                  }
+                >
+                  原始 {coverage.raw_snapshot_count} 条，按日去重 {coverage.daily_snapshot_count} 条，
+                  有效收盘后快照 {coverage.evaluation_snapshot_count} 条。每组至少需要
+                  {' '}{coverage.minimums.observation_dates} 个观测日、
+                  {formatPercent(coverage.minimums.factor_coverage)} 因子覆盖和
+                  {' '}{coverage.minimums.distinct_symbols} 只股票。
+                </Alert>
+
+                <div className="grid gap-3 md:grid-cols-2">
+                  {coverage.groups.map((group) => {
+                    const factors = Object.values(group.factors);
+                    const readyFactors = factors.filter((factor) => factor.coverage_ready).length;
+                    const phaseSummary = Object.entries(group.session_phase_counts)
+                      .map(([phase, count]) => `${phase} ${count}`)
+                      .join(' · ');
+                    return (
+                      <div
+                        key={`${group.market}-${group.target_direction}`}
+                        className="rounded-lg border border-slate-200 p-4 dark:border-slate-700"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="font-semibold text-slate-900 dark:text-white">
+                            {group.market} · {group.target_direction}
+                          </p>
+                          <Badge
+                            variant={group.ready_for_return_evaluation ? 'success' : 'warning'}
+                            dot
+                          >
+                            {group.ready_for_return_evaluation ? '可评估' : '积累中'}
+                          </Badge>
+                        </div>
+                        <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                          <SnapshotMetric
+                            label="观测日"
+                            value={`${group.observation_dates}/${coverage.minimums.observation_dates}`}
+                          />
+                          <SnapshotMetric
+                            label="股票"
+                            value={`${group.distinct_symbols}/${coverage.minimums.distinct_symbols}`}
+                          />
+                          <SnapshotMetric
+                            label="因子达标"
+                            value={`${readyFactors}/${factors.length}`}
+                          />
+                        </div>
+                        <div className="mt-3 space-y-1 text-xs text-slate-500 dark:text-slate-400">
+                          <p>有效快照 {group.snapshot_count}；采集去重后 {group.captured_daily_snapshot_count}</p>
+                          <p>最新快照：{formatDateTime(group.latest_observed_at)}</p>
+                          <p>采集阶段：{phaseSummary || '-'}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <Card className="shadow-none hover:shadow-none">
+                  <CardHeader
+                    title="采集租约与失败"
+                    description="租约持久化到本地数据库；运行超过 30 分钟可由后续轮询接管。"
+                  />
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                    <SnapshotMetric
+                      label="租约总数"
+                      value={coverage.capture_runs.total_count}
+                    />
+                    <SnapshotMetric
+                      label="运行中"
+                      value={coverage.capture_runs.status_counts.running || 0}
+                    />
+                    <SnapshotMetric
+                      label="已完成"
+                      value={coverage.capture_runs.status_counts.completed || 0}
+                    />
+                    <SnapshotMetric
+                      label="失败"
+                      value={coverage.capture_runs.status_counts.failed || 0}
+                    />
+                  </div>
+
+                  {coverage.capture_runs.active.length > 0 && (
+                    <div className="mt-4 space-y-2">
+                      <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                        运行中租约
+                      </p>
+                      {coverage.capture_runs.active.map((run) => (
+                        <div
+                          key={run.claim_id}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-cyan-50 px-3 py-2 text-xs text-cyan-800 dark:bg-cyan-900/20 dark:text-cyan-200"
+                        >
+                          <span>{run.market} · {run.target_direction} · {run.observation_date}</span>
+                          <span>{run.lease_expired ? '租约已过期，等待接管' : `开始于 ${formatDateTime(run.started_at)}`}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {coverage.capture_runs.recent_failures.length > 0 && (
+                    <div className="mt-4 space-y-2">
+                      <p className="text-sm font-medium text-red-700 dark:text-red-300">
+                        最近失败
+                      </p>
+                      {coverage.capture_runs.recent_failures.map((run) => (
+                        <div
+                          key={`${run.claim_id}-${run.completed_at}`}
+                          className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-800 dark:bg-red-900/20 dark:text-red-200"
+                        >
+                          <p className="font-medium">
+                            {run.market} · {run.target_direction} · {run.observation_date}
+                          </p>
+                          <p className="mt-1 break-words">{run.error || '未知错误'}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {coverage.capture_runs.active.length === 0
+                    && coverage.capture_runs.recent_failures.length === 0 && (
+                    <p className="mt-4 text-xs text-slate-500 dark:text-slate-400">
+                      当前没有运行中租约或已记录失败。
+                    </p>
+                  )}
+                </Card>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SnapshotMetric({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | number;
+}) {
+  return (
+    <div className="rounded-lg bg-slate-50 px-3 py-2 dark:bg-slate-900/50">
+      <p className="text-xs text-slate-500 dark:text-slate-400">{label}</p>
+      <p className="mt-1 text-lg font-semibold text-slate-900 dark:text-white">{value}</p>
     </div>
   );
 }
