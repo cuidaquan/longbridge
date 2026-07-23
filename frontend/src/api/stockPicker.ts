@@ -116,10 +116,15 @@ export async function searchSecurities(params: {
 /**
  * 获取股票池
  */
-export async function getPools(poolType?: 'LONG' | 'SHORT'): Promise<PoolsResponse> {
-  const url = poolType 
-    ? `${API_BASE}/api/stock-picker/pools?pool_type=${poolType}`
-    : `${API_BASE}/api/stock-picker/pools`;
+export async function getPools(
+  poolType?: 'LONG' | 'SHORT',
+  includeInactive = true,
+): Promise<PoolsResponse> {
+  const queryParams = new URLSearchParams({
+    include_inactive: String(includeInactive),
+  });
+  if (poolType) queryParams.set('pool_type', poolType);
+  const url = `${API_BASE}/api/stock-picker/pools?${queryParams.toString()}`;
   
   const response = await fetch(url);
   if (!response.ok) {

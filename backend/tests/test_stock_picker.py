@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from app.ai_analyzer import DeepSeekAnalyzer, calculate_technical_indicators
+from app.routers.stock_picker import get_pools as get_pools_route
 from app.stock_picker import StockPickerService
 
 
@@ -28,6 +29,57 @@ class _FakeConnection:
 
 
 class StockPickerPersistenceTest(unittest.TestCase):
+    def test_pools_route_includes_inactive_stocks_by_default(self) -> None:
+        service = MagicMock()
+        service.get_pools.return_value = {"long_pool": [], "short_pool": []}
+
+        with patch(
+            "app.routers.stock_picker.get_stock_picker_service",
+            return_value=service,
+        ):
+            result = asyncio.run(get_pools_route())
+
+        self.assertEqual(result, {"long_pool": [], "short_pool": []})
+        service.get_pools.assert_called_once_with(None, include_inactive=True)
+
+    def test_get_pools_defaults_to_active_stocks(self) -> None:
+        rows = [
+            (1, "LONG", "ACTIVE.US", "Active", "2026-07-22", None, True, 1),
+            (3, "SHORT", "SHORT.US", "Short", "2026-07-22", None, True, 1),
+        ]
+        connection = _FakeConnection(rows)
+        service = StockPickerService()
+
+        with patch("app.stock_picker.get_connection", return_value=connection):
+            result = service.get_pools()
+
+        statement, parameters = connection.statements[0]
+        self.assertIn("is_active = TRUE", statement)
+        self.assertIsNone(parameters)
+        self.assertEqual([stock["symbol"] for stock in result["long_pool"]], ["ACTIVE.US"])
+        self.assertEqual([stock["symbol"] for stock in result["short_pool"]], ["SHORT.US"])
+
+    def test_get_pools_can_include_inactive_stocks_for_management(self) -> None:
+        rows = [
+            (1, "LONG", "ACTIVE.US", "Active", "2026-07-22", None, True, 1),
+            (2, "LONG", "INACTIVE.US", "Inactive", "2026-07-22", None, False, 1),
+        ]
+        connection = _FakeConnection(rows)
+        service = StockPickerService()
+
+        with patch("app.stock_picker.get_connection", return_value=connection):
+            result = service.get_pools(include_inactive=True)
+
+        statement, parameters = connection.statements[0]
+        self.assertNotIn("is_active = TRUE", statement)
+        self.assertIsNone(parameters)
+        self.assertEqual(
+            [stock["symbol"] for stock in result["long_pool"]],
+            ["ACTIVE.US", "INACTIVE.US"],
+        )
+        self.assertTrue(result["long_pool"][0]["is_active"])
+        self.assertFalse(result["long_pool"][1]["is_active"])
+
     def test_analysis_save_persists_support_resistance_score(self) -> None:
         connection = _FakeConnection()
         service = StockPickerService()

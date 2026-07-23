@@ -116,16 +116,26 @@ class StockPickerService:
                 WHERE id = ?
             """, (pool_id,))
     
-    def get_pools(self, pool_type: Optional[str] = None) -> Dict:
+    def get_pools(
+        self,
+        pool_type: Optional[str] = None,
+        include_inactive: bool = False,
+    ) -> Dict:
         """获取股票池"""
         with get_connection() as conn:
+            active_filter = "" if include_inactive else " AND is_active = TRUE"
             if pool_type:
-                query = "SELECT * FROM stock_picker_pools WHERE pool_type = ? AND is_active = TRUE ORDER BY priority DESC, added_at"
+                query = (
+                    "SELECT * FROM stock_picker_pools WHERE pool_type = ?"
+                    f"{active_filter} ORDER BY is_active DESC, priority DESC, added_at"
+                )
                 results = conn.execute(query, (pool_type,)).fetchall()
             else:
-                results = conn.execute(
-                    "SELECT * FROM stock_picker_pools WHERE is_active = TRUE ORDER BY pool_type, priority DESC, added_at"
-                ).fetchall()
+                query = (
+                    "SELECT * FROM stock_picker_pools WHERE TRUE"
+                    f"{active_filter} ORDER BY pool_type, is_active DESC, priority DESC, added_at"
+                )
+                results = conn.execute(query).fetchall()
             
             pools = {'long_pool': [], 'short_pool': []}
             for row in results:

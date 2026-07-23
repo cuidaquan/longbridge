@@ -34,6 +34,7 @@ import {
   addStock,
   batchAddStocks,
   removeStock,
+  toggleStock,
   clearPool,
   analyzeStocks,
   searchSecurities,
@@ -140,6 +141,16 @@ export default function StockPicker() {
     }
   };
 
+  const handleToggle = async (id: number) => {
+    try {
+      await toggleStock(id);
+      setSuccess('股票状态已更新');
+      await Promise.all([loadPools(), loadAnalysis()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '状态更新失败');
+    }
+  };
+
   const handleClear = async (type: 'LONG' | 'SHORT') => {
     const poolName = type === 'LONG' ? '做多' : '做空';
     if (!confirm(`确定要清空${poolName}股票池吗？此操作不可恢复！`)) return;
@@ -233,6 +244,7 @@ export default function StockPicker() {
           analysis={analysis?.long_analysis || []}
           onAdd={() => openAddDialog('LONG')}
           onRemove={handleRemove}
+          onToggle={handleToggle}
           onAnalyze={() => handleAnalyze('LONG')}
           onClear={() => handleClear('LONG')}
           analyzing={analyzing}
@@ -244,6 +256,7 @@ export default function StockPicker() {
           analysis={analysis?.short_analysis || []}
           onAdd={() => openAddDialog('SHORT')}
           onRemove={handleRemove}
+          onToggle={handleToggle}
           onAnalyze={() => handleAnalyze('SHORT')}
           onClear={() => handleClear('SHORT')}
           analyzing={analyzing}
@@ -357,6 +370,7 @@ function StockPoolCard({
   analysis,
   onAdd,
   onRemove,
+  onToggle,
   onAnalyze,
   onClear,
   analyzing,
@@ -367,6 +381,7 @@ function StockPoolCard({
   analysis: Analysis[];
   onAdd: () => void;
   onRemove: (id: number) => void;
+  onToggle: (id: number) => void;
   onAnalyze: () => void;
   onClear: () => void;
   analyzing: boolean;
@@ -375,6 +390,19 @@ function StockPoolCard({
   const borderColor = isLong
     ? 'border-l-emerald-500'
     : 'border-l-red-500';
+  const activeCount = stocks.filter((stock) => stock.is_active).length;
+  const stockRows = stocks
+    .map((stock) => ({
+      stock,
+      analysis: analysis.find((item) => item.pool_id === stock.id),
+    }))
+    .sort((left, right) => {
+      if (left.stock.is_active !== right.stock.is_active) {
+        return left.stock.is_active ? -1 : 1;
+      }
+      return (right.analysis?.recommendation_score ?? -1)
+        - (left.analysis?.recommendation_score ?? -1);
+    });
 
   return (
     <Card className={`border-l-4 ${borderColor}`}>
@@ -384,7 +412,7 @@ function StockPoolCard({
         action={
           <div className="flex gap-2">
             <Badge variant={isLong ? 'success' : 'danger'}>
-              {stocks.length}/20
+              {activeCount} 启用 / {stocks.length} 总计
             </Badge>
           </div>
         }
@@ -403,20 +431,22 @@ function StockPoolCard({
       </div>
 
       <div className="space-y-3 max-h-[500px] overflow-y-auto">
-        {analysis.length === 0 ? (
+        {stocks.length === 0 ? (
           <EmptyState
-            title="暂无分析结果"
-            description="点击「分析」按钮开始分析"
+            title="股票池为空"
+            description="添加股票后可执行分析"
             icon={<Analytics />}
           />
         ) : (
-          analysis.map((item, index) => (
+          stockRows.map(({ stock, analysis: item }, index) => (
             <StockItem
-              key={item.id}
-              rank={index + 1}
+              key={stock.id}
+              rank={item ? index + 1 : undefined}
+              stock={stock}
               analysis={item}
               type={type}
-              onRemove={() => onRemove(item.pool_id)}
+              onRemove={() => onRemove(stock.id)}
+              onToggle={() => onToggle(stock.id)}
             />
           ))
         )}
@@ -428,16 +458,54 @@ function StockPoolCard({
 // 股票项
 function StockItem({
   rank,
+  stock,
   analysis,
   type,
   onRemove,
+  onToggle,
 }: {
-  rank: number;
-  analysis: Analysis;
+  rank?: number;
+  stock: Stock;
+  analysis?: Analysis;
   type: 'LONG' | 'SHORT';
   onRemove: () => void;
+  onToggle: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+
+  if (!analysis) {
+    return (
+      <div className={`rounded-lg p-4 ${stock.is_active ? 'bg-slate-50 dark:bg-slate-800/50' : 'bg-slate-100/60 dark:bg-slate-900/40 opacity-75'}`}>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-slate-900 dark:text-white">{stock.symbol}</span>
+              <Badge variant={stock.is_active ? 'info' : 'default'}>
+                {stock.is_active ? '待分析' : '已停用'}
+              </Badge>
+            </div>
+            {stock.name && <p className="text-sm text-slate-500 dark:text-slate-400">{stock.name}</p>}
+            {stock.added_reason && <p className="mt-2 text-sm text-slate-500">{stock.added_reason}</p>}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onToggle}
+              className="text-xs font-medium text-cyan-600 dark:text-cyan-400 hover:text-cyan-700"
+            >
+              {stock.is_active ? '停用' : '启用'}
+            </button>
+            <button
+              aria-label={`删除 ${stock.symbol}`}
+              onClick={onRemove}
+              className="p-1 text-slate-400 hover:text-red-500 transition-colors"
+            >
+              <Delete className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const gradeStyles: Record<string, string> = {
     A: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-400',
@@ -467,13 +535,21 @@ function StockItem({
             )}
           </div>
         </div>
-        <button
-          aria-label={`删除 ${analysis.symbol}`}
-          onClick={onRemove}
-          className="p-1 text-slate-400 hover:text-red-500 transition-colors"
-        >
-          <Delete className="w-4 h-4" />
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onToggle}
+            className="text-xs font-medium text-cyan-600 dark:text-cyan-400 hover:text-cyan-700"
+          >
+            {stock.is_active ? '停用' : '启用'}
+          </button>
+          <button
+            aria-label={`删除 ${analysis.symbol}`}
+            onClick={onRemove}
+            className="p-1 text-slate-400 hover:text-red-500 transition-colors"
+          >
+            <Delete className="w-4 h-4" />
+          </button>
+        </div>
       </div>
 
       {/* 价格和评分 */}
@@ -491,10 +567,11 @@ function StockItem({
           )}
         </div>
         <div className="text-right">
-          <p className="text-sm text-slate-500">评分</p>
-          <p className="text-lg font-bold text-cyan-600 dark:text-cyan-400">
-            {analysis.score.total.toFixed(0)}/100
+          <p className="text-sm text-slate-500">机会分</p>
+          <p className="text-xl font-bold text-cyan-600 dark:text-cyan-400">
+            {analysis.recommendation_score.toFixed(0)}/100
           </p>
+          <p className="text-xs text-slate-500">技术分 {analysis.score.total.toFixed(0)}</p>
         </div>
       </div>
 

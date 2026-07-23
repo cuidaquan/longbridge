@@ -76,7 +76,10 @@ async def search_securities(
 
 
 @router.get("/pools")
-async def get_pools(pool_type: Optional[str] = None):
+async def get_pools(
+    pool_type: Optional[str] = None,
+    include_inactive: bool = True,
+):
     """
     获取股票池
     
@@ -85,7 +88,7 @@ async def get_pools(pool_type: Optional[str] = None):
     """
     try:
         service = get_stock_picker_service()
-        pools = service.get_pools(pool_type)
+        pools = service.get_pools(pool_type, include_inactive=include_inactive)
         return pools
     except Exception as e:
         logger.error(f"获取股票池失败: {e}")
