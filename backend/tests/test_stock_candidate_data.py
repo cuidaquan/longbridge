@@ -15,6 +15,61 @@ def _namespace(**values):
 
 
 class StockCandidateDataTests(unittest.TestCase):
+    def test_market_trading_day_includes_full_and_half_sessions(self) -> None:
+        quote_context = MagicMock()
+        quote_context.trading_days.side_effect = [
+            _namespace(
+                trading_days=[date(2026, 7, 24)],
+                half_trading_days=[],
+            ),
+            _namespace(
+                trading_days=[],
+                half_trading_days=[date(2026, 7, 25)],
+            ),
+            _namespace(
+                trading_days=[],
+                half_trading_days=[],
+            ),
+            None,
+        ]
+
+        @contextmanager
+        def fake_context(kind):
+            self.assertEqual(kind, "quote")
+            yield quote_context
+
+        with patch.object(stock_candidate_data, "_context", fake_context):
+            full_day = stock_candidate_data.is_market_trading_day(
+                "us",
+                date(2026, 7, 24),
+            )
+            half_day = stock_candidate_data.is_market_trading_day(
+                "HK",
+                date(2026, 7, 25),
+            )
+            closed_day = stock_candidate_data.is_market_trading_day(
+                "US",
+                date(2026, 7, 26),
+            )
+            with self.assertRaisesRegex(
+                LongbridgeAPIError,
+                "交易日历返回无效",
+            ):
+                stock_candidate_data.is_market_trading_day(
+                    "US",
+                    date(2026, 7, 27),
+                )
+
+        self.assertTrue(full_day)
+        self.assertTrue(half_day)
+        self.assertFalse(closed_day)
+        self.assertEqual(quote_context.trading_days.call_count, 4)
+        with self.assertRaisesRegex(ValueError, "market"):
+            stock_candidate_data.is_market_trading_day(
+                "JP",
+                date(2026, 7, 24),
+            )
+
     def test_tradeability_normalizes_status_and_calculates_depth(self) -> None:
         quote_context = MagicMock()
         quote_context.quote.return_value = [
@@ -325,6 +380,7 @@ class StockCandidateDataTests(unittest.TestCase):
 
         self.assertTrue(hasattr(QuoteContext, "quote"))
         self.assertTrue(hasattr(QuoteContext, "depth"))
+        self.assertTrue(hasattr(QuoteContext, "trading_days"))
         self.assertTrue(hasattr(TradeContext, "margin_ratio"))
         self.assertTrue(hasattr(FundamentalContext, "operating"))
         self.assertTrue(hasattr(FundamentalContext, "institution_rating"))

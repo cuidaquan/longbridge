@@ -150,6 +150,7 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_STOCK_PICKER_BACKTEST_TABLE_SQL)
     conn.execute(_STOCK_PICKER_FACTOR_EXPERIMENT_TABLE_SQL)
     conn.execute(_STOCK_PICKER_FACTOR_SNAPSHOT_TABLE_SQL)
+    conn.execute(_STOCK_PICKER_FACTOR_SNAPSHOT_RUN_TABLE_SQL)
 
     # 板块轮动表
     conn.execute(_SECTOR_ETFS_TABLE_SQL)
@@ -504,6 +505,29 @@ CREATE INDEX IF NOT EXISTS idx_stock_picker_factor_snapshot_group
 ON stock_picker_factor_snapshots(
     market, target_direction, observed_at DESC
 );
+"""
+
+_STOCK_PICKER_FACTOR_SNAPSHOT_RUN_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS stock_picker_factor_snapshot_runs (
+    market TEXT NOT NULL,
+    target_direction TEXT NOT NULL,
+    observation_date DATE NOT NULL,
+    status TEXT NOT NULL,
+    claim_id TEXT NOT NULL,
+    started_at TIMESTAMP NOT NULL,
+    completed_at TIMESTAMP,
+    request_id TEXT,
+    row_count INTEGER DEFAULT 0,
+    error TEXT,
+    PRIMARY KEY (
+        market,
+        target_direction,
+        observation_date
+    ),
+    CHECK (status IN ('running', 'completed', 'failed'))
+);
+CREATE INDEX IF NOT EXISTS idx_stock_picker_factor_snapshot_run_status
+ON stock_picker_factor_snapshot_runs(status, started_at);
 """
 
 # ============================================

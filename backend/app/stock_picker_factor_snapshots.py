@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from importlib.metadata import PackageNotFoundError, version
 import json
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -22,6 +22,7 @@ from .stock_candidate_data import (
     get_fundamental_profiles,
     get_margin_requirements,
     get_security_tradeability,
+    is_market_trading_day,
 )
 from .stock_picker_baseline import BASELINE_UNIVERSES
 from .stock_screener import DEFAULT_MARKET_BENCHMARKS
@@ -35,6 +36,7 @@ MIN_DISTINCT_SYMBOLS = 10
 MAX_SNAPSHOT_AGE_HOURS = 48
 EVENT_WINDOW_DAYS = 365
 AUTO_CAPTURE_LOCAL_HOUR = 17
+CAPTURE_CLAIM_LEASE_MINUTES = 30
 MARKET_TIMEZONES = {
     "US": "America/New_York",
     "HK": "Asia/Hong_Kong",
@@ -99,6 +101,7 @@ class StockPickerFactorSnapshotService:
         tradeability_loader: Callable = get_security_tradeability,
         fundamental_loader: Callable = get_fundamental_profiles,
         margin_loader: Callable = get_margin_requirements,
+        trading_day_loader: Callable = is_market_trading_day,
         connection_factory: Callable = get_connection,
         clock: Callable[[], datetime] = (
             lambda: datetime.now(timezone.utc)
@@ -109,8 +112,13 @@ class StockPickerFactorSnapshotService:
         self.tradeability_loader = tradeability_loader
         self.fundamental_loader = fundamental_loader
         self.margin_loader = margin_loader
+        self.trading_day_loader = trading_day_loader
         self.connection_factory = connection_factory
         self.clock = clock
+        self._trading_day_cache: Dict[
+            tuple[str, date],
+            bool,
+        ] = {}
 
     def capture_baseline(
         self,
@@ -337,43 +345,131 @@ class StockPickerFactorSnapshotService:
         now = self._as_utc(self.clock())
         captured = []
         skipped = []
+        errors = []
         for market in BASELINE_UNIVERSES:
             local_date = now.astimezone(
                 ZoneInfo(MARKET_TIMEZONES[market])
-            ).date().isoformat()
+            ).date()
             phase = self._session_phase(market, now)
-            for direction in ("LONG", "SHORT"):
-                if phase != "post_close":
+            directions = ("LONG", "SHORT")
+            if phase != "post_close":
+                for direction in directions:
                     skipped.append({
                         "market": market,
                         "target_direction": direction,
-                        "observation_date": local_date,
+                        "observation_date": local_date.isoformat(),
                         "reason": f"session_phase:{phase}",
                     })
-                    continue
+                continue
+
+            due_directions = []
+            for direction in directions:
                 if self._has_post_close_snapshot(
                     market,
                     direction,
-                    local_date,
+                    local_date.isoformat(),
                 ):
                     skipped.append({
                         "market": market,
                         "target_direction": direction,
-                        "observation_date": local_date,
+                        "observation_date": local_date.isoformat(),
                         "reason": "already_captured",
                     })
                     continue
-                captured.append(self.capture_group(
+                due_directions.append(direction)
+            if not due_directions:
+                continue
+
+            try:
+                trading_day = self._is_market_trading_day(
                     market,
-                    direction,
-                    BASELINE_UNIVERSES[market]["symbols"],
-                    persist=persist,
-                ))
+                    local_date,
+                )
+            except Exception as exc:
+                error = {
+                    "market": market,
+                    "observation_date": local_date.isoformat(),
+                    "error": str(exc),
+                }
+                errors.append(error)
+                for direction in due_directions:
+                    skipped.append({
+                        "market": market,
+                        "target_direction": direction,
+                        "observation_date": local_date.isoformat(),
+                        "reason": "trading_calendar_unavailable",
+                    })
+                continue
+            if not trading_day:
+                for direction in due_directions:
+                    skipped.append({
+                        "market": market,
+                        "target_direction": direction,
+                        "observation_date": local_date.isoformat(),
+                        "reason": "market_closed",
+                    })
+                continue
+
+            for direction in due_directions:
+                claim_id = None
+                if persist:
+                    claim_id = self._claim_capture(
+                        market,
+                        direction,
+                        local_date,
+                        now,
+                    )
+                    if claim_id is None:
+                        skipped.append({
+                            "market": market,
+                            "target_direction": direction,
+                            "observation_date": local_date.isoformat(),
+                            "reason": "capture_claimed",
+                        })
+                        continue
+                try:
+                    group = self.capture_group(
+                        market,
+                        direction,
+                        BASELINE_UNIVERSES[market]["symbols"],
+                        persist=persist,
+                    )
+                except Exception as exc:
+                    if claim_id is not None:
+                        self._finish_capture_claim(
+                            market,
+                            direction,
+                            local_date,
+                            claim_id,
+                            status="failed",
+                            completed_at=self._as_utc(self.clock()),
+                            error=str(exc),
+                        )
+                    errors.append({
+                        "market": market,
+                        "target_direction": direction,
+                        "observation_date": local_date.isoformat(),
+                        "error": str(exc),
+                    })
+                    continue
+                captured.append(group)
+                if claim_id is not None:
+                    self._finish_capture_claim(
+                        market,
+                        direction,
+                        local_date,
+                        claim_id,
+                        status="completed",
+                        completed_at=self._as_utc(self.clock()),
+                        request_id=group["request_id"],
+                        row_count=group["row_count"],
+                    )
         return {
             "snapshot_version": SNAPSHOT_VERSION,
             "persisted": persist,
             "captured": captured,
             "skipped": skipped,
+            "errors": errors,
             "row_count": sum(
                 group["row_count"]
                 for group in captured
@@ -403,6 +499,25 @@ class StockPickerFactorSnapshotService:
                 ORDER BY observed_at
                 """,
                 [cutoff.replace(tzinfo=None)],
+            ).fetchall()
+            capture_run_rows = connection.execute(
+                """
+                SELECT
+                    market,
+                    target_direction,
+                    observation_date,
+                    status,
+                    claim_id,
+                    started_at,
+                    completed_at,
+                    request_id,
+                    row_count,
+                    error
+                FROM stock_picker_factor_snapshot_runs
+                WHERE observation_date >= ?
+                ORDER BY started_at DESC
+                """,
+                [cutoff.date()],
             ).fetchall()
         raw_rows = [
             {
@@ -462,6 +577,10 @@ class StockPickerFactorSnapshotService:
             "raw_snapshot_count": len(raw_rows),
             "daily_snapshot_count": len(parsed_rows),
             "evaluation_snapshot_count": len(evaluation_rows),
+            "capture_runs": self._capture_run_summary(
+                capture_run_rows,
+                now,
+            ),
             "minimums": {
                 "observation_dates": MIN_OBSERVATION_DATES,
                 "factor_coverage": MIN_FACTOR_COVERAGE,
@@ -575,6 +694,60 @@ class StockPickerFactorSnapshotService:
             ),
         }
 
+    def _capture_run_summary(
+        self,
+        rows: List[tuple],
+        now: datetime,
+    ) -> Dict[str, Any]:
+        status_counts = Counter(row[3] for row in rows)
+
+        def serialize(row: tuple) -> Dict[str, Any]:
+            started_at = self._as_utc(row[5])
+            completed_at = (
+                self._as_utc(row[6])
+                if row[6] is not None
+                else None
+            )
+            lease_expires_at = started_at + timedelta(
+                minutes=CAPTURE_CLAIM_LEASE_MINUTES,
+            )
+            return {
+                "market": row[0],
+                "target_direction": row[1],
+                "observation_date": str(row[2]),
+                "status": row[3],
+                "claim_id": row[4],
+                "started_at": started_at.isoformat(),
+                "completed_at": (
+                    completed_at.isoformat()
+                    if completed_at is not None
+                    else None
+                ),
+                "request_id": row[7],
+                "row_count": int(row[8] or 0),
+                "error": row[9],
+                "lease_expires_at": lease_expires_at.isoformat(),
+                "lease_expired": (
+                    row[3] == "running"
+                    and now >= lease_expires_at
+                ),
+            }
+
+        return {
+            "total_count": len(rows),
+            "status_counts": dict(status_counts),
+            "active": [
+                serialize(row)
+                for row in rows
+                if row[3] == "running"
+            ],
+            "recent_failures": [
+                serialize(row)
+                for row in rows
+                if row[3] == "failed"
+            ][:20],
+        }
+
     def _has_post_close_snapshot(
         self,
         market: str,
@@ -600,6 +773,125 @@ class StockPickerFactorSnapshotService:
             )
             for row in rows
         )
+
+    def _is_market_trading_day(
+        self,
+        market: str,
+        observation_date: date,
+    ) -> bool:
+        key = (market, observation_date)
+        cached = self._trading_day_cache.get(key)
+        if cached is not None:
+            return cached
+        result = bool(run_external_call(
+            "quote",
+            "factor_snapshot_trading_calendar",
+            self.trading_day_loader,
+            market,
+            observation_date,
+            retry_if=lambda error: not isinstance(
+                error,
+                ExternalServiceTimeoutError,
+            ),
+        ))
+        self._trading_day_cache[key] = result
+        return result
+
+    def _claim_capture(
+        self,
+        market: str,
+        direction: str,
+        observation_date: date,
+        started_at: datetime,
+    ) -> Optional[str]:
+        claim_id = uuid4().hex
+        stale_before = started_at - timedelta(
+            minutes=CAPTURE_CLAIM_LEASE_MINUTES,
+        )
+        with self.connection_factory() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO stock_picker_factor_snapshot_runs (
+                    market,
+                    target_direction,
+                    observation_date,
+                    status,
+                    claim_id,
+                    started_at
+                ) VALUES (?, ?, ?, 'running', ?, ?)
+                ON CONFLICT (
+                    market,
+                    target_direction,
+                    observation_date
+                ) DO UPDATE SET
+                    status = 'running',
+                    claim_id = excluded.claim_id,
+                    started_at = excluded.started_at,
+                    completed_at = NULL,
+                    request_id = NULL,
+                    row_count = 0,
+                    error = NULL
+                WHERE (
+                    stock_picker_factor_snapshot_runs.status = 'failed'
+                    OR (
+                        stock_picker_factor_snapshot_runs.status = 'running'
+                        AND stock_picker_factor_snapshot_runs.started_at < ?
+                    )
+                )
+                RETURNING claim_id
+                """,
+                [
+                    market,
+                    direction,
+                    observation_date,
+                    claim_id,
+                    started_at.replace(tzinfo=None),
+                    stale_before.replace(tzinfo=None),
+                ],
+            ).fetchone()
+        return claim_id if row and row[0] == claim_id else None
+
+    def _finish_capture_claim(
+        self,
+        market: str,
+        direction: str,
+        observation_date: date,
+        claim_id: str,
+        *,
+        status: str,
+        completed_at: datetime,
+        request_id: Optional[str] = None,
+        row_count: int = 0,
+        error: Optional[str] = None,
+    ) -> None:
+        if status not in {"completed", "failed"}:
+            raise ValueError("status 必须是 completed 或 failed")
+        with self.connection_factory() as connection:
+            connection.execute(
+                """
+                UPDATE stock_picker_factor_snapshot_runs
+                SET status = ?,
+                    completed_at = ?,
+                    request_id = ?,
+                    row_count = ?,
+                    error = ?
+                WHERE market = ?
+                  AND target_direction = ?
+                  AND observation_date = ?
+                  AND claim_id = ?
+                """,
+                [
+                    status,
+                    completed_at.replace(tzinfo=None),
+                    request_id,
+                    int(row_count),
+                    error,
+                    market,
+                    direction,
+                    observation_date,
+                    claim_id,
+                ],
+            )
 
     def _load_channel(
         self,

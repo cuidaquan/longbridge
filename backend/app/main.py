@@ -247,11 +247,17 @@ async def _auto_capture_stock_picker_factor_snapshots() -> None:
             if result is not None:
                 logger.info(
                     "stock-picker factor snapshots: captured=%s "
-                    "skipped=%s rows=%s",
+                    "skipped=%s errors=%s rows=%s",
                     len(result["captured"]),
                     len(result["skipped"]),
+                    len(result["errors"]),
                     result["row_count"],
                 )
+                for error in result["errors"]:
+                    logger.warning(
+                        "stock-picker factor snapshot group failed: %s",
+                        error,
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as exc:

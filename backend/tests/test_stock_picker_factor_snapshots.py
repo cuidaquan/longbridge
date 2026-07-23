@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import unittest
 from unittest.mock import MagicMock, patch
@@ -12,6 +12,7 @@ from app.db import _run_migrations
 from app.main import app
 from app.stock_picker_factor_snapshots import (
     AUTO_CAPTURE_LOCAL_HOUR,
+    CAPTURE_CLAIM_LEASE_MINUTES,
     MAX_SNAPSHOT_AGE_HOURS,
     MIN_OBSERVATION_DATES,
     SNAPSHOT_VERSION,
@@ -120,6 +121,10 @@ def _service(**kwargs):
             _fundamentals,
         ),
         margin_loader=kwargs.get("margin_loader", _margin),
+        trading_day_loader=kwargs.get(
+            "trading_day_loader",
+            lambda market, trading_date: True,
+        ),
         connection_factory=kwargs.get("connection_factory"),
         clock=kwargs.get(
             "clock",
@@ -596,6 +601,7 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
 
         first = service.capture_due_baseline(persist=True)
         second = service.capture_due_baseline(persist=True)
+        coverage = service.get_coverage()
 
         self.assertEqual(
             [
@@ -619,6 +625,263 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
                 item["reason"]
                 for item in second["skipped"]
             },
+        )
+        runs = connection.execute(
+            """
+            SELECT target_direction, status, row_count
+            FROM stock_picker_factor_snapshot_runs
+            ORDER BY target_direction
+            """
+        ).fetchall()
+        self.assertEqual(
+            runs,
+            [
+                ("LONG", "completed", 10),
+                ("SHORT", "completed", 10),
+            ],
+        )
+        self.assertEqual(
+            coverage["capture_runs"]["status_counts"],
+            {"completed": 2},
+        )
+        self.assertEqual(
+            coverage["capture_runs"]["active"],
+            [],
+        )
+
+    def test_market_calendar_fails_closed_and_caches_closed_days(
+        self,
+    ) -> None:
+        connection = duckdb.connect(":memory:")
+        self.addCleanup(connection.close)
+        _run_migrations(connection)
+        factory = lambda: _ConnectionContext(connection)
+        calendar = MagicMock(return_value=False)
+        index_loader = MagicMock()
+        service = _service(
+            connection_factory=factory,
+            trading_day_loader=calendar,
+            index_loader=index_loader,
+        )
+
+        first = service.capture_due_baseline(persist=True)
+        second = service.capture_due_baseline(persist=True)
+
+        self.assertEqual(first["row_count"], 0)
+        self.assertEqual(first["errors"], [])
+        self.assertEqual(
+            {
+                item["reason"]
+                for item in first["skipped"]
+            },
+            {"market_closed", "session_phase:intraday"},
+        )
+        self.assertEqual(second["row_count"], 0)
+        calendar.assert_called_once()
+        index_loader.assert_not_called()
+
+    def test_market_calendar_error_does_not_capture_or_claim(
+        self,
+    ) -> None:
+        connection = duckdb.connect(":memory:")
+        self.addCleanup(connection.close)
+        _run_migrations(connection)
+        factory = lambda: _ConnectionContext(connection)
+        index_loader = MagicMock()
+        service = _service(
+            connection_factory=factory,
+            trading_day_loader=MagicMock(
+                side_effect=RuntimeError("calendar unavailable"),
+            ),
+            index_loader=index_loader,
+        )
+
+        result = service.capture_due_baseline(persist=True)
+        claim_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM stock_picker_factor_snapshot_runs
+            """
+        ).fetchone()[0]
+
+        self.assertEqual(result["row_count"], 0)
+        self.assertEqual(
+            [
+                item["reason"]
+                for item in result["skipped"]
+                if item["market"] == "US"
+            ],
+            [
+                "trading_calendar_unavailable",
+                "trading_calendar_unavailable",
+            ],
+        )
+        self.assertIn(
+            "calendar unavailable",
+            result["errors"][0]["error"],
+        )
+        self.assertEqual(claim_count, 0)
+        index_loader.assert_not_called()
+
+    def test_capture_claim_blocks_concurrency_and_allows_failed_retry(
+        self,
+    ) -> None:
+        connection = duckdb.connect(":memory:")
+        self.addCleanup(connection.close)
+        _run_migrations(connection)
+        factory = lambda: _ConnectionContext(connection)
+        now = datetime(
+            2026,
+            7,
+            23,
+            23,
+            tzinfo=timezone.utc,
+        )
+        local_date = date(2026, 7, 23)
+        first_service = _service(connection_factory=factory)
+        second_service = _service(connection_factory=factory)
+
+        first_claim = first_service._claim_capture(
+            "US",
+            "LONG",
+            local_date,
+            now,
+        )
+        concurrent_claim = second_service._claim_capture(
+            "US",
+            "LONG",
+            local_date,
+            now + timedelta(minutes=1),
+        )
+        first_service._finish_capture_claim(
+            "US",
+            "LONG",
+            local_date,
+            first_claim,
+            status="failed",
+            completed_at=now + timedelta(minutes=2),
+            error="temporary failure",
+        )
+        retry_claim = second_service._claim_capture(
+            "US",
+            "LONG",
+            local_date,
+            now + timedelta(minutes=3),
+        )
+        stale_reclaim = first_service._claim_capture(
+            "US",
+            "LONG",
+            local_date,
+            now + timedelta(
+                minutes=CAPTURE_CLAIM_LEASE_MINUTES + 4,
+            ),
+        )
+        second_service._finish_capture_claim(
+            "US",
+            "LONG",
+            local_date,
+            retry_claim,
+            status="completed",
+            completed_at=now + timedelta(
+                minutes=CAPTURE_CLAIM_LEASE_MINUTES + 5,
+            ),
+            request_id="stale-worker",
+            row_count=10,
+        )
+        stored = connection.execute(
+            """
+            SELECT claim_id, status, request_id
+            FROM stock_picker_factor_snapshot_runs
+            WHERE market = 'US'
+              AND target_direction = 'LONG'
+              AND observation_date = ?
+            """,
+            [local_date],
+        ).fetchone()
+
+        self.assertIsNotNone(first_claim)
+        self.assertIsNone(concurrent_claim)
+        self.assertIsNotNone(retry_claim)
+        self.assertNotEqual(first_claim, retry_claim)
+        self.assertIsNotNone(stale_reclaim)
+        self.assertNotEqual(retry_claim, stale_reclaim)
+        self.assertEqual(
+            stored,
+            (stale_reclaim, "running", None),
+        )
+        self.assertGreaterEqual(CAPTURE_CLAIM_LEASE_MINUTES, 30)
+
+    def test_due_capture_persists_failure_and_continues_other_groups(
+        self,
+    ) -> None:
+        connection = duckdb.connect(":memory:")
+        self.addCleanup(connection.close)
+        _run_migrations(connection)
+        factory = lambda: _ConnectionContext(connection)
+        service = _service(connection_factory=factory)
+        with patch.object(
+            service,
+            "capture_group",
+            side_effect=[
+                RuntimeError("long capture failed"),
+                {
+                    "request_id": "short-request",
+                    "row_count": 10,
+                },
+            ],
+        ):
+            result = service.capture_due_baseline(persist=True)
+        runs = connection.execute(
+            """
+            SELECT
+                target_direction,
+                status,
+                request_id,
+                row_count,
+                error
+            FROM stock_picker_factor_snapshot_runs
+            ORDER BY target_direction
+            """
+        ).fetchall()
+        coverage = service.get_coverage()
+
+        self.assertEqual(result["row_count"], 10)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertIn(
+            "long capture failed",
+            result["errors"][0]["error"],
+        )
+        self.assertEqual(
+            runs,
+            [
+                (
+                    "LONG",
+                    "failed",
+                    None,
+                    0,
+                    "long capture failed",
+                ),
+                (
+                    "SHORT",
+                    "completed",
+                    "short-request",
+                    10,
+                    None,
+                ),
+            ],
+        )
+        self.assertEqual(
+            coverage["capture_runs"]["status_counts"],
+            {
+                "failed": 1,
+                "completed": 1,
+            },
+        )
+        self.assertIn(
+            "long capture failed",
+            coverage["capture_runs"][
+                "recent_failures"
+            ][0]["error"],
         )
 
     def test_invalid_capture_scope_is_rejected(self) -> None:

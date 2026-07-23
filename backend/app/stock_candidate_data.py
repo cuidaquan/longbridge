@@ -83,6 +83,45 @@ def _context(kind: str) -> Iterator[Any]:
             pass
 
 
+def is_market_trading_day(
+    market: str,
+    trading_date: date,
+) -> bool:
+    normalized_market = market.strip().upper()
+    if normalized_market not in {"US", "HK", "CN", "SG"}:
+        raise ValueError("market 必须是 US、HK、CN 或 SG")
+    if not isinstance(trading_date, date):
+        raise ValueError("trading_date 必须是 date")
+
+    try:
+        from longbridge.openapi import Market
+    except ModuleNotFoundError as exc:  # pragma: no cover - environment dependent
+        raise LongbridgeDependencyMissing(
+            "未找到 longbridge Python SDK，请先运行 `pip install longbridge`。"
+        ) from exc
+
+    with _context("quote") as context:
+        response = context.trading_days(
+            getattr(Market, normalized_market),
+            trading_date,
+            trading_date,
+        )
+    if response is None or not any(
+        hasattr(response, field)
+        for field in ("trading_days", "half_trading_days")
+    ):
+        raise LongbridgeAPIError("Longbridge 交易日历返回无效")
+    trading_days = [
+        *list(getattr(response, "trading_days", None) or []),
+        *list(getattr(response, "half_trading_days", None) or []),
+    ]
+    return trading_date in {
+        parsed
+        for value in trading_days
+        if (parsed := _parse_date(value)) is not None
+    }
+
+
 def get_security_tradeability(
     symbols: Iterable[str],
     include_depth: bool = False,
