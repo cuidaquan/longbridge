@@ -89,6 +89,41 @@ export interface SecuritySearchResponse {
   items: SecuritySearchItem[];
 }
 
+export type ScreenerMarket = 'US' | 'HK' | 'CN' | 'SG';
+
+export interface ScreenerStrategy {
+  id: number;
+  name: string;
+  description?: string;
+  market: ScreenerMarket;
+  source: 'recommended' | 'user';
+}
+
+export interface ScreenerStrategiesResponse {
+  market: ScreenerMarket;
+  source: 'longbridge-screener';
+  items: ScreenerStrategy[];
+}
+
+export interface ScreenerCandidate {
+  rank: number;
+  symbol: string;
+  name: string;
+  market: ScreenerMarket;
+  indicators: Record<string, string | number | boolean | null>;
+}
+
+export interface ScreenerSearchResponse {
+  market: ScreenerMarket;
+  strategy_id: number;
+  source: 'longbridge-screener';
+  page: number;
+  size: number;
+  total: number;
+  has_more: boolean;
+  items: ScreenerCandidate[];
+}
+
 export interface AnalysisResponse {
   long_analysis: Analysis[];
   short_analysis: Analysis[];
@@ -158,6 +193,77 @@ export async function searchSecurities(params: {
   if (!response.ok) {
     const error = await response.json().catch(() => null);
     throw new Error(error?.detail || '搜索股票失败');
+  }
+  return response.json();
+}
+
+export async function getScreenerStrategies(params: {
+  market: ScreenerMarket;
+  includeUser?: boolean;
+}): Promise<ScreenerStrategiesResponse> {
+  const queryParams = new URLSearchParams({
+    market: params.market,
+    include_user: String(params.includeUser ?? true),
+  });
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/screener/strategies?${queryParams.toString()}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取 Longbridge 选股策略失败');
+  }
+  return response.json();
+}
+
+export async function searchScreenerCandidates(params: {
+  market: ScreenerMarket;
+  strategyId: number;
+  page?: number;
+  size?: number;
+}): Promise<ScreenerSearchResponse> {
+  const response = await fetch(`${API_BASE}/api/stock-picker/screener/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      market: params.market,
+      strategy_id: params.strategyId,
+      page: params.page || 0,
+      size: params.size || 20,
+    }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || 'Longbridge 主动选股失败');
+  }
+  return response.json();
+}
+
+export async function importScreenerCandidates(params: {
+  poolType: 'LONG' | 'SHORT';
+  strategy: ScreenerStrategy;
+  items: ScreenerCandidate[];
+}): Promise<{
+  success: string[];
+  failed: Array<{ symbol: string; error: string }>;
+  total: number;
+  success_count: number;
+}> {
+  const response = await fetch(`${API_BASE}/api/stock-picker/screener/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      pool_type: params.poolType,
+      strategy_id: params.strategy.id,
+      strategy_name: params.strategy.name,
+      items: params.items.map((item) => ({
+        symbol: item.symbol,
+        name: item.name,
+      })),
+    }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '导入候选股票失败');
   }
   return response.json();
 }

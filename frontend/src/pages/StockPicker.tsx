@@ -39,12 +39,19 @@ import {
   clearPool,
   analyzeStocks,
   searchSecurities,
+  getScreenerStrategies,
+  searchScreenerCandidates,
+  importScreenerCandidates,
   type Stock,
   type Analysis,
   type PoolsResponse,
   type AnalysisResponse,
   type SecurityMarket,
   type SecuritySearchItem,
+  type ScreenerMarket,
+  type ScreenerStrategy,
+  type ScreenerCandidate,
+  type ScreenerSearchResponse,
 } from '../api/stockPicker';
 import { API_BASE } from '../api/client';
 
@@ -54,6 +61,7 @@ export default function StockPicker() {
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
   const [showAddDialog, setShowAddDialog] = useState(false);
+  const [showDiscoveryDialog, setShowDiscoveryDialog] = useState(false);
   const [addDialogType, setAddDialogType] = useState<'LONG' | 'SHORT'>('LONG');
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -206,6 +214,13 @@ export default function StockPicker() {
         actions={
           <div className="flex gap-2">
             <Button
+              variant="secondary"
+              onClick={() => setShowDiscoveryDialog(true)}
+              icon={<SearchIcon className="w-4 h-4" />}
+            >
+              主动发现
+            </Button>
+            <Button
               onClick={() => handleAnalyze()}
               loading={analyzing}
               icon={<Analytics className="w-4 h-4" />}
@@ -355,6 +370,21 @@ export default function StockPicker() {
             setShowAddDialog(false);
             loadPools();
             setSuccess('添加成功');
+          }}
+        />
+      )}
+
+      {showDiscoveryDialog && (
+        <StockDiscoveryDialog
+          onClose={() => setShowDiscoveryDialog(false)}
+          onComplete={(successCount, failedCount) => {
+            setShowDiscoveryDialog(false);
+            loadPools();
+            if (failedCount > 0) {
+              setError(`成功导入 ${successCount} 只，失败 ${failedCount} 只`);
+            } else {
+              setSuccess(`已导入 ${successCount} 只候选股票，可继续执行量化分析`);
+            }
           }}
         />
       )}
@@ -707,6 +737,375 @@ function ScoreRow({ label, value, max }: { label: string; value: number; max: nu
       <span className="text-xs font-medium text-slate-600 dark:text-slate-400 w-12 text-right">
         {value.toFixed(0)}/{max}
       </span>
+    </div>
+  );
+}
+
+function StockDiscoveryDialog({
+  onClose,
+  onComplete,
+}: {
+  onClose: () => void;
+  onComplete: (successCount: number, failedCount: number) => void;
+}) {
+  const [market, setMarket] = useState<ScreenerMarket>('US');
+  const [poolType, setPoolType] = useState<'LONG' | 'SHORT'>('LONG');
+  const [strategies, setStrategies] = useState<ScreenerStrategy[]>([]);
+  const [selectedStrategyId, setSelectedStrategyId] = useState<number | ''>('');
+  const [result, setResult] = useState<ScreenerSearchResponse | null>(null);
+  const [selectedSymbols, setSelectedSymbols] = useState<Set<string>>(new Set());
+  const [loadingStrategies, setLoadingStrategies] = useState(false);
+  const [searching, setSearching] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingStrategies(true);
+    setError(null);
+    setStrategies([]);
+    setSelectedStrategyId('');
+    setResult(null);
+    setSelectedSymbols(new Set());
+
+    getScreenerStrategies({ market })
+      .then((response) => {
+        if (cancelled) return;
+        setStrategies(response.items);
+        setSelectedStrategyId(response.items[0]?.id || '');
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : '获取选股策略失败');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingStrategies(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [market]);
+
+  const selectedStrategy = strategies.find(
+    (strategy) => strategy.id === selectedStrategyId,
+  );
+
+  const runSearch = async (page = 0) => {
+    if (!selectedStrategy) {
+      setError('请选择 Longbridge 选股策略');
+      return;
+    }
+    setSearching(true);
+    setError(null);
+    try {
+      const response = await searchScreenerCandidates({
+        market,
+        strategyId: selectedStrategy.id,
+        page,
+        size: 20,
+      });
+      setResult(response);
+      setSelectedSymbols(new Set(response.items.map((item) => item.symbol)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '主动选股失败');
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const toggleCandidate = (candidate: ScreenerCandidate) => {
+    setSelectedSymbols((current) => {
+      const next = new Set(current);
+      if (next.has(candidate.symbol)) {
+        next.delete(candidate.symbol);
+      } else {
+        next.add(candidate.symbol);
+      }
+      return next;
+    });
+  };
+
+  const handleImport = async () => {
+    if (!selectedStrategy || !result) return;
+    const selectedItems = result.items.filter((item) => selectedSymbols.has(item.symbol));
+    if (selectedItems.length === 0) {
+      setError('请至少选择一只候选股票');
+      return;
+    }
+
+    setImporting(true);
+    setError(null);
+    try {
+      const imported = await importScreenerCandidates({
+        poolType,
+        strategy: selectedStrategy,
+        items: selectedItems,
+      });
+      if (imported.success_count === 0 && imported.failed.length > 0) {
+        setError(imported.failed[0]?.error || '候选股票导入失败');
+        return;
+      }
+      onComplete(imported.success_count, imported.failed.length);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '候选股票导入失败');
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const selectedCount = selectedSymbols.size;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="max-h-[calc(100vh-2rem)] w-full max-w-3xl overflow-y-auto rounded-xl bg-white p-6 shadow-2xl dark:bg-slate-800">
+        <div className="mb-5 flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-bold text-slate-900 dark:text-white">
+              Longbridge 主动发现
+            </h3>
+            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+              使用官方 Screener 生成候选集，导入后继续走现有量化初筛和 Top N AI。
+            </p>
+          </div>
+          <button
+            aria-label="关闭主动发现弹窗"
+            onClick={onClose}
+            className="rounded p-1 hover:bg-slate-100 dark:hover:bg-slate-700"
+          >
+            <Close className="h-5 w-5 text-slate-500" />
+          </button>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          <div>
+            <label className="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-300">
+              市场
+            </label>
+            <div className="grid grid-cols-4 gap-2">
+              {([
+                ['US', '美股'],
+                ['HK', '港股'],
+                ['CN', 'A股'],
+                ['SG', '新加坡'],
+              ] as Array<[ScreenerMarket, string]>).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setMarket(value)}
+                  className={`rounded-lg border px-2 py-2 text-sm font-medium transition-colors ${
+                    market === value
+                      ? 'border-cyan-500 bg-cyan-50 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300'
+                      : 'border-slate-200 text-slate-600 dark:border-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-300">
+              导入方向
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              {([
+                ['LONG', '做多池'],
+                ['SHORT', '做空池'],
+              ] as Array<['LONG' | 'SHORT', string]>).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setPoolType(value)}
+                  className={`rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+                    poolType === value
+                      ? value === 'LONG'
+                        ? 'border-emerald-500 bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+                        : 'border-red-500 bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+                      : 'border-slate-200 text-slate-600 dark:border-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-4 flex items-end gap-3">
+          <div className="flex-1">
+            <label
+              htmlFor="screener-strategy"
+              className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-300"
+            >
+              官方策略
+            </label>
+            <select
+              id="screener-strategy"
+              value={selectedStrategyId}
+              onChange={(event) => {
+                setSelectedStrategyId(Number(event.target.value));
+                setResult(null);
+                setSelectedSymbols(new Set());
+              }}
+              disabled={loadingStrategies || strategies.length === 0}
+              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm
+                text-slate-900 focus:border-cyan-500 focus:outline-none focus:ring-2
+                focus:ring-cyan-500/50 disabled:opacity-60 dark:border-slate-600
+                dark:bg-slate-900 dark:text-white"
+            >
+              {strategies.length === 0 && (
+                <option value="">
+                  {loadingStrategies ? '正在加载策略…' : '没有可用策略'}
+                </option>
+              )}
+              {strategies.map((strategy) => (
+                <option key={strategy.id} value={strategy.id}>
+                  {strategy.name}{strategy.source === 'user' ? '（我的策略）' : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+          <Button
+            type="button"
+            onClick={() => runSearch(0)}
+            loading={searching}
+            disabled={!selectedStrategy}
+            icon={<SearchIcon className="h-4 w-4" />}
+          >
+            筛选候选
+          </Button>
+        </div>
+
+        {selectedStrategy?.description && (
+          <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+            {selectedStrategy.description}
+          </p>
+        )}
+
+        {error && (
+          <div className="mt-4">
+            <Alert type="error">{error}</Alert>
+          </div>
+        )}
+
+        {result && (
+          <div className="mt-5">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <p className="text-sm text-slate-600 dark:text-slate-400">
+                第 {result.page + 1} 页，共 {result.total} 个候选；已选择 {selectedCount} 个
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedCount === result.items.length) {
+                    setSelectedSymbols(new Set());
+                  } else {
+                    setSelectedSymbols(new Set(result.items.map((item) => item.symbol)));
+                  }
+                }}
+                className="text-sm text-cyan-600 hover:text-cyan-700 dark:text-cyan-400"
+              >
+                {selectedCount === result.items.length ? '取消全选' : '全选本页'}
+              </button>
+            </div>
+
+            <div className="max-h-80 space-y-2 overflow-y-auto rounded-lg border border-slate-200 p-2 dark:border-slate-700">
+              {result.items.length === 0 ? (
+                <EmptyState
+                  title="没有符合条件的股票"
+                  description="可尝试其他策略或市场"
+                  icon={<SearchIcon />}
+                />
+              ) : (
+                result.items.map((candidate) => (
+                  <label
+                    key={candidate.symbol}
+                    className="flex cursor-pointer items-start gap-3 rounded-lg p-3 hover:bg-slate-50 dark:hover:bg-slate-700/50"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedSymbols.has(candidate.symbol)}
+                      onChange={() => toggleCandidate(candidate)}
+                      className="mt-1 h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <span className="font-medium text-slate-900 dark:text-white">
+                            {candidate.symbol}
+                          </span>
+                          <span className="ml-2 truncate text-sm text-slate-500">
+                            {candidate.name}
+                          </span>
+                        </div>
+                        <span className="text-xs text-slate-400">#{candidate.rank}</span>
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500">
+                        {candidate.indicators.industry != null && (
+                          <span>行业 {String(candidate.indicators.industry)}</span>
+                        )}
+                        {candidate.indicators.prevchg != null && (
+                          <span>涨跌 {String(candidate.indicators.prevchg)}</span>
+                        )}
+                        {candidate.indicators.pettm != null && (
+                          <span>PE {String(candidate.indicators.pettm)}</span>
+                        )}
+                        {candidate.indicators.pbmrq != null && (
+                          <span>PB {String(candidate.indicators.pbmrq)}</span>
+                        )}
+                      </div>
+                    </div>
+                  </label>
+                ))
+              )}
+            </div>
+
+            <div className="mt-3 flex items-center justify-between">
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => runSearch(result.page - 1)}
+                  disabled={searching || result.page === 0}
+                >
+                  上一页
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => runSearch(result.page + 1)}
+                  disabled={searching || !result.has_more}
+                >
+                  下一页
+                </Button>
+              </div>
+              <p className="text-xs text-slate-500">
+                导入只更新观察池，不会自动下单
+              </p>
+            </div>
+          </div>
+        )}
+
+        <div className="mt-5 flex gap-3 border-t border-slate-200 pt-4 dark:border-slate-700">
+          <Button type="button" variant="secondary" onClick={onClose} className="flex-1">
+            取消
+          </Button>
+          <Button
+            type="button"
+            onClick={handleImport}
+            loading={importing}
+            disabled={!result || selectedCount === 0}
+            className="flex-1"
+          >
+            导入 {selectedCount > 0 ? `${selectedCount} 只` : '候选'}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

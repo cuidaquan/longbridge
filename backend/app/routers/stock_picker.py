@@ -15,6 +15,7 @@ from ..stock_picker import get_stock_picker_service
 from ..exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
 from ..models import SecuritySearchResponse
 from ..security_catalog import get_security_catalog_service
+from ..stock_screener import get_stock_screener_service
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,31 @@ class StockPickerConfigUpdate(BaseModel):
     ai_top_n_per_pool: Optional[int] = Field(None, ge=0, le=100)
     history_retention_days: Optional[int] = Field(None, ge=1, le=3650)
     max_history_per_stock: Optional[int] = Field(None, ge=1, le=1000)
+
+
+class ScreenerSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    market: Literal["US", "HK", "CN", "SG"]
+    strategy_id: int = Field(gt=0)
+    page: int = Field(default=0, ge=0, le=10000)
+    size: int = Field(default=20, ge=1, le=100)
+
+
+class ScreenerImportItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str = Field(min_length=1, max_length=32)
+    name: Optional[str] = Field(default=None, max_length=200)
+
+
+class ScreenerImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pool_type: Literal["LONG", "SHORT"]
+    strategy_id: int = Field(gt=0)
+    strategy_name: str = Field(min_length=1, max_length=200)
+    items: List[ScreenerImportItem] = Field(min_length=1, max_length=100)
 
 
 def _utc_now() -> datetime:
@@ -199,6 +225,80 @@ async def search_securities(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except LongbridgeAPIError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/screener/strategies")
+async def get_screener_strategies(
+    market: Literal["US", "HK", "CN", "SG"] = Query(default="US"),
+    include_user: bool = True,
+):
+    try:
+        return await asyncio.to_thread(
+            get_stock_screener_service().list_strategies,
+            market,
+            include_user,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeDependencyMissing as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/screener/search")
+async def search_screener_candidates(request: ScreenerSearchRequest):
+    try:
+        return await asyncio.to_thread(
+            get_stock_screener_service().search,
+            request.market,
+            request.strategy_id,
+            request.page,
+            request.size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LongbridgeDependencyMissing as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LongbridgeAPIError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.post("/screener/import")
+async def import_screener_candidates(request: ScreenerImportRequest):
+    stock_picker = get_stock_picker_service()
+    reason = (
+        f"Longbridge Screener：{request.strategy_name} "
+        f"(strategy_id={request.strategy_id})"
+    )
+    success = []
+    failed = []
+    for item in request.items:
+        try:
+            stock_picker.add_stock(
+                request.pool_type,
+                item.symbol,
+                name=item.name,
+                added_reason=reason,
+            )
+            success.append(item.symbol.strip().upper())
+        except ValueError as exc:
+            failed.append({
+                "symbol": item.symbol,
+                "error": str(exc),
+            })
+        except Exception as exc:
+            logger.error("导入 Screener 候选失败: %s", item.symbol, exc_info=True)
+            failed.append({
+                "symbol": item.symbol,
+                "error": "导入失败",
+            })
+    return {
+        "success": success,
+        "failed": failed,
+        "total": len(request.items),
+        "success_count": len(success),
+    }
 
 
 @router.get("/pools")
