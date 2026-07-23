@@ -150,6 +150,56 @@ class StockPickerBacktestServiceTests(unittest.TestCase):
             -short_record["returns"]["5"]["gross_return"],
         )
 
+    def test_market_relative_strength_features_are_point_in_time_and_directional(
+        self,
+    ) -> None:
+        bars = _bars(180, 100, 0.01)
+        benchmark = _bars(180, 200, 0.004)
+        benchmark_closes = {
+            bar["date"]: bar["close"]
+            for bar in benchmark
+        }
+
+        long_record = self.service._evaluate_symbol(
+            "AAA.US",
+            "LONG",
+            bars,
+            "SPY.US",
+            benchmark_closes,
+            [5],
+            lookback=150,
+            min_history=130,
+            step=20,
+        )[0]
+        short_record = self.service._evaluate_symbol(
+            "AAA.US",
+            "SHORT",
+            bars,
+            "SPY.US",
+            benchmark_closes,
+            [5],
+            lookback=150,
+            min_history=130,
+            step=20,
+        )[0]
+
+        self.assertGreater(
+            long_record["features"]["market_rs_10d"],
+            0,
+        )
+        self.assertGreater(
+            long_record["features"]["market_rs_half_year"],
+            0,
+        )
+        self.assertAlmostEqual(
+            long_record["features"]["market_rs_10d"],
+            -short_record["features"]["market_rs_10d"],
+        )
+        self.assertAlmostEqual(
+            long_record["features"]["market_rs_half_year"],
+            -short_record["features"]["market_rs_half_year"],
+        )
+
     def test_time_split_and_walk_forward_are_strictly_ordered(self) -> None:
         symbols = ["AAA.US", "BBB.US"]
         stock_picker = _StubStockPicker(symbols)
@@ -206,6 +256,49 @@ class StockPickerBacktestServiceTests(unittest.TestCase):
         self.assertEqual(
             [item["symbol"] for item in by_date["2024-01-01"]],
             ["AAA.US", "BBB.US"],
+        )
+
+    def test_top_n_filter_reports_validation_coverage_and_underfill(
+        self,
+    ) -> None:
+        symbols = ["AAA.US", "BBB.US"]
+        stock_picker = _StubStockPicker(symbols)
+        source = {
+            "AAA.US": _bars(180, 100, 0.01),
+            "BBB.US": _bars(180, 80, 0.001),
+            "SPY.US": _bars(180, 200, 0.004),
+        }
+        service = StockPickerBacktestService(
+            stock_picker=stock_picker,
+            bar_loader=lambda symbol, period="day", limit=1000,
+            end_date=None: source[symbol][-limit:],
+        )
+
+        report = service.run(
+            "LONG",
+            horizons=[5],
+            lookback=150,
+            max_bars=180,
+            min_history=130,
+            step=10,
+            top_n=2,
+            train_ratio=0.6,
+            persist=False,
+            top_n_filter=lambda record: (
+                record["features"]["market_rs_10d"] is not None
+                and record["features"]["market_rs_10d"] >= 0
+            ),
+        )
+
+        selection = report["selection"]["validation"]
+        self.assertEqual(selection["eligible_coverage"], 0.5)
+        self.assertEqual(
+            selection["underfilled_signal_dates"],
+            selection["signal_dates"],
+        )
+        self.assertEqual(
+            report["periods"]["validation"]["top_n"]["sample_count"],
+            selection["signal_dates"],
         )
 
     def test_transaction_cost_is_deducted_once_per_signal(self) -> None:

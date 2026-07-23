@@ -148,6 +148,7 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_STOCK_PICKER_ANALYSIS_TABLE_SQL)
     conn.execute(_STOCK_PICKER_CONFIG_TABLE_SQL)
     conn.execute(_STOCK_PICKER_BACKTEST_TABLE_SQL)
+    conn.execute(_STOCK_PICKER_FACTOR_EXPERIMENT_TABLE_SQL)
 
     # 板块轮动表
     conn.execute(_SECTOR_ETFS_TABLE_SQL)
@@ -428,6 +429,24 @@ CREATE TABLE IF NOT EXISTS stock_picker_backtests (
 );
 CREATE INDEX IF NOT EXISTS idx_stock_picker_backtest_created
 ON stock_picker_backtests(created_at DESC);
+"""
+
+_STOCK_PICKER_FACTOR_EXPERIMENT_TABLE_SQL = """
+CREATE SEQUENCE IF NOT EXISTS stock_picker_factor_experiment_seq START 1;
+CREATE TABLE IF NOT EXISTS stock_picker_factor_experiments (
+    id INTEGER PRIMARY KEY DEFAULT nextval(
+        'stock_picker_factor_experiment_seq'
+    ),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    experiment_version TEXT NOT NULL,
+    baseline_version TEXT NOT NULL,
+    score_version TEXT NOT NULL,
+    data_as_of DATE NOT NULL,
+    parameters TEXT NOT NULL,
+    result TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stock_picker_factor_experiment_created
+ON stock_picker_factor_experiments(created_at DESC);
 """
 
 # ============================================

@@ -42,6 +42,7 @@ class StockPickerBacktestService:
         persist: bool = True,
         report_metadata: Optional[Dict[str, Any]] = None,
         data_as_of: Optional[str] = None,
+        top_n_filter: Optional[Callable[[Dict[str, Any]], bool]] = None,
     ) -> Dict[str, Any]:
         direction = self.stock_picker._validate_pool_type(pool_type)
         normalized_horizons = sorted(set(int(value) for value in horizons))
@@ -122,7 +123,16 @@ class StockPickerBacktestService:
             raise ValueError("没有足够的历史数据生成回测样本")
 
         records.sort(key=lambda item: (item["signal_date"], item["symbol"]))
-        top_records = self._select_top_n(records, top_n)
+        eligible_records = (
+            [
+                record
+                for record in records
+                if top_n_filter(record)
+            ]
+            if top_n_filter is not None
+            else records
+        )
+        top_records = self._select_top_n(eligible_records, top_n)
         signal_dates = sorted({record["signal_date"] for record in records})
         train_dates, validation_dates = self._split_dates(
             signal_dates,
@@ -164,6 +174,20 @@ class StockPickerBacktestService:
                 "sample_count": len(records),
                 "top_n_sample_count": len(top_records),
                 "benchmark_coverage": self._benchmark_coverage(records),
+            },
+            "selection": {
+                "all": self._selection_summary(
+                    records,
+                    eligible_records,
+                    set(signal_dates),
+                    top_n,
+                ),
+                "validation": self._selection_summary(
+                    records,
+                    eligible_records,
+                    set(validation_dates),
+                    top_n,
+                ),
             },
             "periods": {
                 "train": self._summarize_period(
@@ -325,6 +349,12 @@ class StockPickerBacktestService:
             if current is None:
                 continue
             signal_date = self._bar_date(bars[end_index])
+            features = self._market_relative_strength_features(
+                bars,
+                end_index,
+                benchmark_closes,
+                direction,
+            )
             horizon_returns = {}
             for horizon in horizons:
                 future_bar = bars[end_index + horizon]
@@ -358,9 +388,49 @@ class StockPickerBacktestService:
                 "score": float(score["total"]),
                 "grade": score["grade"],
                 "benchmark_symbol": benchmark_symbol,
+                "features": features,
                 "returns": horizon_returns,
             })
         return records
+
+    def _market_relative_strength_features(
+        self,
+        bars: List[Dict[str, Any]],
+        end_index: int,
+        benchmark_closes: Dict[str, float],
+        direction: int,
+    ) -> Dict[str, Optional[float]]:
+        current = self._positive_close(bars[end_index])
+        signal_date = self._bar_date(bars[end_index])
+        benchmark_current = benchmark_closes.get(signal_date)
+        features: Dict[str, Optional[float]] = {}
+        for feature_name, window in (
+            ("market_rs_10d", 10),
+            ("market_rs_half_year", 120),
+        ):
+            value = None
+            if (
+                current is not None
+                and benchmark_current is not None
+                and end_index >= window
+            ):
+                prior = self._positive_close(bars[end_index - window])
+                prior_date = self._bar_date(bars[end_index - window])
+                benchmark_prior = benchmark_closes.get(prior_date)
+                if (
+                    prior is not None
+                    and benchmark_prior is not None
+                    and benchmark_prior > 0
+                ):
+                    stock_return = current / prior - 1
+                    benchmark_return = (
+                        benchmark_current / benchmark_prior - 1
+                    )
+                    value = direction * (
+                        stock_return - benchmark_return
+                    )
+            features[feature_name] = value
+        return features
 
     @staticmethod
     def _select_top_n(
@@ -377,6 +447,47 @@ class StockPickerBacktestService:
                 key=lambda item: (-item["score"], item["symbol"]),
             )[:top_n])
         return selected
+
+    @staticmethod
+    def _selection_summary(
+        records: List[Dict[str, Any]],
+        eligible_records: List[Dict[str, Any]],
+        dates: set[str],
+        top_n: int,
+    ) -> Dict[str, Any]:
+        period_records = [
+            record
+            for record in records
+            if record["signal_date"] in dates
+        ]
+        period_eligible = [
+            record
+            for record in eligible_records
+            if record["signal_date"] in dates
+        ]
+        eligible_by_date: Dict[str, int] = defaultdict(int)
+        for record in period_eligible:
+            eligible_by_date[record["signal_date"]] += 1
+        return {
+            "sample_count": len(period_records),
+            "eligible_sample_count": len(period_eligible),
+            "eligible_coverage": (
+                len(period_eligible) / len(period_records)
+                if period_records
+                else 0
+            ),
+            "signal_dates": len(dates),
+            "eligible_signal_dates": sum(
+                1
+                for signal_date in dates
+                if eligible_by_date.get(signal_date, 0) > 0
+            ),
+            "underfilled_signal_dates": sum(
+                1
+                for signal_date in dates
+                if eligible_by_date.get(signal_date, 0) < top_n
+            ),
+        }
 
     @staticmethod
     def _split_dates(
