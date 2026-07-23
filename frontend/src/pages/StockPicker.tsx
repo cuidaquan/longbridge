@@ -14,6 +14,7 @@ import {
   ExpandLess,
   Close,
   Search as SearchIcon,
+  Refresh,
 } from '@mui/icons-material';
 import {
   PageHeader,
@@ -86,7 +87,10 @@ export default function StockPicker() {
     }
   };
 
-  const handleAnalyze = async (poolType?: 'LONG' | 'SHORT') => {
+  const handleAnalyze = async (
+    poolType?: 'LONG' | 'SHORT',
+    forceRefresh = false,
+  ) => {
     setAnalyzing(true);
     setError(null);
     setAnalysisLogs([]);
@@ -119,7 +123,10 @@ export default function StockPicker() {
     eventSource.onerror = () => eventSource.close();
 
     try {
-      const result = await analyzeStocks({ pool_type: poolType, force_refresh: true });
+      const result = await analyzeStocks({
+        pool_type: poolType,
+        force_refresh: forceRefresh,
+      });
       setSuccess(result.message);
       setTimeout(() => loadAnalysis(), 2000);
     } catch (err) {
@@ -185,13 +192,23 @@ export default function StockPicker() {
         description="AI驱动的多维度量化评分系统"
         icon={<FilterList />}
         actions={
-          <Button
-            onClick={() => handleAnalyze()}
-            loading={analyzing}
-            icon={<Analytics className="w-4 h-4" />}
-          >
-            分析全部
-          </Button>
+          <div className="flex gap-2">
+            <Button
+              onClick={() => handleAnalyze()}
+              loading={analyzing}
+              icon={<Analytics className="w-4 h-4" />}
+            >
+              分析全部
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => handleAnalyze(undefined, true)}
+              disabled={analyzing}
+              icon={<Refresh className="w-4 h-4" />}
+            >
+              强制重算
+            </Button>
+          </div>
         }
       />
 
@@ -246,6 +263,7 @@ export default function StockPicker() {
           onRemove={handleRemove}
           onToggle={handleToggle}
           onAnalyze={() => handleAnalyze('LONG')}
+          onForceAnalyze={() => handleAnalyze('LONG', true)}
           onClear={() => handleClear('LONG')}
           analyzing={analyzing}
         />
@@ -258,6 +276,7 @@ export default function StockPicker() {
           onRemove={handleRemove}
           onToggle={handleToggle}
           onAnalyze={() => handleAnalyze('SHORT')}
+          onForceAnalyze={() => handleAnalyze('SHORT', true)}
           onClear={() => handleClear('SHORT')}
           analyzing={analyzing}
         />
@@ -372,6 +391,7 @@ function StockPoolCard({
   onRemove,
   onToggle,
   onAnalyze,
+  onForceAnalyze,
   onClear,
   analyzing,
 }: {
@@ -383,6 +403,7 @@ function StockPoolCard({
   onRemove: (id: number) => void;
   onToggle: (id: number) => void;
   onAnalyze: () => void;
+  onForceAnalyze: () => void;
   onClear: () => void;
   analyzing: boolean;
 }) {
@@ -424,6 +445,9 @@ function StockPoolCard({
         </Button>
         <Button size="sm" variant="secondary" onClick={onAnalyze} disabled={analyzing} icon={<Analytics className="w-4 h-4" />}>
           分析
+        </Button>
+        <Button size="sm" variant="secondary" onClick={onForceAnalyze} disabled={analyzing} icon={<Refresh className="w-4 h-4" />}>
+          重算
         </Button>
         <Button size="sm" variant="danger" onClick={onClear} disabled={stocks.length === 0} icon={<DeleteSweep className="w-4 h-4" />}>
           清空

@@ -201,6 +201,19 @@ def fetch_candlesticks(symbol: str, period: str = "day", limit: int = 200) -> Li
     return result
 
 
+def fetch_latest_candlestick_timestamp(
+    symbol: str,
+    period: str = "day",
+) -> Optional[datetime]:
+    """Return the newest locally persisted candlestick timestamp."""
+    with get_connection() as conn:
+        row = conn.execute(
+            "SELECT MAX(ts) FROM ohlc WHERE symbol = ? AND period = ?",
+            [symbol, period],
+        ).fetchone()
+    return row[0] if row and isinstance(row[0], datetime) else None
+
+
 def fetch_bars_from_ticks(symbol: str, limit: int) -> List[Dict[str, Optional[float]]]:
     """Aggregate recent ticks into minute bars as a fallback for K-line.
 

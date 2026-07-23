@@ -15,6 +15,7 @@ from .exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
 from .longbridge_compat import close_longbridge_context
 from .repositories import (
     fetch_latest_prices,
+    fetch_latest_candlestick_timestamp,
     load_credentials,
     load_symbols,
     store_candlesticks,
@@ -34,6 +35,7 @@ _portfolio_cache_lock = threading.Lock()
 _portfolio_cache_value: Optional[Dict[str, object]] = None
 _portfolio_cache_expires_at = 0.0
 _PORTFOLIO_CACHE_TTL_SECONDS = 15.0
+_INCREMENTAL_CANDLESTICK_MAX_AGE_DAYS = 14
 
 _PERIOD_NAME_MAP = {
     "min1": "Min_1",
@@ -103,6 +105,8 @@ def sync_history_candlesticks(
     adjust_type: str = "no_adjust",
     count: int = 120,
     forward: bool = False,  # Changed to False to get historical data
+    incremental: bool = False,
+    continue_on_error: bool = False,
 ) -> Dict[str, int]:
     if count <= 0:
         raise ValueError("count 必须大于 0")
@@ -142,20 +146,55 @@ def sync_history_candlesticks(
     with _quote_context(creds) as ctx:
         for symbol in symbol_list:
             try:
-                # Use candlesticks method which can fetch up to 1000 records
-                candles = ctx.candlesticks(
-                    symbol,
-                    period_enum,
-                    count,
-                    adjust_enum,
+                latest_timestamp = (
+                    fetch_latest_candlestick_timestamp(symbol, period)
+                    if incremental
+                    else None
+                )
+                today = datetime.now().date()
+                can_increment = (
+                    period.lower() == "day"
+                    and latest_timestamp is not None
+                    and latest_timestamp.date() <= today
+                    and (today - latest_timestamp.date()).days
+                    <= _INCREMENTAL_CANDLESTICK_MAX_AGE_DAYS
                 )
 
-                # Log how many candles we got
-                logger.info(f"Got {len(candles)} candles for {symbol} using candlesticks()")
+                if can_increment:
+                    candles = ctx.history_candlesticks_by_date(
+                        symbol,
+                        period_enum,
+                        adjust_enum,
+                        latest_timestamp.date(),
+                        today,
+                    )
+                    logger.info(
+                        "Got %s incremental %s candles for %s since %s",
+                        len(candles),
+                        period,
+                        symbol,
+                        latest_timestamp.date(),
+                    )
+                else:
+                    # Initial or stale local data: refresh only the required window.
+                    candles = ctx.candlesticks(
+                        symbol,
+                        period_enum,
+                        count,
+                        adjust_enum,
+                    )
+                    logger.info(
+                        "Got %s candles for %s using candlesticks()",
+                        len(candles),
+                        symbol,
+                    )
 
-                # If no data from candlesticks, try history_candlesticks_by_offset as fallback
-                if not candles:
-                    logger.info(f"No data from candlesticks(), trying history_candlesticks_by_offset()")
+                # Empty incremental results simply mean there is no newer bar.
+                # Only the initial/full path needs the offset fallback.
+                if not candles and not can_increment:
+                    logger.info(
+                        "No data from candlesticks(), trying history_candlesticks_by_offset()"
+                    )
                     candles = ctx.history_candlesticks_by_offset(
                         symbol,
                         period_enum,
@@ -165,6 +204,10 @@ def sync_history_candlesticks(
                     )
                     logger.info(f"Got {len(candles)} candles for {symbol} using history_candlesticks_by_offset()")
             except Exception as exc:
+                if continue_on_error:
+                    logger.warning("Failed to sync %s candlesticks: %s", symbol, exc)
+                    results[symbol] = 0
+                    continue
                 raise LongbridgeAPIError(f"{symbol}: {exc}") from exc
             inserted = store_candlesticks(symbol, candles, period)  # 传递 period 参数
             logger.info(f"Inserted {inserted} {period} records for {symbol}")

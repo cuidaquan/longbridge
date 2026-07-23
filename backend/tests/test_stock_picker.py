@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.ai_analyzer import DeepSeekAnalyzer, calculate_technical_indicators
 from app.routers.stock_picker import get_pools as get_pools_route
@@ -257,6 +257,191 @@ class StockPickerDirectionalScoreTest(unittest.TestCase):
 
         self.assertGreater(aligned, hold)
         self.assertGreater(hold, opposed)
+
+    def test_quant_fallback_does_not_double_count_ai_alignment(self) -> None:
+        score = {
+            "total": 70,
+            "trend_strength": 0.7,
+            "momentum_direction": "bullish",
+        }
+        disabled = self.service._calculate_recommendation_score_v2(
+            score,
+            {
+                "action": "BUY",
+                "confidence": 0.95,
+                "ai_status": "disabled",
+            },
+            "LONG",
+        )
+        fallback = self.service._calculate_recommendation_score_v2(
+            score,
+            {
+                "action": "BUY",
+                "confidence": 0.95,
+                "ai_status": "fallback",
+            },
+            "LONG",
+        )
+        available = self.service._calculate_recommendation_score_v2(
+            score,
+            {
+                "action": "BUY",
+                "confidence": 0.95,
+                "ai_status": "available",
+            },
+            "LONG",
+        )
+
+        self.assertEqual(disabled, fallback)
+        self.assertGreater(available, disabled)
+
+
+class StockPickerPerformanceFlowTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.service = StockPickerService()
+        self.klines = _trend_klines(1)
+
+    def test_pool_syncs_once_and_only_top_n_enters_ai(self) -> None:
+        stocks = [
+            {
+                "id": index,
+                "symbol": f"TEST{index}.US",
+                "pool_type": "LONG",
+            }
+            for index in range(1, 13)
+        ]
+        self.service.get_pools = MagicMock(
+            return_value={"long_pool": stocks, "short_pool": []}
+        )
+
+        def prepare(pool_id, symbol, pool_type, ai_creds, force_refresh, callback):
+            return {
+                "pool_id": pool_id,
+                "symbol": symbol,
+                "pool_type": pool_type,
+                "score": {"total": pool_id},
+            }
+
+        self.service._prepare_single_stock = MagicMock(side_effect=prepare)
+        ai_flags = {}
+
+        async def finalize(prepared, use_ai, progress_callback=None):
+            ai_flags[prepared["pool_id"]] = use_ai
+            return {"symbol": prepared["symbol"]}
+
+        self.service._finalize_prepared_analysis = AsyncMock(side_effect=finalize)
+
+        with (
+            patch(
+                "app.stock_picker.load_ai_credentials",
+                return_value={"DEEPSEEK_API_KEY": "test-key"},
+            ),
+            patch(
+                "app.services.sync_history_candlesticks",
+                return_value={stock["symbol"]: 1 for stock in stocks},
+            ) as sync_history,
+        ):
+            result = asyncio.run(self.service.analyze_pool("LONG"))
+
+        self.assertEqual(result["success"], 12)
+        sync_history.assert_called_once()
+        self.assertEqual(sync_history.call_args.kwargs["count"], 250)
+        self.assertTrue(sync_history.call_args.kwargs["incremental"])
+        self.assertEqual(
+            set(sync_history.call_args.kwargs["symbols"]),
+            {stock["symbol"] for stock in stocks},
+        )
+        self.assertEqual(
+            {pool_id for pool_id, uses_ai in ai_flags.items() if uses_ai},
+            set(range(3, 13)),
+        )
+        self.assertEqual(sum(ai_flags.values()), self.service.AI_TOP_N_PER_POOL)
+
+    def test_quant_only_result_cache_reuses_same_data_and_version(self) -> None:
+        saved_result = {"symbol": "TEST.US", "cached": True}
+        with (
+            patch(
+                "app.services.sync_history_candlesticks",
+                return_value={"TEST.US": 1},
+            ),
+            patch(
+                "app.stock_picker.get_cached_candlesticks",
+                return_value=self.klines,
+            ),
+            patch("app.stock_picker.load_ai_credentials", return_value={}),
+            patch.object(
+                self.service,
+                "_save_analysis_result",
+                return_value=saved_result,
+            ) as save_result,
+        ):
+            first = asyncio.run(
+                self.service._analyze_single_stock(1, "TEST.US", "LONG")
+            )
+            second = asyncio.run(
+                self.service._analyze_single_stock(1, "TEST.US", "LONG")
+            )
+
+        self.assertEqual(first, saved_result)
+        self.assertEqual(second, saved_result)
+        save_result.assert_called_once()
+
+    def test_cache_key_changes_when_current_daily_bar_changes(self) -> None:
+        first_bars = [dict(bar) for bar in self.klines]
+        second_bars = [dict(bar) for bar in self.klines]
+        first_bars[-1]["ts"] = "2026-07-23T00:00:00"
+        second_bars[-1]["ts"] = "2026-07-23T00:00:00"
+        second_bars[-1]["close"] += 1
+
+        first_key = self.service._build_cache_key(
+            1,
+            "TEST.US",
+            "LONG",
+            first_bars,
+            {},
+            "quant",
+        )
+        second_key = self.service._build_cache_key(
+            1,
+            "TEST.US",
+            "LONG",
+            second_bars,
+            {},
+            "quant",
+        )
+
+        self.assertNotEqual(first_key, second_key)
+
+    def test_ai_skipped_result_is_explicitly_marked(self) -> None:
+        score = self.service._calculate_advanced_score_v2(self.klines, "LONG")
+        indicators = calculate_technical_indicators(self.klines)
+        prepared = {
+            "pool_id": 1,
+            "symbol": "TEST.US",
+            "pool_type": "LONG",
+            "klines": self.klines,
+            "indicators": indicators,
+            "score": score,
+            "ai_creds": {"DEEPSEEK_API_KEY": "test-key"},
+            "force_refresh": True,
+        }
+
+        with (
+            patch("app.ai_analyzer.DeepSeekAnalyzer") as analyzer,
+            patch.object(
+                self.service,
+                "_save_analysis_result",
+                return_value={},
+            ) as save_result,
+        ):
+            asyncio.run(
+                self.service._finalize_prepared_analysis(prepared, use_ai=False)
+            )
+
+        analyzer.assert_not_called()
+        analysis = save_result.call_args.kwargs["analysis"]
+        self.assertEqual(analysis["ai_status"], "skipped")
+        self.assertIn("未进入AI深度分析", analysis["reasoning"][0])
 
 
 class StockPickerUnifiedAnalysisTest(unittest.TestCase):

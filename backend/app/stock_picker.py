@@ -23,9 +23,15 @@ logger = logging.getLogger(__name__)
 
 class StockPickerService:
     """智能选股服务"""
+
+    ANALYSIS_LOOKBACK = 250
+    AI_TOP_N_PER_POOL = 10
+    SCORE_VERSION = "stock-picker-v2.1"
+    PROMPT_VERSION = "stock-picker-v2"
+    AI_MODEL = "deepseek-chat"
     
     def __init__(self):
-        self.cache = {}  # 简单缓存
+        self.cache: Dict[Tuple, Dict] = {}
         self.cache_duration = 300  # 5分钟
     
     # ========== 股票池管理 ==========
@@ -76,6 +82,7 @@ class StockPickerService:
         """移除股票"""
         with get_connection() as conn:
             conn.execute("DELETE FROM stock_picker_pools WHERE id = ?", (pool_id,))
+        self._remove_cache_entries(lambda key: key[0] == pool_id)
     
     def clear_pool(self, pool_type: str) -> int:
         """清空指定类型的股票池（🔥 同时清理历史分析结果）"""
@@ -99,13 +106,19 @@ class StockPickerService:
             conn.execute("DELETE FROM stock_picker_pools WHERE pool_type = ?", (pool_type,))
             
             # 🧹 清理内存缓存
-            cache_keys_to_remove = [k for k in self.cache.keys() if k.endswith(f"_{pool_type}")]
-            for key in cache_keys_to_remove:
-                del self.cache[key]
+            cache_keys_to_remove = self._remove_cache_entries(
+                lambda key: key[2] == pool_type
+            )
             logger.info(f"🧹 清理缓存: {len(cache_keys_to_remove)}条")
             
             logger.info(f"✅ 清空股票池: {pool_type} - {count}只股票")
             return count
+
+    def _remove_cache_entries(self, predicate) -> List[Tuple]:
+        keys = [key for key in self.cache if predicate(key)]
+        for key in keys:
+            del self.cache[key]
+        return keys
     
     def toggle_active(self, pool_id: int):
         """切换激活状态"""
@@ -187,40 +200,126 @@ class StockPickerService:
                 'log': f'开始分析 {total_count} 只股票...'
             })
         
-        # 并发分析（限制并发数避免API限流）
+        ai_creds = load_ai_credentials()
+        api_key = ai_creds.get('DEEPSEEK_API_KEY')
+
+        # 先用同一个 QuoteContext 批量增量同步，避免每只股票重复建连。
+        if all_stocks:
+            symbols = list(dict.fromkeys(stock['symbol'] for stock, _ in all_stocks))
+            try:
+                from .services import sync_history_candlesticks
+
+                if progress_callback:
+                    progress_callback({'log': f'📥 增量同步 {len(symbols)} 只股票日 K...'})
+                sync_result = await asyncio.to_thread(
+                    sync_history_candlesticks,
+                    symbols=symbols,
+                    period='day',
+                    count=self.ANALYSIS_LOOKBACK,
+                    incremental=not force_refresh,
+                    continue_on_error=True,
+                )
+                synced_count = sum(1 for count in sync_result.values() if count > 0)
+                if progress_callback:
+                    progress_callback({
+                        'log': f'📥 行情同步完成: {synced_count}/{len(symbols)} 只有更新'
+                    })
+            except Exception as exc:
+                # 同步失败时仍允许使用数据库已有数据完成量化分析。
+                logger.warning("⚠️ 批量同步日 K 失败，尝试使用本地数据: %s", exc)
+                if progress_callback:
+                    progress_callback({'log': f'⚠️ 行情同步失败，使用本地数据: {exc}'})
+
+        prepared_items = []
         results = []
         completed_count = 0
-        semaphore = asyncio.Semaphore(5)  # 最多5个并发
-        
-        async def analyze_with_limit(stock, ptype):
+
+        def report_completed(symbol: str, message: str) -> None:
             nonlocal completed_count
-            async with semaphore:
-                symbol = stock['symbol']
+            completed_count += 1
+            if progress_callback:
+                progress_callback({
+                    'completed': completed_count,
+                    'log': f'{message}: {symbol} ({completed_count}/{total_count})'
+                })
+
+        # 第一阶段只计算量化分，并检查与最新 K 线绑定的结果缓存。
+        for stock, ptype in all_stocks:
+            symbol = stock['symbol']
+            try:
                 if progress_callback:
                     progress_callback({
                         'current': symbol,
-                        'log': f'正在分析: {symbol}'
+                        'log': f'📊 量化初筛: {symbol}'
                     })
-                
-                result = await self._analyze_single_stock(
-                    stock['id'], 
-                    symbol, 
+                prepared = self._prepare_single_stock(
+                    stock['id'],
+                    symbol,
                     ptype,
+                    ai_creds,
                     force_refresh,
-                    progress_callback  # 传递回调函数
+                    progress_callback,
                 )
-                
-                completed_count += 1
-                if progress_callback:
-                    progress_callback({
-                        'completed': completed_count,
-                        'log': f'完成: {symbol} ({completed_count}/{total_count})'
-                    })
-                
-                return result
-        
-        tasks = [analyze_with_limit(stock, ptype) for stock, ptype in all_stocks]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+                if prepared is None:
+                    results.append(None)
+                    report_completed(symbol, '⏭️ 跳过')
+                elif prepared.get('cached_result') is not None:
+                    results.append(prepared['cached_result'])
+                    report_completed(symbol, '📋 使用缓存')
+                else:
+                    prepared_items.append(prepared)
+            except Exception as exc:
+                logger.error("❌ 量化初筛失败: %s - %s", symbol, exc)
+                results.append(exc)
+                report_completed(symbol, '❌ 失败')
+
+        # 第二阶段仅让每个方向量化排名前 N 的未缓存股票进入新闻和 AI。
+        ai_pool_ids = set()
+        if api_key:
+            for ptype in ('LONG', 'SHORT'):
+                ranked = sorted(
+                    (item for item in prepared_items if item['pool_type'] == ptype),
+                    key=lambda item: item['score']['total'],
+                    reverse=True,
+                )
+                ai_pool_ids.update(
+                    item['pool_id'] for item in ranked[:self.AI_TOP_N_PER_POOL]
+                )
+            if progress_callback:
+                progress_callback({
+                    'log': (
+                        f'🤖 量化初筛完成: {len(prepared_items)} 只待计算，'
+                        f'{len(ai_pool_ids)} 只进入 AI 深度分析'
+                    )
+                })
+
+        semaphore = asyncio.Semaphore(5)
+
+        async def finalize_with_limit(prepared: Dict):
+            symbol = prepared['symbol']
+            async with semaphore:
+                try:
+                    if progress_callback:
+                        stage = 'AI 深度分析' if prepared['pool_id'] in ai_pool_ids else '量化结论'
+                        progress_callback({
+                            'current': symbol,
+                            'log': f'{"🤖" if prepared["pool_id"] in ai_pool_ids else "📊"} {stage}: {symbol}'
+                        })
+                    result = await self._finalize_prepared_analysis(
+                        prepared,
+                        use_ai=prepared['pool_id'] in ai_pool_ids,
+                        progress_callback=progress_callback,
+                    )
+                except Exception:
+                    report_completed(symbol, '❌ 失败')
+                    raise
+                else:
+                    report_completed(symbol, '✅ 完成')
+                    return result
+
+        tasks = [finalize_with_limit(item) for item in prepared_items]
+        if tasks:
+            results.extend(await asyncio.gather(*tasks, return_exceptions=True))
         
         # 统计成功、失败、跳过
         success_count = sum(1 for r in results if r is not None and not isinstance(r, Exception))
@@ -250,147 +349,280 @@ class StockPickerService:
         force_refresh: bool = False,
         progress_callback: Optional[callable] = None
     ) -> Dict:
-        """分析单只股票"""
-        
-        # 1. 检查缓存
-        cache_key = f"{symbol}_{pool_type}"
-        if not force_refresh and cache_key in self.cache:
-            cached = self.cache[cache_key]
-            if datetime.now() - cached['time'] < timedelta(seconds=self.cache_duration):
-                logger.info(f"📋 使用缓存: {symbol}")
-                return cached['data']
-        
+        """分析单只股票；批量入口会复用同一行情连接。"""
         try:
             logger.info(f"🔍 开始分析: {symbol}")
-            
-            # 2. 先同步K线数据（调用API）- 在线程池中执行避免阻塞
+
             from .services import sync_history_candlesticks
-            kline_count = 0
             try:
                 if progress_callback:
                     progress_callback({'log': f'📥 同步K线: {symbol}...'})
-                
+
                 sync_result = await asyncio.to_thread(
                     sync_history_candlesticks,
                     symbols=[symbol],
                     period='day',
-                    count=1000  # ⬆️ 增加到1000条K线
+                    count=self.ANALYSIS_LOOKBACK,
+                    incremental=not force_refresh,
+                    continue_on_error=True,
                 )
                 kline_count = sync_result.get(symbol, 0)
                 logger.info(f"📥 同步K线: {symbol} - {kline_count}条")
-                
                 if progress_callback:
                     progress_callback({'log': f'📥 同步K线: {symbol} - {kline_count}条'})
             except Exception as e:
                 logger.warning(f"⚠️ 同步K线失败: {symbol} - {e}")
                 if progress_callback:
                     progress_callback({'log': f'⚠️ 同步K线失败: {symbol} - {e}'})
-            
-            # 3. 获取K线数据（从缓存读取）
-            klines = get_cached_candlesticks(symbol, limit=1000)  # ⬆️ 获取1000条K线
-            if not klines or len(klines) < 30:
-                # 无法获取K线，直接跳过此股票
-                logger.warning(f"⏭️ 跳过: {symbol} - K线数据不足({len(klines) if klines else 0}条)")
-                if progress_callback:
-                    progress_callback({'log': f'⏭️ 跳过: {symbol} - K线数据不足({len(klines) if klines else 0}条)'})
-                return None  # 返回None表示跳过
-            
-            # 3. 构建统一技术快照，并按配置执行 DeepSeek 深度分析。
-            from .ai_analyzer import DeepSeekAnalyzer, calculate_technical_indicators
-            
-            # 获取AI凭据（使用正确的函数）
-            ai_creds = load_ai_credentials()
-            api_key = ai_creds.get('DEEPSEEK_API_KEY')
-            base_url = ai_creds.get('DEEPSEEK_BASE_URL', 'https://api.deepseek.com')
-            tavily_api_key = ai_creds.get('TAVILY_API_KEY')  # ⬆️ 获取Tavily API Key
-            
-            indicators = calculate_technical_indicators(klines)
-            v2_score = self._calculate_advanced_score_v2(klines, pool_type)
-            indicators.update({
-                'trend_strength': v2_score.get('trend_strength', 0.5),
-                'momentum_direction': v2_score.get('momentum_direction', 'neutral'),
-            })
-            
-            if not api_key:
-                logger.warning(f"⚠️ 未配置DeepSeek API，使用V2量化评分: {symbol}")
-                analysis = self._build_quant_analysis(
-                    v2_score,
-                    indicators,
-                    pool_type,
-                    ai_status='disabled',
-                )
-            else:
-                # 使用DeepSeek AI分析（集成Tavily搜索）
-                logger.info(f"🤖 DeepSeek分析: {symbol} (搜索引擎: {'✅' if tavily_api_key else '❌'})")
-                if progress_callback:
-                    progress_callback({'log': f'🤖 DeepSeek分析: {symbol}...'})
-                
-                analyzer = DeepSeekAnalyzer(
-                    api_key=api_key, 
-                    base_url=base_url,
-                    tavily_api_key=tavily_api_key  # ⬆️ 传递Tavily API Key
-                )
-                
-                # 调用AI分析（在线程池中执行，避免阻塞事件循环）
-                analysis = await asyncio.to_thread(
-                    analyzer.analyze_trading_opportunity,
-                    symbol=symbol,
-                    klines=klines,
-                    scenario="buy_focus" if pool_type == 'LONG' else "sell_focus",
-                    technical_indicators=indicators,
-                    quant_score=v2_score,
-                )
 
-                if analysis.get('error'):
-                    ai_error = analysis['error']
-                    logger.warning(f"⚠️ AI分析失败，回退到量化结论: {symbol} - {ai_error}")
-                    analysis = self._build_quant_analysis(
-                        v2_score,
-                        indicators,
-                        pool_type,
-                        ai_status='fallback',
-                        ai_error=ai_error,
-                    )
-                
-                logger.info(f"🤖 AI决策: {symbol} - {analysis['action']} (信心度: {analysis['confidence']:.2f}, V2评分: {v2_score['total']:.1f})")
-                if progress_callback:
-                    progress_callback({'log': f"🤖 AI决策: {symbol} - {analysis['action']} (信心度: {analysis['confidence']:.2f}, V2评分: {v2_score['total']:.1f})"})
-            
-            # 4. 计算推荐度 - ⬆️ V2.0: 使用新的推荐度算法
-            recommendation_score = self._calculate_recommendation_score_v2(
-                v2_score, analysis, pool_type
+            ai_creds = load_ai_credentials()
+            prepared = self._prepare_single_stock(
+                pool_id,
+                symbol,
+                pool_type,
+                ai_creds,
+                force_refresh,
+                progress_callback,
             )
-            
-            recommendation_reason = self._generate_recommendation_reason(
-                analysis, pool_type, recommendation_score
+            if prepared is None:
+                return None
+            if prepared.get('cached_result') is not None:
+                return prepared['cached_result']
+            return await self._finalize_prepared_analysis(
+                prepared,
+                use_ai=bool(ai_creds.get('DEEPSEEK_API_KEY')),
+                progress_callback=progress_callback,
             )
-            
-            # 5. 保存结果
-            result = self._save_analysis_result(
-                pool_id=pool_id,
-                symbol=symbol,
-                pool_type=pool_type,
-                klines=klines,
-                analysis=analysis,
-                recommendation_score=recommendation_score,
-                recommendation_reason=recommendation_reason
-            )
-            
-            # 6. 更新缓存
-            self.cache[cache_key] = {
-                'time': datetime.now(),
-                'data': result
-            }
-            
-            logger.info(
-                f"✅ 分析完成: {symbol} - 评分: {analysis.get('score', {}).get('total', 0):.1f}, "
-                f"推荐度: {recommendation_score:.1f}"
-            )
-            return result
-            
         except Exception as e:
             logger.error(f"❌ 分析失败: {symbol} - {e}")
             raise
+
+    def _prepare_single_stock(
+        self,
+        pool_id: int,
+        symbol: str,
+        pool_type: str,
+        ai_creds: Dict,
+        force_refresh: bool,
+        progress_callback: Optional[callable] = None,
+    ) -> Optional[Dict]:
+        """Load local bars, check the versioned cache, and calculate quant factors."""
+        from .ai_analyzer import calculate_technical_indicators
+
+        klines = get_cached_candlesticks(
+            symbol,
+            limit=self.ANALYSIS_LOOKBACK,
+        )
+        if not klines or len(klines) < 30:
+            logger.warning(
+                "⏭️ 跳过: %s - K线数据不足(%s条)",
+                symbol,
+                len(klines) if klines else 0,
+            )
+            if progress_callback:
+                progress_callback({
+                    'log': f'⏭️ 跳过: {symbol} - K线数据不足({len(klines) if klines else 0}条)'
+                })
+            return None
+
+        # Without AI the analysis depth is known before ranking, so the final
+        # quant-only result can be reused immediately. With AI enabled, defer
+        # the lookup until Top N selection decides between "ai" and "quant".
+        if not ai_creds.get('DEEPSEEK_API_KEY'):
+            cache_key = self._build_cache_key(
+                pool_id,
+                symbol,
+                pool_type,
+                klines,
+                ai_creds,
+                analysis_mode='quant',
+            )
+            cached_result = self._get_cached_result(cache_key, force_refresh)
+            if cached_result is not None:
+                logger.info("📋 使用版本化缓存: %s", symbol)
+                return {
+                    'pool_id': pool_id,
+                    'symbol': symbol,
+                    'pool_type': pool_type,
+                    'cached_result': cached_result,
+                }
+
+        indicators = calculate_technical_indicators(klines)
+        score = self._calculate_advanced_score_v2(klines, pool_type)
+        indicators.update({
+            'trend_strength': score.get('trend_strength', 0.5),
+            'momentum_direction': score.get('momentum_direction', 'neutral'),
+        })
+        return {
+            'pool_id': pool_id,
+            'symbol': symbol,
+            'pool_type': pool_type,
+            'klines': klines,
+            'indicators': indicators,
+            'score': score,
+            'ai_creds': ai_creds,
+            'force_refresh': force_refresh,
+        }
+
+    def _build_cache_key(
+        self,
+        pool_id: int,
+        symbol: str,
+        pool_type: str,
+        klines: List[Dict],
+        ai_creds: Dict,
+        analysis_mode: str,
+    ) -> Tuple:
+        latest = klines[-1]
+        latest_marker = latest.get('ts')
+        if isinstance(latest_marker, datetime):
+            latest_marker = latest_marker.isoformat()
+        latest_marker = (
+            f"{latest_marker or len(klines)}:{latest.get('open', 0)}:"
+            f"{latest.get('high', 0)}:{latest.get('low', 0)}:"
+            f"{latest.get('close', 0)}:{latest.get('volume', 0)}"
+        )
+        return (
+            pool_id,
+            symbol,
+            pool_type,
+            str(latest_marker),
+            self.SCORE_VERSION,
+            self.AI_MODEL if ai_creds.get('DEEPSEEK_API_KEY') else 'quant-only',
+            self.PROMPT_VERSION,
+            bool(ai_creds.get('TAVILY_API_KEY')),
+            analysis_mode,
+        )
+
+    def _get_cached_result(
+        self,
+        cache_key: Tuple,
+        force_refresh: bool,
+    ) -> Optional[Dict]:
+        if force_refresh:
+            return None
+        cached = self.cache.get(cache_key)
+        if not cached:
+            return None
+        if datetime.now() - cached['time'] < timedelta(seconds=self.cache_duration):
+            return cached['data']
+        del self.cache[cache_key]
+        return None
+
+    async def _finalize_prepared_analysis(
+        self,
+        prepared: Dict,
+        use_ai: bool,
+        progress_callback: Optional[callable] = None,
+    ) -> Dict:
+        """Optionally enrich a quant result with AI, then persist and cache it."""
+        from .ai_analyzer import DeepSeekAnalyzer
+
+        symbol = prepared['symbol']
+        pool_type = prepared['pool_type']
+        score = prepared['score']
+        indicators = prepared['indicators']
+        klines = prepared['klines']
+        ai_creds = prepared['ai_creds']
+        api_key = ai_creds.get('DEEPSEEK_API_KEY')
+        tavily_api_key = ai_creds.get('TAVILY_API_KEY')
+        analysis_mode = 'ai' if use_ai and api_key else 'quant'
+        cache_key = self._build_cache_key(
+            prepared['pool_id'],
+            symbol,
+            pool_type,
+            klines,
+            ai_creds,
+            analysis_mode=analysis_mode,
+        )
+        cached_result = self._get_cached_result(
+            cache_key,
+            prepared.get('force_refresh', False),
+        )
+        if cached_result is not None:
+            logger.info("📋 使用版本化缓存: %s (%s)", symbol, analysis_mode)
+            return cached_result
+
+        if use_ai and api_key:
+            logger.info(
+                "🤖 DeepSeek分析: %s (搜索引擎: %s)",
+                symbol,
+                '✅' if tavily_api_key else '❌',
+            )
+            if progress_callback:
+                progress_callback({'log': f'🤖 DeepSeek分析: {symbol}...'})
+            analyzer = DeepSeekAnalyzer(
+                api_key=api_key,
+                model=self.AI_MODEL,
+                base_url=ai_creds.get(
+                    'DEEPSEEK_BASE_URL',
+                    'https://api.deepseek.com',
+                ),
+                tavily_api_key=tavily_api_key,
+            )
+            analysis = await asyncio.to_thread(
+                analyzer.analyze_trading_opportunity,
+                symbol=symbol,
+                klines=klines,
+                scenario="buy_focus" if pool_type == 'LONG' else "sell_focus",
+                technical_indicators=indicators,
+                quant_score=score,
+            )
+            if analysis.get('error'):
+                ai_error = analysis['error']
+                logger.warning(
+                    "⚠️ AI分析失败，回退到量化结论: %s - %s",
+                    symbol,
+                    ai_error,
+                )
+                analysis = self._build_quant_analysis(
+                    score,
+                    indicators,
+                    pool_type,
+                    ai_status='fallback',
+                    ai_error=ai_error,
+                )
+        else:
+            ai_status = 'disabled' if not api_key else 'skipped'
+            if ai_status == 'disabled':
+                logger.warning("⚠️ 未配置DeepSeek API，使用V2量化评分: %s", symbol)
+            analysis = self._build_quant_analysis(
+                score,
+                indicators,
+                pool_type,
+                ai_status=ai_status,
+            )
+
+        recommendation_score = self._calculate_recommendation_score_v2(
+            score,
+            analysis,
+            pool_type,
+        )
+        recommendation_reason = self._generate_recommendation_reason(
+            analysis,
+            pool_type,
+            recommendation_score,
+        )
+        result = self._save_analysis_result(
+            pool_id=prepared['pool_id'],
+            symbol=symbol,
+            pool_type=pool_type,
+            klines=klines,
+            analysis=analysis,
+            recommendation_score=recommendation_score,
+            recommendation_reason=recommendation_reason,
+        )
+        self.cache[cache_key] = {
+            'time': datetime.now(),
+            'data': result,
+        }
+        logger.info(
+            "✅ 分析完成: %s - 评分: %.1f, 推荐度: %.1f",
+            symbol,
+            score.get('total', 0),
+            recommendation_score,
+        )
+        return result
     
     def _determine_action(self, score: Dict, pool_type: str) -> str:
         """根据评分确定行动"""
@@ -535,10 +767,12 @@ class StockPickerService:
         grade = analysis.get('score', {}).get('grade', 'C')
         confidence = analysis.get('confidence', 0.5)
         action = analysis.get('action', 'HOLD')
+        ai_available = analysis.get('ai_status', 'available') == 'available'
         
         if pool_type == 'LONG':
             if recommendation_score >= 80:
-                return f"强烈推荐买入：{grade}级评分 + 信心度{confidence:.0%} + AI建议{action}"
+                source = f"AI建议{action}" if ai_available else f"量化建议{action}"
+                return f"强烈推荐买入：{grade}级评分 + 信心度{confidence:.0%} + {source}"
             elif recommendation_score >= 65:
                 return f"推荐买入：{grade}级评分 + 信心度{confidence:.0%}"
             elif recommendation_score >= 50:
@@ -1312,6 +1546,8 @@ class StockPickerService:
         reasoning = list(score.get('signals', []))[:8]
         if ai_status == 'disabled':
             reasoning.insert(0, "AI未配置，当前结论来自统一量化评分")
+        elif ai_status == 'skipped':
+            reasoning.insert(0, "量化初筛未进入AI深度分析，当前结论来自统一量化评分")
         elif ai_error:
             reasoning.insert(0, f"AI分析不可用，已回退到量化结论: {ai_error}")
 
@@ -1389,13 +1625,19 @@ class StockPickerService:
         trend_strength = score_result.get('trend_strength', 0.5)
         ai_confidence = 0.5
         ai_action = "HOLD"
+        ai_status = "available"
         if ai_analysis:
             ai_confidence = ai_analysis.get('confidence', 0.5)
             ai_action = ai_analysis.get('action', 'HOLD')
+            ai_status = ai_analysis.get('ai_status', 'available')
         
         expected_action = "BUY" if pool_type == "LONG" else "SELL"
         opposite_action = "SELL" if pool_type == "LONG" else "BUY"
-        if ai_action == expected_action:
+        if ai_status != "available":
+            # No independent AI opinion: keep the component neutral instead of
+            # counting the quant signal for a second time.
+            ai_alignment = 0.5
+        elif ai_action == expected_action:
             ai_alignment = ai_confidence
         elif ai_action == "HOLD":
             ai_alignment = 0.5 * (1 - ai_confidence)
