@@ -15,6 +15,7 @@ from ..stock_picker import get_stock_picker_service
 from ..exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
 from ..models import SecuritySearchResponse
 from ..security_catalog import get_security_catalog_service
+from ..stock_picker_backtest import get_stock_picker_backtest_service
 from ..stock_screener import get_stock_screener_service
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,26 @@ class ScreenerImportRequest(BaseModel):
     strategy_id: int = Field(gt=0)
     strategy_name: str = Field(min_length=1, max_length=200)
     items: List[ScreenerImportItem] = Field(min_length=1, max_length=100)
+
+
+class StockPickerBacktestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pool_type: Literal["LONG", "SHORT"]
+    symbols: Optional[List[str]] = Field(default=None, max_length=100)
+    horizons: List[int] = Field(
+        default_factory=lambda: [5, 10, 20],
+        min_length=1,
+        max_length=10,
+    )
+    lookback: int = Field(default=250, ge=30, le=5000)
+    max_bars: int = Field(default=1000, ge=30, le=5000)
+    min_history: int = Field(default=60, ge=30, le=5000)
+    step: int = Field(default=5, ge=1, le=60)
+    top_n: int = Field(default=5, ge=1, le=100)
+    train_ratio: float = Field(default=0.7, ge=0.5, le=0.9)
+    walk_forward_folds: int = Field(default=3, ge=1, le=10)
+    transaction_cost_bps: float = Field(default=10, ge=0, le=1000)
 
 
 def _utc_now() -> datetime:
@@ -337,6 +358,46 @@ async def import_screener_candidates(request: ScreenerImportRequest):
         "total": len(request.items),
         "success_count": len(success),
     }
+
+
+@router.post("/backtest")
+async def run_stock_picker_backtest(request: StockPickerBacktestRequest):
+    try:
+        return await asyncio.to_thread(
+            get_stock_picker_backtest_service().run,
+            pool_type=request.pool_type,
+            symbols=request.symbols,
+            horizons=request.horizons,
+            lookback=request.lookback,
+            max_bars=request.max_bars,
+            min_history=request.min_history,
+            step=request.step,
+            top_n=request.top_n,
+            train_ratio=request.train_ratio,
+            walk_forward_folds=request.walk_forward_folds,
+            transaction_cost_bps=request.transaction_cost_bps,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("运行智能选股回测失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/backtests")
+async def get_stock_picker_backtests(
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    try:
+        return {
+            "items": await asyncio.to_thread(
+                get_stock_picker_backtest_service().get_history,
+                limit,
+            )
+        }
+    except Exception as exc:
+        logger.error("获取智能选股回测历史失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/pools")

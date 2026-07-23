@@ -197,6 +197,94 @@ export interface AnalysisResponse {
   };
 }
 
+export interface StockPickerBacktestHorizonMetrics {
+  sample_count: number;
+  avg_gross_return: number | null;
+  avg_net_return: number | null;
+  median_net_return: number | null;
+  hit_rate: number | null;
+  avg_excess_return: number | null;
+  excess_coverage: number;
+  estimated_cost_sum: number;
+  max_drawdown: number | null;
+}
+
+export interface StockPickerBacktestSampleMetrics {
+  sample_count: number;
+  avg_score: number | null;
+  horizons: Record<string, StockPickerBacktestHorizonMetrics>;
+}
+
+export interface StockPickerBacktestPeriod {
+  signal_start: string | null;
+  signal_end: string | null;
+  signal_dates: number;
+  all: StockPickerBacktestSampleMetrics;
+  top_n: StockPickerBacktestSampleMetrics;
+}
+
+export interface StockPickerBacktestReport {
+  id?: number;
+  score_version: string;
+  pool_type: 'LONG' | 'SHORT';
+  parameters: {
+    symbols: string[];
+    horizons: number[];
+    lookback: number;
+    max_bars: number;
+    min_history: number;
+    step: number;
+    top_n: number;
+    train_ratio: number;
+    walk_forward_folds: number;
+    transaction_cost_bps: number;
+    market_benchmarks: Record<string, string>;
+  };
+  data: {
+    signal_start: string;
+    signal_end: string;
+    data_as_of: string;
+    symbols_requested: number;
+    symbols_evaluated: number;
+    skipped_symbols: Record<string, string>;
+    sample_count: number;
+    top_n_sample_count: number;
+    benchmark_coverage: number;
+  };
+  periods: {
+    train: StockPickerBacktestPeriod;
+    validation: StockPickerBacktestPeriod;
+    all: StockPickerBacktestPeriod;
+  };
+  walk_forward: Array<{
+    fold: number;
+    train_start: string | null;
+    train_end: string | null;
+    validation_start: string;
+    validation_end: string;
+    train_metrics: StockPickerBacktestPeriod;
+    validation_metrics: StockPickerBacktestPeriod;
+  }>;
+  methodology: {
+    no_lookahead: string;
+    directional_return: string;
+    top_n: string;
+    transaction_cost: string;
+    industry_or_market_calibration: string;
+    overlap_warning: string;
+  };
+}
+
+export interface StockPickerBacktestHistoryItem {
+  id: number;
+  created_at: string;
+  pool_type: 'LONG' | 'SHORT';
+  score_version: string;
+  parameters: StockPickerBacktestReport['parameters'];
+  result: Omit<StockPickerBacktestReport, 'id' | 'parameters'>;
+  data_as_of: string | null;
+}
+
 export interface StockPickerConfig {
   auto_refresh_enabled: boolean;
   auto_refresh_interval: number;
@@ -336,6 +424,57 @@ export async function importScreenerCandidates(params: {
   if (!response.ok) {
     const error = await response.json().catch(() => null);
     throw new Error(error?.detail || '导入候选股票失败');
+  }
+  return response.json();
+}
+
+export async function runStockPickerBacktest(params: {
+  poolType: 'LONG' | 'SHORT';
+  symbols?: string[];
+  horizons?: number[];
+  lookback?: number;
+  maxBars?: number;
+  minHistory?: number;
+  step?: number;
+  topN?: number;
+  trainRatio?: number;
+  walkForwardFolds?: number;
+  transactionCostBps?: number;
+}): Promise<StockPickerBacktestReport> {
+  const response = await fetch(`${API_BASE}/api/stock-picker/backtest`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      pool_type: params.poolType,
+      symbols: params.symbols,
+      horizons: params.horizons ?? [5, 10, 20],
+      lookback: params.lookback ?? 250,
+      max_bars: params.maxBars ?? 1000,
+      min_history: params.minHistory ?? 60,
+      step: params.step ?? 5,
+      top_n: params.topN ?? 5,
+      train_ratio: params.trainRatio ?? 0.7,
+      walk_forward_folds: params.walkForwardFolds ?? 3,
+      transaction_cost_bps: params.transactionCostBps ?? 10,
+    }),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '运行智能选股回测失败');
+  }
+  return response.json();
+}
+
+export async function getStockPickerBacktests(
+  limit = 20,
+): Promise<{ items: StockPickerBacktestHistoryItem[] }> {
+  const queryParams = new URLSearchParams({ limit: String(limit) });
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/backtests?${queryParams.toString()}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取智能选股回测历史失败');
   }
   return response.json();
 }

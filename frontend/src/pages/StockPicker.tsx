@@ -42,6 +42,8 @@ import {
   getScreenerStrategies,
   searchScreenerCandidates,
   importScreenerCandidates,
+  runStockPickerBacktest,
+  getStockPickerBacktests,
   type Stock,
   type Analysis,
   type PoolsResponse,
@@ -53,6 +55,8 @@ import {
   type ScreenerCandidate,
   type ScreenerSearchResponse,
   type ScreenerIndexFilters,
+  type StockPickerBacktestReport,
+  type StockPickerBacktestHistoryItem,
 } from '../api/stockPicker';
 import { API_BASE } from '../api/client';
 
@@ -63,6 +67,7 @@ export default function StockPicker() {
   const [analyzing, setAnalyzing] = useState(false);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showDiscoveryDialog, setShowDiscoveryDialog] = useState(false);
+  const [showBacktestDialog, setShowBacktestDialog] = useState(false);
   const [addDialogType, setAddDialogType] = useState<'LONG' | 'SHORT'>('LONG');
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -214,6 +219,13 @@ export default function StockPicker() {
         icon={<FilterList />}
         actions={
           <div className="flex gap-2">
+            <Button
+              variant="secondary"
+              onClick={() => setShowBacktestDialog(true)}
+              icon={<Analytics className="w-4 h-4" />}
+            >
+              回测评估
+            </Button>
             <Button
               variant="secondary"
               onClick={() => setShowDiscoveryDialog(true)}
@@ -388,6 +400,10 @@ export default function StockPicker() {
             }
           }}
         />
+      )}
+
+      {showBacktestDialog && (
+        <StockPickerBacktestDialog onClose={() => setShowBacktestDialog(false)} />
       )}
     </div>
   );
@@ -738,6 +754,291 @@ function ScoreRow({ label, value, max }: { label: string; value: number; max: nu
       <span className="text-xs font-medium text-slate-600 dark:text-slate-400 w-12 text-right">
         {value.toFixed(0)}/{max}
       </span>
+    </div>
+  );
+}
+
+function StockPickerBacktestDialog({ onClose }: { onClose: () => void }) {
+  const [poolType, setPoolType] = useState<'LONG' | 'SHORT'>('LONG');
+  const [topN, setTopN] = useState(5);
+  const [transactionCostBps, setTransactionCostBps] = useState(10);
+  const [step, setStep] = useState(5);
+  const [running, setRunning] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(true);
+  const [history, setHistory] = useState<StockPickerBacktestHistoryItem[]>([]);
+  const [report, setReport] = useState<StockPickerBacktestReport | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getStockPickerBacktests(5)
+      .then((response) => {
+        if (!cancelled) setHistory(response.items);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : '获取回测历史失败');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingHistory(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const runBacktest = async () => {
+    setRunning(true);
+    setError(null);
+    try {
+      const result = await runStockPickerBacktest({
+        poolType,
+        topN,
+        transactionCostBps,
+        step,
+      });
+      setReport(result);
+      setHistory((current) => [
+        {
+          id: result.id || 0,
+          created_at: new Date().toISOString(),
+          pool_type: result.pool_type,
+          score_version: result.score_version,
+          parameters: result.parameters,
+          result: {
+            score_version: result.score_version,
+            pool_type: result.pool_type,
+            data: result.data,
+            periods: result.periods,
+            walk_forward: result.walk_forward,
+            methodology: result.methodology,
+          },
+          data_as_of: result.data.data_as_of,
+        },
+        ...current.filter((item) => item.id !== result.id),
+      ].slice(0, 5));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '回测评估失败');
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const openHistory = (item: StockPickerBacktestHistoryItem) => {
+    setPoolType(item.pool_type);
+    setTopN(item.parameters.top_n);
+    setTransactionCostBps(item.parameters.transaction_cost_bps);
+    setStep(item.parameters.step);
+    setReport({
+      ...item.result,
+      id: item.id,
+      parameters: item.parameters,
+    });
+    setError(null);
+  };
+
+  const formatPercent = (value: number | null | undefined) => (
+    value == null ? '-' : `${(value * 100).toFixed(2)}%`
+  );
+  const validation = report?.periods.validation;
+  const overlap = report
+    ? report.parameters.step < Math.max(...report.parameters.horizons)
+    : false;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="max-h-[calc(100vh-2rem)] w-full max-w-4xl overflow-y-auto rounded-xl bg-white p-6 shadow-2xl dark:bg-slate-800">
+        <div className="mb-5 flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-bold text-slate-900 dark:text-white">
+              智能选股回测评估
+            </h3>
+            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+              固定当前评分版本，按时间切分评估未来 5/10/20 个交易日方向收益。
+            </p>
+          </div>
+          <button
+            aria-label="关闭回测评估弹窗"
+            onClick={onClose}
+            className="rounded p-1 hover:bg-slate-100 dark:hover:bg-slate-700"
+          >
+            <Close className="h-5 w-5 text-slate-500" />
+          </button>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <div>
+            <span className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-300">
+              评估方向
+            </span>
+            <div className="grid grid-cols-2 gap-2">
+              {(['LONG', 'SHORT'] as const).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  disabled={running}
+                  onClick={() => setPoolType(value)}
+                  className={`rounded-lg border px-3 py-2 text-sm font-medium ${
+                    poolType === value
+                      ? value === 'LONG'
+                        ? 'border-emerald-500 bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+                        : 'border-red-500 bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+                      : 'border-slate-200 text-slate-600 dark:border-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  {value}
+                </button>
+              ))}
+            </div>
+          </div>
+          {([
+            ['Top N', topN, setTopN, 1, 100],
+            ['交易成本（bps）', transactionCostBps, setTransactionCostBps, 0, 1000],
+            ['信号步长（日）', step, setStep, 1, 60],
+          ] as Array<
+            [string, number, React.Dispatch<React.SetStateAction<number>>, number, number]
+          >).map(([label, value, setter, min, max]) => (
+            <label key={label} className="text-sm font-medium text-slate-700 dark:text-slate-300">
+              <span className="mb-1 block">{label}</span>
+              <input
+                type="number"
+                min={min}
+                max={max}
+                step="1"
+                value={value}
+                disabled={running}
+                onChange={(event) => setter(Number(event.target.value))}
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2
+                  text-slate-900 focus:border-cyan-500 focus:outline-none focus:ring-2
+                  focus:ring-cyan-500/30 disabled:opacity-60 dark:border-slate-600
+                  dark:bg-slate-900 dark:text-white"
+              />
+            </label>
+          ))}
+        </div>
+
+        <div className="mt-4 flex items-center justify-between gap-3">
+          <p className="text-xs text-slate-500 dark:text-slate-400">
+            默认使用当前方向池中的启用股票；每条信号一次性扣除所填成本。
+          </p>
+          <Button
+            type="button"
+            onClick={runBacktest}
+            loading={running}
+            disabled={topN < 1 || step < 1 || transactionCostBps < 0}
+          >
+            运行评估
+          </Button>
+        </div>
+
+        {error && (
+          <div className="mt-4">
+            <Alert type="error">{error}</Alert>
+          </div>
+        )}
+
+        {report && validation && (
+          <div className="mt-5 space-y-4">
+            <div className="rounded-lg border border-slate-200 p-4 dark:border-slate-700">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="font-semibold text-slate-900 dark:text-white">
+                    {report.pool_type} · {report.score_version} · Top {report.parameters.top_n}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                    训练 {report.periods.train.signal_start || '-'} ～ {report.periods.train.signal_end || '-'}；
+                    验证 {validation.signal_start || '-'} ～ {validation.signal_end || '-'}
+                  </p>
+                </div>
+                <div className="text-right text-xs text-slate-500 dark:text-slate-400">
+                  <p>评估股票 {report.data.symbols_evaluated}/{report.data.symbols_requested}</p>
+                  <p>基准总体覆盖 {formatPercent(report.data.benchmark_coverage)}</p>
+                </div>
+              </div>
+            </div>
+
+            {overlap && (
+              <Alert type="warning">
+                信号步长小于最长持有期，样本存在重叠；最大回撤是信号日组合近似值，并非真实资金曲线。
+              </Alert>
+            )}
+
+            <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500 dark:bg-slate-900/50 dark:text-slate-400">
+                  <tr>
+                    <th className="px-3 py-2">持有期</th>
+                    <th className="px-3 py-2">样本数</th>
+                    <th className="px-3 py-2">平均净收益</th>
+                    <th className="px-3 py-2">命中率</th>
+                    <th className="px-3 py-2">平均超额</th>
+                    <th className="px-3 py-2">基准覆盖</th>
+                    <th className="px-3 py-2">近似最大回撤</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
+                  {report.parameters.horizons.map((horizon) => {
+                    const metrics = validation.top_n.horizons[String(horizon)];
+                    return (
+                      <tr key={horizon} className="text-slate-700 dark:text-slate-300">
+                        <td className="px-3 py-2 font-medium">{horizon} 日</td>
+                        <td className="px-3 py-2">{metrics?.sample_count ?? 0}</td>
+                        <td className="px-3 py-2">{formatPercent(metrics?.avg_net_return)}</td>
+                        <td className="px-3 py-2">{formatPercent(metrics?.hit_rate)}</td>
+                        <td className="px-3 py-2">{formatPercent(metrics?.avg_excess_return)}</td>
+                        <td className="px-3 py-2">{formatPercent(metrics?.excess_coverage)}</td>
+                        <td className="px-3 py-2">{formatPercent(metrics?.max_drawdown)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 p-4 dark:border-slate-700">
+              <p className="text-sm font-semibold text-slate-900 dark:text-white">
+                Walk-forward 时间边界
+              </p>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {report.walk_forward.map((fold) => (
+                  <div key={fold.fold} className="rounded bg-slate-50 p-2 text-xs text-slate-600 dark:bg-slate-900/50 dark:text-slate-300">
+                    <p className="font-medium">Fold {fold.fold}</p>
+                    <p>训练至 {fold.train_end || '-'}</p>
+                    <p>验证 {fold.validation_start} ～ {fold.validation_end}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="mt-5 border-t border-slate-200 pt-4 dark:border-slate-700">
+          <p className="mb-2 text-sm font-medium text-slate-700 dark:text-slate-300">
+            最近评估
+          </p>
+          {loadingHistory ? (
+            <p className="text-xs text-slate-500">正在加载历史…</p>
+          ) : history.length === 0 ? (
+            <p className="text-xs text-slate-500">暂无历史记录</p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {history.map((item) => (
+                <button
+                  key={`${item.id}-${item.created_at}`}
+                  type="button"
+                  onClick={() => openHistory(item)}
+                  className="rounded-md border border-slate-200 px-3 py-2 text-left text-xs
+                    text-slate-600 hover:border-cyan-400 dark:border-slate-600 dark:text-slate-300"
+                >
+                  <span className="font-medium">{item.pool_type} · Top {item.parameters.top_n}</span>
+                  <span className="ml-2 text-slate-400">{item.created_at.slice(0, 16)}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
