@@ -411,12 +411,37 @@ def sync_history_candlesticks(
     return results
 
 
-def _fetch_candlesticks_from_db(symbol: str, period: str, limit: int) -> List[Dict[str, float]]:
+def _fetch_candlesticks_from_db(
+    symbol: str,
+    period: str,
+    limit: int,
+    end_date: Optional[str] = None,
+) -> List[Dict[str, float]]:
     with get_connection() as conn:
-        rows = conn.execute(
-            "SELECT ts, open, high, low, close, volume, turnover FROM ohlc WHERE symbol = ? AND period = ? ORDER BY ts DESC LIMIT ?",
-            [symbol, period, limit],
-        ).fetchall()
+        if end_date:
+            rows = conn.execute(
+                """
+                SELECT ts, open, high, low, close, volume, turnover
+                FROM ohlc
+                WHERE symbol = ?
+                  AND period = ?
+                  AND CAST(ts AS DATE) <= CAST(? AS DATE)
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                [symbol, period, end_date, limit],
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT ts, open, high, low, close, volume, turnover
+                FROM ohlc
+                WHERE symbol = ? AND period = ?
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                [symbol, period, limit],
+            ).fetchall()
     return [
         {
             "ts": row[0],
@@ -462,23 +487,47 @@ def _merge_minute_bars(
     return [bar for _, bar in sorted(merged.items())][-limit:]
 
 
-def get_cached_candlesticks(symbol: str, period: str = "day", limit: int = 200) -> List[Dict[str, float]]:
+def get_cached_candlesticks(
+    symbol: str,
+    period: str = "day",
+    limit: int = 200,
+    end_date: Optional[str] = None,
+) -> List[Dict[str, float]]:
     if limit <= 0:
         raise ValueError("limit 必须大于 0")
 
     if _repo_fetch_candlesticks is not None:
-        bars = _repo_fetch_candlesticks(symbol, period, limit)
+        bars = _repo_fetch_candlesticks(
+            symbol,
+            period,
+            limit,
+            end_date=end_date,
+        )
     else:
         global _candlestick_fallback_warned
         if not _candlestick_fallback_warned:
             logger.warning("fetch_candlesticks not exported by app.repositories; using direct DuckDB fallback")
             _candlestick_fallback_warned = True
-        bars = _fetch_candlesticks_from_db(symbol, period, limit)
+        bars = _fetch_candlesticks_from_db(
+            symbol,
+            period,
+            limit,
+            end_date=end_date,
+        )
 
     # Tick aggregation is specifically one-minute data. Merge it even when
     # historical OHLC exists so the current trading day is not omitted.
     if period.lower() == "min1":
         tick_bars = fetch_bars_from_ticks(symbol, min(limit, 500))
+        if end_date:
+            tick_bars = [
+                bar
+                for bar in tick_bars
+                if (
+                    (timestamp := _bar_timestamp(bar)) is not None
+                    and timestamp.date().isoformat() <= end_date
+                )
+            ]
         return _merge_minute_bars(bars, tick_bars, limit)
     return bars
 

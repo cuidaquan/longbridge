@@ -161,9 +161,8 @@ class StockPickerBacktestServiceTests(unittest.TestCase):
 
         service = StockPickerBacktestService(
             stock_picker=stock_picker,
-            bar_loader=lambda symbol, period="day", limit=1000: source[
-                symbol
-            ][-limit:],
+            bar_loader=lambda symbol, period="day", limit=1000,
+            end_date=None: source[symbol][-limit:],
         )
         report = service.run(
             "LONG",
@@ -297,9 +296,8 @@ class StockPickerBacktestServiceTests(unittest.TestCase):
         }
         service = StockPickerBacktestService(
             stock_picker=self.stock_picker,
-            bar_loader=lambda symbol, period="day", limit=1000: source[
-                symbol
-            ][-limit:],
+            bar_loader=lambda symbol, period="day", limit=1000,
+            end_date=None: source[symbol][-limit:],
             connection_factory=lambda: _ConnectionContext(connection),
         )
 
@@ -311,6 +309,10 @@ class StockPickerBacktestServiceTests(unittest.TestCase):
             min_history=30,
             step=5,
             persist=True,
+            report_metadata={
+                "baseline_version": "test-baseline-v1",
+                "market": "US",
+            },
         )
         history = service.get_history()
 
@@ -323,6 +325,65 @@ class StockPickerBacktestServiceTests(unittest.TestCase):
             history[0]["result"]["score_version"],
             self.stock_picker.SCORE_VERSION,
         )
+        self.assertEqual(
+            history[0]["result"]["metadata"],
+            {
+                "baseline_version": "test-baseline-v1",
+                "market": "US",
+            },
+        )
+
+    def test_data_as_of_is_applied_to_symbols_and_benchmarks(self) -> None:
+        source = {
+            "AAA.US": _bars(100, 100, 0.01),
+            "SPY.US": _bars(100, 200, 0.004),
+        }
+        calls = []
+
+        def load(symbol, period="day", limit=1000, end_date=None):
+            calls.append((symbol, period, limit, end_date))
+            return [
+                bar
+                for bar in source[symbol]
+                if end_date is None or bar["date"] <= end_date
+            ][-limit:]
+
+        service = StockPickerBacktestService(
+            stock_picker=self.stock_picker,
+            bar_loader=load,
+        )
+        cutoff = source["AAA.US"][79]["date"]
+
+        report = service.run(
+            "LONG",
+            horizons=[5],
+            lookback=60,
+            max_bars=100,
+            min_history=30,
+            step=5,
+            persist=False,
+            data_as_of=cutoff,
+        )
+
+        self.assertEqual(report["parameters"]["data_as_of"], cutoff)
+        self.assertEqual(report["data"]["data_as_of"], cutoff)
+        self.assertEqual(
+            calls,
+            [
+                ("AAA.US", "day", 100, cutoff),
+                ("SPY.US", "day", 100, cutoff),
+            ],
+        )
+
+    def test_invalid_data_as_of_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "data_as_of"):
+            self.service.run(
+                "LONG",
+                symbols=["AAA.US"],
+                horizons=[5],
+                persist=False,
+                data_as_of="2026-02-30",
+            )
 
     def test_parameter_relationships_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "min_history"):

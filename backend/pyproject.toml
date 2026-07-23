@@ -26,5 +26,8 @@ dependencies = [
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
+[project.scripts]
+stock-picker-baseline = "app.stock_picker_baseline:main"
+
 [tool.setuptools]
 packages = ["app"]

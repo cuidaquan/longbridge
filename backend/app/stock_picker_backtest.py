@@ -40,9 +40,12 @@ class StockPickerBacktestService:
         walk_forward_folds: int = 3,
         transaction_cost_bps: float = 10.0,
         persist: bool = True,
+        report_metadata: Optional[Dict[str, Any]] = None,
+        data_as_of: Optional[str] = None,
     ) -> Dict[str, Any]:
         direction = self.stock_picker._validate_pool_type(pool_type)
         normalized_horizons = sorted(set(int(value) for value in horizons))
+        normalized_data_as_of = self._normalize_data_as_of(data_as_of)
         self._validate_parameters(
             normalized_horizons,
             lookback,
@@ -59,7 +62,11 @@ class StockPickerBacktestService:
             raise ValueError(f"{direction} 股票池没有可回测的股票")
 
         bars_by_symbol = {
-            symbol: self._load_bars(symbol, max_bars)
+            symbol: self._load_bars(
+                symbol,
+                max_bars,
+                normalized_data_as_of,
+            )
             for symbol in selected_symbols
         }
         market_benchmarks = {
@@ -69,7 +76,11 @@ class StockPickerBacktestService:
             for symbol in selected_symbols
         }
         benchmark_bars = {
-            benchmark: self._load_bars(benchmark, max_bars)
+            benchmark: self._load_bars(
+                benchmark,
+                max_bars,
+                normalized_data_as_of,
+            )
             for benchmark in sorted(set(market_benchmarks.values()))
         }
         benchmark_closes = {
@@ -133,6 +144,7 @@ class StockPickerBacktestService:
                 "train_ratio": train_ratio,
                 "walk_forward_folds": walk_forward_folds,
                 "transaction_cost_bps": transaction_cost_bps,
+                "data_as_of": normalized_data_as_of,
                 "market_benchmarks": market_benchmarks,
             },
             "data": {
@@ -202,6 +214,8 @@ class StockPickerBacktestService:
                 ),
             },
         }
+        if report_metadata:
+            report["metadata"] = dict(report_metadata)
         if persist:
             report["id"] = self._save_report(report)
         return report
@@ -250,8 +264,18 @@ class StockPickerBacktestService:
             if item.get("is_active", True)
         ]
 
-    def _load_bars(self, symbol: str, limit: int) -> List[Dict[str, Any]]:
-        bars = self.bar_loader(symbol, period="day", limit=limit) or []
+    def _load_bars(
+        self,
+        symbol: str,
+        limit: int,
+        data_as_of: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        bars = self.bar_loader(
+            symbol,
+            period="day",
+            limit=limit,
+            end_date=data_as_of,
+        ) or []
         return sorted(
             (
                 bar
@@ -260,6 +284,15 @@ class StockPickerBacktestService:
             ),
             key=self._bar_date,
         )
+
+    @staticmethod
+    def _normalize_data_as_of(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        try:
+            return date.fromisoformat(str(value)).isoformat()
+        except ValueError as exc:
+            raise ValueError("data_as_of 必须是 YYYY-MM-DD 日期") from exc
 
     def _evaluate_symbol(
         self,

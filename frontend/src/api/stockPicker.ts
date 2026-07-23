@@ -304,10 +304,19 @@ export interface StockPickerBacktestPeriod {
   top_n: StockPickerBacktestSampleMetrics;
 }
 
+export interface StockPickerBacktestMetadata {
+  baseline_version?: string;
+  market?: string;
+  universe_name?: string;
+  universe_selection?: string;
+  limitations?: string[];
+}
+
 export interface StockPickerBacktestReport {
   id?: number;
   score_version: string;
   pool_type: 'LONG' | 'SHORT';
+  metadata?: StockPickerBacktestMetadata;
   parameters: {
     symbols: string[];
     horizons: number[];
@@ -319,6 +328,7 @@ export interface StockPickerBacktestReport {
     train_ratio: number;
     walk_forward_folds: number;
     transaction_cost_bps: number;
+    data_as_of?: string | null;
     market_benchmarks: Record<string, string>;
   };
   data: {

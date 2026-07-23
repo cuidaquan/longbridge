@@ -6,10 +6,68 @@ from decimal import Decimal
 import unittest
 from unittest.mock import MagicMock, patch
 
+import duckdb
+
+from app import repositories
 from app import services
 
 
 class QuoteHistoryPeriodTest(unittest.TestCase):
+    def test_repository_history_cutoff_limits_before_selecting_window(
+        self,
+    ) -> None:
+        connection = duckdb.connect(":memory:")
+        self.addCleanup(connection.close)
+        connection.execute(
+            """
+            CREATE TABLE ohlc (
+                symbol VARCHAR,
+                period VARCHAR,
+                ts TIMESTAMP,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                volume DOUBLE,
+                turnover DOUBLE
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT INTO ohlc VALUES (?, 'day', ?, 1, 1, 1, ?, 1, 1)",
+            [
+                ("AAA.US", "2026-07-21 00:00:00", 21),
+                ("AAA.US", "2026-07-22 00:00:00", 22),
+                ("AAA.US", "2026-07-23 00:00:00", 23),
+                ("AAA.US", "2026-07-24 00:00:00", 24),
+            ],
+        )
+
+        @contextmanager
+        def connection_context():
+            yield connection
+
+        with patch.object(
+            repositories,
+            "get_connection",
+            side_effect=connection_context,
+        ):
+            result = repositories.fetch_candlesticks(
+                "AAA.US",
+                "day",
+                limit=2,
+                end_date="2026-07-23",
+            )
+
+        self.assertEqual(
+            [str(bar["ts"])[:10] for bar in result],
+            ["2026-07-22", "2026-07-23"],
+        )
+        self.assertEqual(
+            [bar["close"] for bar in result],
+            [22.0, 23.0],
+        )
+
     def test_calc_indexes_fetches_all_stock_picker_metrics_in_one_call(self) -> None:
         first = MagicMock(
             symbol="AAA.US",
@@ -241,6 +299,27 @@ class QuoteHistoryPeriodTest(unittest.TestCase):
 
         self.assertEqual(result, [])
         fetch_ticks.assert_not_called()
+
+    def test_history_cutoff_is_forwarded_to_repository(self) -> None:
+        with patch.object(
+            services,
+            "_repo_fetch_candlesticks",
+            return_value=[],
+        ) as fetch:
+            result = services.get_cached_candlesticks(
+                "TEST.US",
+                "day",
+                20,
+                end_date="2026-07-23",
+            )
+
+        self.assertEqual(result, [])
+        fetch.assert_called_once_with(
+            "TEST.US",
+            "day",
+            20,
+            end_date="2026-07-23",
+        )
 
     def test_missing_minute_period_can_fall_back_to_tick_bars(self) -> None:
         tick_bars = [{"ts": "2026-07-22T00:00:00", "close": 10.0}]

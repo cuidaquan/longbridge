@@ -176,13 +176,38 @@ def store_candlesticks(symbol: str, candles: Iterable, period: str = "day") -> i
     return len(records)
 
 
-def fetch_candlesticks(symbol: str, period: str = "day", limit: int = 200) -> List[Dict[str, float]]:
+def fetch_candlesticks(
+    symbol: str,
+    period: str = "day",
+    limit: int = 200,
+    end_date: Optional[str] = None,
+) -> List[Dict[str, float]]:
     with get_connection() as conn:
         # 先降序获取最新的N条，然后反转为升序（从旧到新）
-        rows = conn.execute(
-            "SELECT ts, open, high, low, close, volume, turnover FROM ohlc WHERE symbol = ? AND period = ? ORDER BY ts DESC LIMIT ?",
-            [symbol, period, limit],
-        ).fetchall()
+        if end_date:
+            rows = conn.execute(
+                """
+                SELECT ts, open, high, low, close, volume, turnover
+                FROM ohlc
+                WHERE symbol = ?
+                  AND period = ?
+                  AND CAST(ts AS DATE) <= CAST(? AS DATE)
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                [symbol, period, end_date, limit],
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT ts, open, high, low, close, volume, turnover
+                FROM ohlc
+                WHERE symbol = ? AND period = ?
+                ORDER BY ts DESC
+                LIMIT ?
+                """,
+                [symbol, period, limit],
+            ).fetchall()
     
     # 反转顺序，使得最老的数据在前，最新的数据在后（从左到右）
     result = [

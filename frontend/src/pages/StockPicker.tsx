@@ -944,6 +944,9 @@ function StockPickerBacktestDialog({ onClose }: { onClose: () => void }) {
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <p className="font-semibold text-slate-900 dark:text-white">
+                    {report.metadata?.market
+                      ? `${report.metadata.market} · `
+                      : ''}
                     {report.pool_type} · {report.score_version} · Top {report.parameters.top_n}
                   </p>
                   <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
@@ -963,6 +966,12 @@ function StockPickerBacktestDialog({ onClose }: { onClose: () => void }) {
                 信号步长小于最长持有期，样本存在重叠；最大回撤是信号日组合近似值，并非真实资金曲线。
               </Alert>
             )}
+
+            {report.metadata?.limitations?.length ? (
+              <Alert type="warning">
+                {report.metadata.limitations.join('；')}
+              </Alert>
+            ) : null}
 
             <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
               <table className="min-w-full text-sm">
@@ -1031,7 +1040,12 @@ function StockPickerBacktestDialog({ onClose }: { onClose: () => void }) {
                   className="rounded-md border border-slate-200 px-3 py-2 text-left text-xs
                     text-slate-600 hover:border-cyan-400 dark:border-slate-600 dark:text-slate-300"
                 >
-                  <span className="font-medium">{item.pool_type} · Top {item.parameters.top_n}</span>
+                  <span className="font-medium">
+                    {item.result.metadata?.market
+                      ? `${item.result.metadata.market} · `
+                      : ''}
+                    {item.pool_type} · Top {item.parameters.top_n}
+                  </span>
                   <span className="ml-2 text-slate-400">{item.created_at.slice(0, 16)}</span>
                 </button>
               ))}
