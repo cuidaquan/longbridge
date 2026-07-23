@@ -291,6 +291,22 @@ async def _persist_stock_picker_reliability() -> None:
                 "stock-picker reliability persistence failed: %s",
                 exc,
             )
+        try:
+            delivery = await asyncio.to_thread(service.deliver_due)
+            if delivery["failed"] or delivery["dead_letter"]:
+                logger.warning(
+                    "stock-picker reliability delivery: "
+                    "failed=%s dead_letter=%s",
+                    delivery["failed"],
+                    delivery["dead_letter"],
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "stock-picker reliability delivery failed: %s",
+                exc,
+            )
         await asyncio.sleep(RELIABILITY_CAPTURE_INTERVAL_SECONDS)
 
 

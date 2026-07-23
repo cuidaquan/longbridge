@@ -153,6 +153,7 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_STOCK_PICKER_FACTOR_SNAPSHOT_RUN_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_ALERT_TABLE_SQL)
+    conn.execute(_STOCK_PICKER_RELIABILITY_DELIVERY_TABLE_SQL)
 
     # 板块轮动表
     conn.execute(_SECTOR_ETFS_TABLE_SQL)
@@ -566,6 +567,42 @@ CREATE TABLE IF NOT EXISTS stock_picker_reliability_alerts (
 );
 CREATE INDEX IF NOT EXISTS idx_stock_picker_reliability_alert_status
 ON stock_picker_reliability_alerts(status, last_seen_at DESC);
+"""
+
+_STOCK_PICKER_RELIABILITY_DELIVERY_TABLE_SQL = """
+CREATE SEQUENCE IF NOT EXISTS stock_picker_reliability_delivery_seq START 1;
+CREATE TABLE IF NOT EXISTS stock_picker_reliability_deliveries (
+    id BIGINT PRIMARY KEY DEFAULT nextval(
+        'stock_picker_reliability_delivery_seq'
+    ),
+    alert_key TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    destination_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    delivered_at TIMESTAMP,
+    http_status INTEGER,
+    error TEXT,
+    payload TEXT NOT NULL,
+    CHECK (event_type IN ('triggered', 'resolved')),
+    CHECK (destination_type IN ('webhook')),
+    CHECK (
+        status IN (
+            'pending',
+            'delivered',
+            'failed',
+            'dead_letter',
+            'skipped'
+        )
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_stock_picker_reliability_delivery_due
+ON stock_picker_reliability_deliveries(status, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_stock_picker_reliability_delivery_created
+ON stock_picker_reliability_deliveries(created_at DESC);
 """
 
 # ============================================

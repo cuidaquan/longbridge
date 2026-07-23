@@ -553,6 +553,25 @@ def get_stock_picker_reliability_history(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.get("/reliability/deliveries")
+def get_stock_picker_reliability_deliveries(
+    limit: int = Query(default=100, ge=1, le=1000),
+):
+    try:
+        return get_stock_picker_reliability_service().get_deliveries(
+            limit=limit
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(
+            "获取智能选股可靠性告警投递失败: %s",
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/pools")
 async def get_pools(
     pool_type: Optional[Literal["LONG", "SHORT"]] = None,

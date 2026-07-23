@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from cryptography.fernet import Fernet
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +16,14 @@ class Settings(BaseSettings):
     duckdb_path: Path = Path("data/quant.db")
     encryption_key: Optional[str] = None
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    stock_picker_alert_webhook_enabled: bool = False
+    stock_picker_alert_webhook_url: Optional[str] = None
+    stock_picker_alert_webhook_secret: Optional[str] = None
+    stock_picker_alert_webhook_timeout_seconds: float = Field(
+        default=5.0,
+        ge=1.0,
+        le=30.0,
+    )
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

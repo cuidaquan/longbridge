@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
+import hashlib
+import hmac
+import json
 import unittest
 from unittest.mock import MagicMock, patch
 
 import duckdb
 from fastapi.testclient import TestClient
 
+from app.config import Settings
 from app.db import _run_migrations
-from app.main import app
+from app.main import _persist_stock_picker_reliability, app
 from app.stock_picker_reliability import (
+    DELIVERY_RETRY_SECONDS,
     RELIABILITY_RETENTION_DAYS,
     StockPickerReliabilityService,
+    _NoRedirectHandler,
+    _send_webhook,
 )
 
 
@@ -119,6 +127,7 @@ class StockPickerReliabilityPersistenceTests(unittest.TestCase):
         _run_migrations(self.connection)
         self.clock = _Clock()
         self.current = _snapshot()
+        self.sender = MagicMock(return_value=204)
         self.service = StockPickerReliabilityService(
             snapshot_provider=lambda: self.current,
             connection_factory=lambda: _ConnectionContext(
@@ -126,6 +135,15 @@ class StockPickerReliabilityPersistenceTests(unittest.TestCase):
             ),
             clock=self.clock,
             process_id="test-process",
+            delivery_config_provider=lambda: {
+                "enabled": False,
+                "configured": False,
+                "signed": False,
+                "url": "",
+                "secret": "",
+                "timeout_seconds": 5,
+            },
+            webhook_sender=self.sender,
         )
 
     def tearDown(self) -> None:
@@ -142,6 +160,10 @@ class StockPickerReliabilityPersistenceTests(unittest.TestCase):
         )
         self.assertIn(
             "stock_picker_reliability_alerts",
+            tables,
+        )
+        self.assertIn(
+            "stock_picker_reliability_deliveries",
             tables,
         )
 
@@ -239,6 +261,14 @@ class StockPickerReliabilityPersistenceTests(unittest.TestCase):
                 for alert in history["alerts"]
             )
         )
+        self.assertEqual(
+            {
+                delivery["status"]
+                for delivery in history["deliveries"]
+            },
+            {"skipped"},
+        )
+        self.sender.assert_not_called()
 
     def test_circuit_and_capacity_alerts_do_not_need_sample_minimum(
         self,
@@ -300,6 +330,11 @@ class StockPickerReliabilityPersistenceTests(unittest.TestCase):
             connection_factory=unavailable_connection,
             clock=self.clock,
             process_id="unavailable-process",
+            delivery_config_provider=lambda: {
+                "enabled": False,
+                "configured": False,
+                "signed": False,
+            },
         )
         current = service.get_current()
         self.assertEqual(
@@ -327,6 +362,377 @@ class StockPickerReliabilityPersistenceTests(unittest.TestCase):
             121,
         )
 
+    def test_disabled_webhook_records_skipped_transition_without_secret(
+        self,
+    ) -> None:
+        self.current = _snapshot(
+            requests=1,
+            attempts=1,
+            failures=1,
+            circuit_state="open",
+        )
+        capture = self.service.capture()
+        self.assertEqual(len(capture["alert_transitions"]), 1)
+        deliveries = self.service.get_deliveries()
+        self.assertFalse(deliveries["enabled"])
+        self.assertFalse(deliveries["configured"])
+        self.assertEqual(
+            deliveries["status_counts"],
+            {"skipped": 1},
+        )
+        item = deliveries["items"][0]
+        self.assertEqual(item["status"], "skipped")
+        serialized = json.dumps(deliveries)
+        self.assertNotIn("webhook_url", serialized)
+        self.assertNotIn("secret", serialized)
+        self.sender.assert_not_called()
+
+    def test_enabled_webhook_delivers_trigger_and_resolution_once(
+        self,
+    ) -> None:
+        sender = MagicMock(return_value=204)
+        config = {
+            "enabled": True,
+            "configured": True,
+            "signed": True,
+            "url": "https://alerts.example.test/secret-token",
+            "secret": "signing-secret",
+            "timeout_seconds": 5,
+        }
+        service = StockPickerReliabilityService(
+            snapshot_provider=lambda: self.current,
+            connection_factory=lambda: _ConnectionContext(
+                self.connection
+            ),
+            clock=self.clock,
+            process_id="delivery-process",
+            delivery_config_provider=lambda: config,
+            webhook_sender=sender,
+        )
+        self.current = _snapshot(
+            requests=1,
+            attempts=1,
+            failures=1,
+            circuit_state="open",
+        )
+        first = service.capture()
+        self.assertEqual(len(first["delivery_ids"]), 1)
+        delivered = service.deliver_due()
+        self.assertEqual(delivered["delivered"], 1)
+        self.assertEqual(sender.call_count, 1)
+
+        self.clock.advance(60)
+        service.capture()
+        self.assertEqual(sender.call_count, 1)
+        self.assertEqual(
+            service.get_deliveries()["status_counts"],
+            {"delivered": 1},
+        )
+
+        self.clock.advance(60)
+        self.current = _snapshot(
+            requests=2,
+            attempts=2,
+            successes=1,
+            failures=1,
+            circuit_state="closed",
+        )
+        resolved = service.capture()
+        self.assertEqual(
+            resolved["alert_transitions"][0]["event_type"],
+            "resolved",
+        )
+        service.deliver_due()
+        self.assertEqual(sender.call_count, 2)
+        deliveries = service.get_deliveries()
+        self.assertEqual(
+            deliveries["status_counts"],
+            {"delivered": 2},
+        )
+        serialized = json.dumps(deliveries)
+        self.assertNotIn(config["url"], serialized)
+        self.assertNotIn(config["secret"], serialized)
+
+    def test_enabled_webhook_without_url_skips_new_transition(
+        self,
+    ) -> None:
+        sender = MagicMock(return_value=204)
+        service = StockPickerReliabilityService(
+            snapshot_provider=lambda: self.current,
+            connection_factory=lambda: _ConnectionContext(
+                self.connection
+            ),
+            clock=self.clock,
+            process_id="unconfigured-process",
+            delivery_config_provider=lambda: {
+                "enabled": True,
+                "configured": False,
+                "signed": False,
+                "url": "",
+                "secret": "",
+                "timeout_seconds": 5,
+            },
+            webhook_sender=sender,
+        )
+        self.current = _snapshot(
+            requests=1,
+            attempts=1,
+            failures=1,
+            circuit_state="open",
+        )
+
+        service.capture()
+        delivery = service.get_deliveries()["items"][0]
+
+        self.assertEqual(delivery["status"], "skipped")
+        self.assertEqual(
+            delivery["error"],
+            "webhook_not_configured",
+        )
+        self.assertEqual(service.deliver_due()["selected"], 0)
+        sender.assert_not_called()
+
+    def test_enabling_webhook_does_not_replay_skipped_active_alert(
+        self,
+    ) -> None:
+        self.current = _snapshot(
+            requests=1,
+            attempts=1,
+            failures=1,
+            circuit_state="open",
+        )
+        self.service.capture()
+        sender = MagicMock(return_value=204)
+        service = StockPickerReliabilityService(
+            snapshot_provider=lambda: self.current,
+            connection_factory=lambda: _ConnectionContext(
+                self.connection
+            ),
+            clock=self.clock,
+            process_id="enabled-later-process",
+            delivery_config_provider=lambda: {
+                "enabled": True,
+                "configured": True,
+                "signed": False,
+                "url": "https://alerts.example.test/hook",
+                "secret": "",
+                "timeout_seconds": 5,
+            },
+            webhook_sender=sender,
+        )
+        self.clock.advance(60)
+        capture = service.capture()
+        self.assertEqual(capture["alert_transitions"], [])
+        self.assertEqual(service.deliver_due()["selected"], 0)
+        sender.assert_not_called()
+        self.assertEqual(
+            service.get_deliveries()["status_counts"],
+            {"skipped": 1},
+        )
+
+    def test_webhook_failures_retry_then_move_to_dead_letter(
+        self,
+    ) -> None:
+        sender = MagicMock(
+            side_effect=RuntimeError(
+                "https://alerts.example.test/secret-token"
+            )
+        )
+        service = StockPickerReliabilityService(
+            snapshot_provider=lambda: self.current,
+            connection_factory=lambda: _ConnectionContext(
+                self.connection
+            ),
+            clock=self.clock,
+            process_id="retry-process",
+            delivery_config_provider=lambda: {
+                "enabled": True,
+                "configured": True,
+                "signed": False,
+                "url": "https://alerts.example.test/secret-token",
+                "secret": "",
+                "timeout_seconds": 5,
+            },
+            webhook_sender=sender,
+        )
+        self.current = _snapshot(
+            requests=1,
+            attempts=1,
+            failures=1,
+            circuit_state="open",
+        )
+        service.capture()
+        first = service.deliver_due()
+        self.assertEqual(first["failed"], 1)
+        self.assertEqual(service.deliver_due()["selected"], 0)
+
+        self.clock.advance(DELIVERY_RETRY_SECONDS)
+        second = service.deliver_due()
+        self.assertEqual(second["failed"], 1)
+        self.clock.advance(DELIVERY_RETRY_SECONDS * 2)
+        third = service.deliver_due()
+        self.assertEqual(third["dead_letter"], 1)
+
+        delivery = service.get_deliveries()["items"][0]
+        self.assertEqual(delivery["attempt_count"], 3)
+        self.assertEqual(delivery["status"], "dead_letter")
+        self.assertEqual(
+            delivery["error"],
+            "webhook delivery failed: RuntimeError",
+        )
+        self.assertNotIn("secret-token", json.dumps(delivery))
+
+    def test_default_webhook_sender_signs_exact_request_body(
+        self,
+    ) -> None:
+        response = MagicMock()
+        response.getcode.return_value = 202
+        response_context = MagicMock()
+        response_context.__enter__.return_value = response
+        opener = MagicMock()
+        opener.open.return_value = response_context
+        payload = {
+            "event": "stock_picker.reliability.alert.triggered",
+            "delivery_id": 7,
+            "alert": {"key": "service:quote:circuit"},
+        }
+        config = {
+            "url": "https://alerts.example.test/hook",
+            "secret": "signing-secret",
+            "timeout_seconds": 5,
+        }
+        expected_body = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        expected_signature = hmac.new(
+            b"signing-secret",
+            expected_body,
+            hashlib.sha256,
+        ).hexdigest()
+
+        with patch(
+            "app.stock_picker_reliability.build_opener",
+            return_value=opener,
+        ) as opener_factory:
+            status = _send_webhook(config, payload)
+
+        self.assertEqual(status, 202)
+        opener_factory.assert_called_once()
+        opener.open.assert_called_once()
+        call = opener.open.call_args
+        request = call.args[0]
+        self.assertEqual(request.full_url, config["url"])
+        self.assertEqual(request.data, expected_body)
+        self.assertEqual(call.kwargs["timeout"], 5.0)
+        self.assertEqual(
+            request.headers["X-longbridge-signature"],
+            f"sha256={expected_signature}",
+        )
+        self.assertEqual(
+            request.headers["X-longbridge-event"],
+            payload["event"],
+        )
+        self.assertEqual(
+            request.headers["X-longbridge-delivery"],
+            "7",
+        )
+
+    def test_webhook_sender_disables_redirects(self) -> None:
+        handler = _NoRedirectHandler()
+        redirected = handler.redirect_request(
+            None,
+            None,
+            302,
+            "Found",
+            {},
+            "https://other.example.test/hook",
+        )
+        self.assertIsNone(redirected)
+
+
+class StockPickerReliabilityConfigTests(unittest.TestCase):
+    def test_webhook_defaults_are_disabled_and_unconfigured(
+        self,
+    ) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            settings = Settings(_env_file=None)
+        self.assertFalse(
+            settings.stock_picker_alert_webhook_enabled
+        )
+        self.assertIsNone(
+            settings.stock_picker_alert_webhook_url
+        )
+        self.assertIsNone(
+            settings.stock_picker_alert_webhook_secret
+        )
+        self.assertEqual(
+            settings.stock_picker_alert_webhook_timeout_seconds,
+            5.0,
+        )
+
+
+class StockPickerReliabilityLoopTests(
+    unittest.IsolatedAsyncioTestCase
+):
+    async def test_loop_captures_then_delivers_due_records(
+        self,
+    ) -> None:
+        service = MagicMock()
+        service.capture.side_effect = [
+            {"alerts": []},
+            asyncio.CancelledError(),
+        ]
+        service.deliver_due.return_value = {
+            "failed": 0,
+            "dead_letter": 0,
+        }
+        with (
+            patch(
+                "app.main.get_stock_picker_reliability_service",
+                return_value=service,
+            ),
+            patch(
+                "app.main.RELIABILITY_CAPTURE_INTERVAL_SECONDS",
+                0,
+            ),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await _persist_stock_picker_reliability()
+
+        self.assertEqual(service.capture.call_count, 2)
+        service.deliver_due.assert_called_once_with()
+
+    async def test_loop_delivers_when_capture_fails(
+        self,
+    ) -> None:
+        service = MagicMock()
+        service.capture.side_effect = [
+            RuntimeError("capture failed"),
+            asyncio.CancelledError(),
+        ]
+        service.deliver_due.return_value = {
+            "failed": 0,
+            "dead_letter": 0,
+        }
+        with (
+            patch(
+                "app.main.get_stock_picker_reliability_service",
+                return_value=service,
+            ),
+            patch(
+                "app.main.RELIABILITY_CAPTURE_INTERVAL_SECONDS",
+                0,
+            ),
+            patch("app.main.logger.warning"),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await _persist_stock_picker_reliability()
+
+        self.assertEqual(service.capture.call_count, 2)
+        service.deliver_due.assert_called_once_with()
+
 
 class StockPickerReliabilityHttpTests(unittest.TestCase):
     def test_current_and_history_routes_use_persistence_service(
@@ -343,34 +749,48 @@ class StockPickerReliabilityHttpTests(unittest.TestCase):
             "limit": 5,
             "items": [],
             "alerts": [],
+            "deliveries": [],
         }
-        with (
-            patch(
-                "app.routers.stock_picker."
-                "get_stock_picker_reliability_service",
-                return_value=service,
-            ),
-            TestClient(app) as client,
+        service.get_deliveries.return_value = {
+            "enabled": False,
+            "configured": False,
+            "items": [],
+        }
+        with patch(
+            "app.routers.stock_picker."
+            "get_stock_picker_reliability_service",
+            return_value=service,
         ):
-            current = client.get(
-                "/api/stock-picker/reliability"
-            )
-            history = client.get(
-                "/api/stock-picker/reliability/history",
-                params={"hours": 12, "limit": 5},
-            )
-            invalid = client.get(
-                "/api/stock-picker/reliability/history",
-                params={"hours": 0},
-            )
+            client = TestClient(app)
+            try:
+                current = client.get(
+                    "/api/stock-picker/reliability"
+                )
+                history = client.get(
+                    "/api/stock-picker/reliability/history",
+                    params={"hours": 12, "limit": 5},
+                )
+                deliveries = client.get(
+                    "/api/stock-picker/reliability/deliveries",
+                    params={"limit": 7},
+                )
+                invalid = client.get(
+                    "/api/stock-picker/reliability/history",
+                    params={"hours": 0},
+                )
+            finally:
+                client.close()
 
         self.assertEqual(current.status_code, 200)
         self.assertTrue(current.json()["persistence"]["enabled"])
         self.assertEqual(history.status_code, 200)
         self.assertEqual(history.json()["hours"], 12)
+        self.assertEqual(deliveries.status_code, 200)
+        self.assertFalse(deliveries.json()["enabled"])
         self.assertEqual(invalid.status_code, 422)
         service.get_current.assert_called_once_with()
         service.get_history.assert_called_once_with(
             hours=12,
             limit=5,
         )
+        service.get_deliveries.assert_called_once_with(limit=7)
