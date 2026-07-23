@@ -13,14 +13,14 @@ from uuid import uuid4
 
 from ..stock_picker import get_stock_picker_service
 from ..exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
-from ..external_service_resilience import (
-    get_stock_picker_reliability_snapshot,
-)
 from ..models import SecuritySearchResponse
 from ..security_catalog import get_security_catalog_service
 from ..stock_picker_backtest import get_stock_picker_backtest_service
 from ..stock_picker_factor_snapshots import (
     get_stock_picker_factor_snapshot_service,
+)
+from ..stock_picker_reliability import (
+    get_stock_picker_reliability_service,
 )
 from ..stock_screener import get_stock_screener_service
 
@@ -521,7 +521,36 @@ async def get_stock_picker_factor_snapshot_coverage(
 
 @router.get("/reliability")
 def get_stock_picker_reliability():
-    return get_stock_picker_reliability_snapshot()
+    try:
+        return get_stock_picker_reliability_service().get_current()
+    except Exception as exc:
+        logger.error(
+            "获取智能选股可靠性状态失败: %s",
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/reliability/history")
+def get_stock_picker_reliability_history(
+    hours: int = Query(default=24, ge=1, le=720),
+    limit: int = Query(default=100, ge=1, le=1000),
+):
+    try:
+        return get_stock_picker_reliability_service().get_history(
+            hours=hours,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(
+            "获取智能选股可靠性历史失败: %s",
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/pools")

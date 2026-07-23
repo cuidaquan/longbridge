@@ -151,6 +151,8 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_STOCK_PICKER_FACTOR_EXPERIMENT_TABLE_SQL)
     conn.execute(_STOCK_PICKER_FACTOR_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_PICKER_FACTOR_SNAPSHOT_RUN_TABLE_SQL)
+    conn.execute(_STOCK_PICKER_RELIABILITY_SNAPSHOT_TABLE_SQL)
+    conn.execute(_STOCK_PICKER_RELIABILITY_ALERT_TABLE_SQL)
 
     # 板块轮动表
     conn.execute(_SECTOR_ETFS_TABLE_SQL)
@@ -528,6 +530,42 @@ CREATE TABLE IF NOT EXISTS stock_picker_factor_snapshot_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_stock_picker_factor_snapshot_run_status
 ON stock_picker_factor_snapshot_runs(status, started_at);
+"""
+
+_STOCK_PICKER_RELIABILITY_SNAPSHOT_TABLE_SQL = """
+CREATE SEQUENCE IF NOT EXISTS stock_picker_reliability_snapshot_seq START 1;
+CREATE TABLE IF NOT EXISTS stock_picker_reliability_snapshots (
+    id BIGINT PRIMARY KEY DEFAULT nextval(
+        'stock_picker_reliability_snapshot_seq'
+    ),
+    observed_at TIMESTAMP NOT NULL,
+    process_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    window_metrics TEXT NOT NULL,
+    alerts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stock_picker_reliability_observed
+ON stock_picker_reliability_snapshots(observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_stock_picker_reliability_process
+ON stock_picker_reliability_snapshots(process_id, observed_at DESC);
+"""
+
+_STOCK_PICKER_RELIABILITY_ALERT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS stock_picker_reliability_alerts (
+    alert_key TEXT PRIMARY KEY,
+    severity TEXT NOT NULL,
+    status TEXT NOT NULL,
+    first_seen_at TIMESTAMP NOT NULL,
+    last_seen_at TIMESTAMP NOT NULL,
+    resolved_at TIMESTAMP,
+    occurrence_count BIGINT NOT NULL DEFAULT 1,
+    message TEXT NOT NULL,
+    details TEXT NOT NULL,
+    CHECK (severity IN ('warning', 'critical')),
+    CHECK (status IN ('active', 'resolved'))
+);
+CREATE INDEX IF NOT EXISTS idx_stock_picker_reliability_alert_status
+ON stock_picker_reliability_alerts(status, last_seen_at DESC);
 """
 
 # ============================================

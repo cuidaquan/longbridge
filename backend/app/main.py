@@ -26,6 +26,10 @@ from .routers import sector_rotation as sector_rotation_router  # 板块轮动�
 from .streaming import quote_stream_manager
 from .position_monitor import get_position_monitor
 from .ai_trading_engine import get_ai_trading_engine
+from .stock_picker_reliability import (
+    RELIABILITY_CAPTURE_INTERVAL_SECONDS,
+    get_stock_picker_reliability_service,
+)
 
 
 app = FastAPI(title="Longbridge Quant Backend", version="0.1.0")
@@ -268,6 +272,28 @@ async def _auto_capture_stock_picker_factor_snapshots() -> None:
         await asyncio.sleep(poll_interval)
 
 
+async def _persist_stock_picker_reliability() -> None:
+    """Persist interval metrics and update durable alert state."""
+    await asyncio.sleep(RELIABILITY_CAPTURE_INTERVAL_SECONDS)
+    service = get_stock_picker_reliability_service()
+    while True:
+        try:
+            result = await asyncio.to_thread(service.capture)
+            if result["alerts"]:
+                logger.warning(
+                    "stock-picker reliability: %s active alerts",
+                    len(result["alerts"]),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "stock-picker reliability persistence failed: %s",
+                exc,
+            )
+        await asyncio.sleep(RELIABILITY_CAPTURE_INTERVAL_SECONDS)
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     logger.info("startup: entering handler")
@@ -298,6 +324,9 @@ async def on_startup() -> None:
         _auto_capture_stock_picker_factor_snapshots()
     )
     logger.info("startup: stock-picker factor snapshots scheduled")
+
+    _start_background_task(_persist_stock_picker_reliability())
+    logger.info("startup: stock-picker reliability persistence scheduled")
     
     # Initialize AI Trading Engine (if enabled)
     ai_engine = get_ai_trading_engine()
