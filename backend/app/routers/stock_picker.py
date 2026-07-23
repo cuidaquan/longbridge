@@ -3,8 +3,8 @@
 """
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from typing import List, Optional, AsyncGenerator
+from pydantic import BaseModel, ConfigDict, Field
+from typing import List, Literal, Optional, AsyncGenerator
 from datetime import datetime, timedelta, timezone
 import logging
 import json
@@ -28,21 +28,41 @@ analysis_jobs = {}
 # ========== 请求/响应模型 ==========
 
 class AddStockRequest(BaseModel):
-    pool_type: str  # LONG 或 SHORT
-    symbol: str
+    model_config = ConfigDict(extra="forbid")
+
+    pool_type: Literal["LONG", "SHORT"]
+    symbol: str = Field(min_length=1, max_length=32)
     name: Optional[str] = None
     added_reason: Optional[str] = None
     priority: Optional[int] = 0
 
 
 class BatchAddStocksRequest(BaseModel):
-    pool_type: str
-    symbols: List[str]  # 股票代码列表
+    model_config = ConfigDict(extra="forbid")
+
+    pool_type: Literal["LONG", "SHORT"]
+    symbols: List[str] = Field(min_length=1, max_length=500)
 
 
 class AnalyzeRequest(BaseModel):
-    pool_type: Optional[str] = None  # LONG/SHORT/None(全部)
+    model_config = ConfigDict(extra="forbid")
+
+    pool_type: Optional[Literal["LONG", "SHORT"]] = None
     force_refresh: bool = False
+
+
+class StockPickerConfigUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    auto_refresh_enabled: Optional[bool] = None
+    auto_refresh_interval: Optional[int] = Field(None, ge=60, le=86400)
+    max_pool_size: Optional[int] = Field(None, ge=1, le=500)
+    cache_duration: Optional[int] = Field(None, ge=0, le=86400)
+    min_score_to_recommend: Optional[int] = Field(None, ge=0, le=100)
+    analysis_lookback: Optional[int] = Field(None, ge=60, le=1000)
+    ai_top_n_per_pool: Optional[int] = Field(None, ge=0, le=100)
+    history_retention_days: Optional[int] = Field(None, ge=1, le=3650)
+    max_history_per_stock: Optional[int] = Field(None, ge=1, le=1000)
 
 
 def _utc_now() -> datetime:
@@ -142,6 +162,7 @@ async def _run_analysis_job(
             pool_type=pool_type,
             force_refresh=force_refresh,
             progress_callback=update_progress,
+            job_id=job_id,
         )
         job['result'] = result
         job['status'] = 'completed'
@@ -182,7 +203,7 @@ async def search_securities(
 
 @router.get("/pools")
 async def get_pools(
-    pool_type: Optional[str] = None,
+    pool_type: Optional[Literal["LONG", "SHORT"]] = None,
     include_inactive: bool = True,
 ):
     """
@@ -198,6 +219,27 @@ async def get_pools(
     except Exception as e:
         logger.error(f"获取股票池失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/config")
+async def get_stock_picker_config():
+    try:
+        return get_stock_picker_service().get_config()
+    except Exception as exc:
+        logger.error("获取选股配置失败: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.put("/config")
+async def update_stock_picker_config(request: StockPickerConfigUpdate):
+    try:
+        updates = request.model_dump(exclude_none=True)
+        return get_stock_picker_service().update_config(updates)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("更新选股配置失败: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.post("/pools")
@@ -219,6 +261,8 @@ async def add_stock(request: AddStockRequest):
             "id": stock_id,
             "message": f"成功添加 {request.symbol} 到 {request.pool_type} 池"
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"添加股票失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -236,6 +280,8 @@ async def batch_add_stocks(request: BatchAddStocksRequest):
             symbols=request.symbols
         )
         return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"批量添加失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -250,6 +296,8 @@ async def remove_stock(pool_id: int):
         service = get_stock_picker_service()
         service.remove_stock(pool_id)
         return {"success": True, "message": "移除成功"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"移除股票失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -286,6 +334,8 @@ async def toggle_stock(pool_id: int):
         service = get_stock_picker_service()
         service.toggle_active(pool_id)
         return {"success": True, "message": "切换成功"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error(f"切换状态失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -383,9 +433,9 @@ async def get_analysis_progress(job_id: str):
 
 @router.get("/analysis")
 async def get_analysis_results(
-    pool_type: Optional[str] = None,
-    sort_by: str = 'recommendation',
-    limit: int = 100
+    pool_type: Optional[Literal["LONG", "SHORT"]] = None,
+    sort_by: Literal["recommendation", "score", "confidence"] = 'recommendation',
+    limit: int = Query(default=100, ge=1, le=500),
 ):
     """
     获取分析结果（排序）
@@ -406,6 +456,28 @@ async def get_analysis_results(
     except Exception as e:
         logger.error(f"获取分析结果失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/analysis/{symbol}/history")
+async def get_symbol_analysis_history(
+    symbol: str,
+    pool_type: Optional[Literal["LONG", "SHORT"]] = None,
+    limit: int = Query(default=30, ge=1, le=500),
+):
+    try:
+        return {
+            "symbol": symbol.strip().upper(),
+            "items": get_stock_picker_service().get_analysis_history(
+                symbol,
+                pool_type=pool_type,
+                limit=limit,
+            ),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("获取分析历史失败: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/analysis/{symbol}")

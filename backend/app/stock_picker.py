@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import asyncio
 import logging
 import json
+import re
 import numpy as np
 
 from .db import get_connection
@@ -29,16 +30,135 @@ class StockPickerService:
     SCORE_VERSION = "stock-picker-v2.1"
     PROMPT_VERSION = "stock-picker-v2"
     AI_MODEL = "deepseek-chat"
+    DEFAULT_CONFIG = {
+        'auto_refresh_enabled': False,
+        'auto_refresh_interval': 300,
+        'max_pool_size': 20,
+        'cache_duration': 300,
+        'min_score_to_recommend': 65,
+        'analysis_lookback': 250,
+        'ai_top_n_per_pool': 10,
+        'history_retention_days': 90,
+        'max_history_per_stock': 30,
+    }
     
     def __init__(self):
         self.cache: Dict[Tuple, Dict] = {}
         self.cache_duration = 300  # 5分钟
+
+    def get_config(self) -> Dict:
+        """Load the single persisted stock-picker configuration row."""
+        with get_connection() as conn:
+            row = conn.execute("""
+                SELECT
+                    auto_refresh_enabled,
+                    auto_refresh_interval,
+                    max_pool_size,
+                    cache_duration,
+                    min_score_to_recommend,
+                    analysis_lookback,
+                    ai_top_n_per_pool,
+                    history_retention_days,
+                    max_history_per_stock,
+                    updated_at
+                FROM stock_picker_config
+                WHERE id = 1
+            """).fetchone()
+        if not row:
+            return dict(self.DEFAULT_CONFIG)
+        keys = list(self.DEFAULT_CONFIG)
+        config = {
+            key: row[index] if row[index] is not None else self.DEFAULT_CONFIG[key]
+            for index, key in enumerate(keys)
+        }
+        config['updated_at'] = row[len(keys)]
+        return config
+
+    def update_config(self, updates: Dict) -> Dict:
+        """Persist validated configuration fields."""
+        allowed = set(self.DEFAULT_CONFIG)
+        unknown = set(updates) - allowed
+        if unknown:
+            raise ValueError(f"不支持的配置项: {', '.join(sorted(unknown))}")
+        if not updates:
+            return self.get_config()
+        ranges = {
+            'auto_refresh_interval': (60, 86400),
+            'max_pool_size': (1, 500),
+            'cache_duration': (0, 86400),
+            'min_score_to_recommend': (0, 100),
+            'analysis_lookback': (60, 1000),
+            'ai_top_n_per_pool': (0, 100),
+            'history_retention_days': (1, 3650),
+            'max_history_per_stock': (1, 1000),
+        }
+        for key, (minimum, maximum) in ranges.items():
+            if key in updates and not minimum <= int(updates[key]) <= maximum:
+                raise ValueError(f"{key} 必须在 {minimum}～{maximum} 之间")
+        if (
+            'auto_refresh_enabled' in updates
+            and not isinstance(updates['auto_refresh_enabled'], bool)
+        ):
+            raise ValueError("auto_refresh_enabled 必须是布尔值")
+
+        assignments = ", ".join(f"{key} = ?" for key in updates)
+        values = list(updates.values())
+        with get_connection() as conn:
+            conn.execute(
+                f"""
+                UPDATE stock_picker_config
+                SET {assignments}, updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+                """,
+                values,
+            )
+        self.cache.clear()
+        return self.get_config()
+
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        normalized = symbol.strip().upper()
+        if not normalized or not re.fullmatch(r"[A-Z0-9][A-Z0-9._-]{0,31}", normalized):
+            raise ValueError("股票代码格式无效")
+        return normalized
+
+    @staticmethod
+    def _validate_pool_type(pool_type: str) -> str:
+        normalized = pool_type.upper()
+        if normalized not in {'LONG', 'SHORT'}:
+            raise ValueError("pool_type 必须是 LONG 或 SHORT")
+        return normalized
     
     # ========== 股票池管理 ==========
     
     def add_stock(self, pool_type: str, symbol: str, **kwargs) -> int:
         """添加股票到池"""
+        pool_type = self._validate_pool_type(pool_type)
+        symbol = self._normalize_symbol(symbol)
+        config = self.get_config()
         with get_connection() as conn:
+            existing = conn.execute(
+                """
+                SELECT is_active
+                FROM stock_picker_pools
+                WHERE pool_type = ? AND symbol = ?
+                """,
+                (pool_type, symbol),
+            ).fetchone()
+            if not existing or not existing[0]:
+                active_count_row = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM stock_picker_pools
+                    WHERE pool_type = ? AND is_active = TRUE
+                    """,
+                    (pool_type,),
+                ).fetchone()
+                active_count = active_count_row[0] if active_count_row else 0
+                if active_count >= config['max_pool_size']:
+                    raise ValueError(
+                        f"{pool_type} 股票池最多启用 {config['max_pool_size']} 只股票"
+                    )
             result = conn.execute("""
                 INSERT INTO stock_picker_pools 
                 (pool_type, symbol, name, added_reason, priority)
@@ -58,15 +178,17 @@ class StockPickerService:
     
     def batch_add_stocks(self, pool_type: str, symbols: List[str]) -> Dict:
         """批量添加股票"""
+        pool_type = self._validate_pool_type(pool_type)
         success = []
         failed = []
         
         for symbol in symbols:
             try:
-                stock_id = self.add_stock(pool_type, symbol.strip())
+                normalized = self._normalize_symbol(symbol)
+                stock_id = self.add_stock(pool_type, normalized)
                 if stock_id:
-                    success.append(symbol)
-                    logger.info(f"✅ 添加成功: {symbol} (ID: {stock_id})")
+                    success.append(normalized)
+                    logger.info(f"✅ 添加成功: {normalized} (ID: {stock_id})")
             except Exception as e:
                 failed.append({'symbol': symbol, 'error': str(e)})
                 logger.error(f"❌ 添加失败: {symbol} - {e}")
@@ -81,6 +203,10 @@ class StockPickerService:
     def remove_stock(self, pool_id: int):
         """移除股票"""
         with get_connection() as conn:
+            conn.execute(
+                "DELETE FROM stock_picker_analysis WHERE pool_id = ?",
+                (pool_id,),
+            )
             conn.execute("DELETE FROM stock_picker_pools WHERE id = ?", (pool_id,))
         self._remove_cache_entries(lambda key: key[0] == pool_id)
     
@@ -122,7 +248,29 @@ class StockPickerService:
     
     def toggle_active(self, pool_id: int):
         """切换激活状态"""
+        config = self.get_config()
         with get_connection() as conn:
+            row = conn.execute(
+                "SELECT pool_type, is_active FROM stock_picker_pools WHERE id = ?",
+                (pool_id,),
+            ).fetchone()
+            if not row:
+                raise ValueError("股票池记录不存在")
+            pool_type, is_active = row
+            if not is_active:
+                count_row = conn.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM stock_picker_pools
+                    WHERE pool_type = ? AND is_active = TRUE
+                    """,
+                    (pool_type,),
+                ).fetchone()
+                active_count = count_row[0] if count_row else 0
+                if active_count >= config['max_pool_size']:
+                    raise ValueError(
+                        f"{pool_type} 股票池最多启用 {config['max_pool_size']} 只股票"
+                    )
             conn.execute("""
                 UPDATE stock_picker_pools 
                 SET is_active = NOT is_active 
@@ -176,9 +324,14 @@ class StockPickerService:
         self,
         pool_type: Optional[str] = None,
         force_refresh: bool = False,
-        progress_callback: Optional[callable] = None
+        progress_callback: Optional[callable] = None,
+        job_id: Optional[str] = None,
     ) -> Dict:
         """批量分析股票池"""
+        if pool_type:
+            pool_type = self._validate_pool_type(pool_type)
+        config = self.get_config()
+        self.cache_duration = config['cache_duration']
         
         pools = self.get_pools(pool_type)
         all_stocks = []
@@ -215,7 +368,7 @@ class StockPickerService:
                     sync_history_candlesticks,
                     symbols=symbols,
                     period='day',
-                    count=self.ANALYSIS_LOOKBACK,
+                    count=config['analysis_lookback'],
                     incremental=not force_refresh,
                     continue_on_error=True,
                 )
@@ -257,7 +410,9 @@ class StockPickerService:
                     symbol,
                     ptype,
                     ai_creds,
+                    config,
                     force_refresh,
+                    job_id,
                     progress_callback,
                 )
                 if prepared is None:
@@ -283,7 +438,7 @@ class StockPickerService:
                     reverse=True,
                 )
                 ai_pool_ids.update(
-                    item['pool_id'] for item in ranked[:self.AI_TOP_N_PER_POOL]
+                    item['pool_id'] for item in ranked[:config['ai_top_n_per_pool']]
                 )
             if progress_callback:
                 progress_callback({
@@ -347,11 +502,15 @@ class StockPickerService:
         symbol: str,
         pool_type: str,
         force_refresh: bool = False,
-        progress_callback: Optional[callable] = None
+        progress_callback: Optional[callable] = None,
+        job_id: Optional[str] = None,
     ) -> Dict:
         """分析单只股票；批量入口会复用同一行情连接。"""
         try:
             logger.info(f"🔍 开始分析: {symbol}")
+            pool_type = self._validate_pool_type(pool_type)
+            config = self.get_config()
+            self.cache_duration = config['cache_duration']
 
             from .services import sync_history_candlesticks
             try:
@@ -362,7 +521,7 @@ class StockPickerService:
                     sync_history_candlesticks,
                     symbols=[symbol],
                     period='day',
-                    count=self.ANALYSIS_LOOKBACK,
+                    count=config['analysis_lookback'],
                     incremental=not force_refresh,
                     continue_on_error=True,
                 )
@@ -381,7 +540,9 @@ class StockPickerService:
                 symbol,
                 pool_type,
                 ai_creds,
+                config,
                 force_refresh,
+                job_id,
                 progress_callback,
             )
             if prepared is None:
@@ -403,7 +564,9 @@ class StockPickerService:
         symbol: str,
         pool_type: str,
         ai_creds: Dict,
+        config: Dict,
         force_refresh: bool,
+        job_id: Optional[str] = None,
         progress_callback: Optional[callable] = None,
     ) -> Optional[Dict]:
         """Load local bars, check the versioned cache, and calculate quant factors."""
@@ -411,7 +574,7 @@ class StockPickerService:
 
         klines = get_cached_candlesticks(
             symbol,
-            limit=self.ANALYSIS_LOOKBACK,
+            limit=config['analysis_lookback'],
         )
         if not klines or len(klines) < 30:
             logger.warning(
@@ -435,9 +598,14 @@ class StockPickerService:
                 pool_type,
                 klines,
                 ai_creds,
+                config,
                 analysis_mode='quant',
             )
-            cached_result = self._get_cached_result(cache_key, force_refresh)
+            cached_result = self._get_cached_result(
+                cache_key,
+                force_refresh,
+                config['cache_duration'],
+            )
             if cached_result is not None:
                 logger.info("📋 使用版本化缓存: %s", symbol)
                 return {
@@ -461,7 +629,9 @@ class StockPickerService:
             'indicators': indicators,
             'score': score,
             'ai_creds': ai_creds,
+            'config': config,
             'force_refresh': force_refresh,
+            'job_id': job_id,
         }
 
     def _build_cache_key(
@@ -471,6 +641,7 @@ class StockPickerService:
         pool_type: str,
         klines: List[Dict],
         ai_creds: Dict,
+        config: Dict,
         analysis_mode: str,
     ) -> Tuple:
         latest = klines[-1]
@@ -492,19 +663,23 @@ class StockPickerService:
             self.PROMPT_VERSION,
             bool(ai_creds.get('TAVILY_API_KEY')),
             analysis_mode,
+            config.get('updated_at'),
+            config['analysis_lookback'],
         )
 
     def _get_cached_result(
         self,
         cache_key: Tuple,
         force_refresh: bool,
+        cache_duration: Optional[int] = None,
     ) -> Optional[Dict]:
         if force_refresh:
             return None
         cached = self.cache.get(cache_key)
         if not cached:
             return None
-        if datetime.now() - cached['time'] < timedelta(seconds=self.cache_duration):
+        duration = cache_duration if cache_duration is not None else self.cache_duration
+        if datetime.now() - cached['time'] < timedelta(seconds=duration):
             return cached['data']
         del self.cache[cache_key]
         return None
@@ -524,6 +699,7 @@ class StockPickerService:
         indicators = prepared['indicators']
         klines = prepared['klines']
         ai_creds = prepared['ai_creds']
+        config = prepared['config']
         api_key = ai_creds.get('DEEPSEEK_API_KEY')
         tavily_api_key = ai_creds.get('TAVILY_API_KEY')
         analysis_mode = 'ai' if use_ai and api_key else 'quant'
@@ -533,11 +709,13 @@ class StockPickerService:
             pool_type,
             klines,
             ai_creds,
+            config,
             analysis_mode=analysis_mode,
         )
         cached_result = self._get_cached_result(
             cache_key,
             prepared.get('force_refresh', False),
+            config['cache_duration'],
         )
         if cached_result is not None:
             logger.info("📋 使用版本化缓存: %s (%s)", symbol, analysis_mode)
@@ -602,7 +780,9 @@ class StockPickerService:
             analysis,
             pool_type,
             recommendation_score,
+            min_score_to_recommend=config['min_score_to_recommend'],
         )
+        analysis['analysis_mode'] = analysis_mode
         result = self._save_analysis_result(
             pool_id=prepared['pool_id'],
             symbol=symbol,
@@ -611,6 +791,13 @@ class StockPickerService:
             analysis=analysis,
             recommendation_score=recommendation_score,
             recommendation_reason=recommendation_reason,
+            score_version=self.SCORE_VERSION,
+            prompt_version=self.PROMPT_VERSION,
+            ai_model=self.AI_MODEL if api_key else None,
+            analysis_mode=analysis_mode,
+            job_id=prepared.get('job_id'),
+            history_retention_days=config['history_retention_days'],
+            max_history_per_stock=config['max_history_per_stock'],
         )
         self.cache[cache_key] = {
             'time': datetime.now(),
@@ -624,143 +811,12 @@ class StockPickerService:
         )
         return result
     
-    def _determine_action(self, score: Dict, pool_type: str) -> str:
-        """根据评分确定行动"""
-        total_score = score['total']
-        
-        if pool_type == 'LONG':
-            if total_score >= 80:
-                return 'BUY'
-            elif total_score >= 65:
-                return 'BUY'
-            else:
-                return 'HOLD'
-        else:  # SHORT
-            if total_score <= 40:
-                return 'SELL'
-            elif total_score <= 50:
-                return 'SELL'
-            else:
-                return 'HOLD'
-    
-    def _calculate_confidence(self, score: Dict, pool_type: str) -> float:
-        """根据评分计算信心度"""
-        total_score = score['total']
-        grade = score['grade']
-        
-        # 基于评级映射信心度
-        if grade == 'A':
-            base_confidence = 0.85
-        elif grade == 'B':
-            base_confidence = 0.75
-        elif grade == 'C':
-            base_confidence = 0.65
-        else:
-            base_confidence = 0.50
-        
-        # 做空池需要反转逻辑
-        if pool_type == 'SHORT':
-            base_confidence = 1.0 - (total_score / 100) * 0.5 + 0.5
-        
-        return min(0.95, max(0.50, base_confidence))
-    
-    def _generate_reasoning(self, score: Dict, indicators: Dict, pool_type: str) -> List[str]:
-        """生成推理理由"""
-        reasons = []
-        signals = score.get('signals', [])
-        
-        # 添加评分相关理由
-        reasons.append(f"量化评分: {score['total']:.1f}/100 ({score['grade']}级)")
-        
-        # 添加主要信号
-        for signal in signals[:5]:  # 最多5个信号
-            reasons.append(signal)
-        
-        # 根据池类型添加特定理由
-        if pool_type == 'LONG':
-            if score['total'] >= 80:
-                reasons.append("多个买入信号共振，强烈推荐")
-            elif score['total'] >= 65:
-                reasons.append("技术面良好，推荐买入")
-        else:
-            if score['total'] <= 40:
-                reasons.append("技术面偏弱，适合做空")
-            elif score['total'] <= 50:
-                reasons.append("弱势形态，可考虑做空")
-        
-        return reasons
-    
-    def calculate_recommendation_score(
-        self, 
-        analysis: Dict, 
-        pool_type: str
-    ) -> float:
-        """
-        计算推荐度（0-100）⬆️ V3.0优化：增加波动性权重
-        
-        新公式：
-        - 做多: 评分*0.4 + 信心度*50*0.2 + 信号强度*0.2 + 波动性*0.2
-        - 做空: (100-评分)*0.4 + 信心度*50*0.2 + 信号强度*0.2 + 波动性*0.2
-        """
-        
-        score_total = analysis.get('score', {}).get('total', 50)
-        confidence = analysis.get('confidence', 0.5)
-        signals = analysis.get('score', {}).get('signals', [])
-        volatility_score = analysis.get('score', {}).get('breakdown', {}).get('volatility', 0)
-        
-        # 计算信号强度（0-20）
-        signal_strength = self._calculate_signal_strength(signals)
-        
-        # 波动性归一化到0-20分
-        volatility_weight = min(20, (volatility_score / 25) * 20)
-        
-        if pool_type == 'LONG':
-            # 做多：高分好
-            recommendation = (
-                score_total * 0.4 +           # 降低评分权重（原0.5）
-                confidence * 50 * 0.2 +       # 降低信心度权重（原0.3）
-                signal_strength * 0.2 +       # 保持信号权重
-                volatility_weight             # ⬆️ 新增波动性权重（20%）
-            )
-        else:  # SHORT
-            # 做空：低分好
-            recommendation = (
-                (100 - score_total) * 0.4 +
-                confidence * 50 * 0.2 +
-                signal_strength * 0.2 +
-                volatility_weight
-            )
-        
-        return min(100, max(0, recommendation))
-    
-    def _calculate_signal_strength(self, signals: List[str]) -> float:
-        """计算信号强度（0-20）"""
-        
-        strong_patterns = [
-            "多头排列", "MACD强势金叉", "红三兵", "锤子线形态",
-            "空头排列", "黑三兵", "吊颈线形态"
-        ]
-        medium_patterns = [
-            "MACD金叉", "适度放量", "明显放量", "RSI健康",
-            "接近布林下轨", "RSI超卖", "价格在MA20上方"
-        ]
-        
-        score = 0
-        for signal in signals:
-            if any(p in signal for p in strong_patterns):
-                score += 5
-            elif any(p in signal for p in medium_patterns):
-                score += 3
-            else:
-                score += 1
-        
-        return min(20, score)
-    
     def _generate_recommendation_reason(
         self,
         analysis: Dict,
         pool_type: str,
-        recommendation_score: float
+        recommendation_score: float,
+        min_score_to_recommend: int = 65,
     ) -> str:
         """生成推荐理由"""
         
@@ -768,23 +824,25 @@ class StockPickerService:
         confidence = analysis.get('confidence', 0.5)
         action = analysis.get('action', 'HOLD')
         ai_available = analysis.get('ai_status', 'available') == 'available'
+        strong_threshold = min(100, min_score_to_recommend + 15)
+        consider_threshold = max(0, min_score_to_recommend - 15)
         
         if pool_type == 'LONG':
-            if recommendation_score >= 80:
+            if recommendation_score >= strong_threshold:
                 source = f"AI建议{action}" if ai_available else f"量化建议{action}"
                 return f"强烈推荐买入：{grade}级评分 + 信心度{confidence:.0%} + {source}"
-            elif recommendation_score >= 65:
+            elif recommendation_score >= min_score_to_recommend:
                 return f"推荐买入：{grade}级评分 + 信心度{confidence:.0%}"
-            elif recommendation_score >= 50:
+            elif recommendation_score >= consider_threshold:
                 return f"可考虑买入：技术面尚可"
             else:
                 return f"谨慎观望：评分较低或信号不足"
         else:  # SHORT
-            if recommendation_score >= 80:
+            if recommendation_score >= strong_threshold:
                 return f"强烈推荐做空：弱势形态 + 信心度{confidence:.0%}"
-            elif recommendation_score >= 65:
+            elif recommendation_score >= min_score_to_recommend:
                 return f"推荐做空：技术面偏弱"
-            elif recommendation_score >= 50:
+            elif recommendation_score >= consider_threshold:
                 return f"可考虑做空：有下跌迹象"
             else:
                 return f"谨慎观望：做空信号不足"
@@ -1661,6 +1719,18 @@ class StockPickerService:
         score = analysis.get('score', {})
         breakdown = score.get('breakdown', {})
         indicators = analysis.get('indicators', {})
+        klines = kwargs.get('klines', [])
+        data_as_of = klines[-1].get('ts') if klines else None
+        indicators_json = json.dumps(
+            indicators,
+            ensure_ascii=False,
+            default=str,
+        )
+        klines_snapshot_json = json.dumps(
+            klines,
+            ensure_ascii=False,
+            default=str,
+        )
         
         with get_connection() as conn:
             conn.execute("""
@@ -1671,9 +1741,17 @@ class StockPickerService:
                     score_trend, score_momentum, score_volume, 
                     score_volatility, score_pattern,
                     ai_action, ai_confidence, ai_reasoning,
-                    signals, recommendation_score, recommendation_reason,
+                    ai_status, ai_error, indicators, signals,
+                    recommendation_score, recommendation_reason,
+                    klines_snapshot, data_as_of,
+                    score_version, prompt_version, ai_model,
+                    analysis_mode, job_id,
                     score_support_resistance
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
             """, (
                 kwargs['pool_id'],
                 kwargs['symbol'],
@@ -1691,11 +1769,27 @@ class StockPickerService:
                 analysis.get('action', 'HOLD'),
                 analysis.get('confidence', 0),
                 json.dumps(analysis.get('reasoning', []), ensure_ascii=False),
+                analysis.get('ai_status'),
+                analysis.get('ai_error'),
+                indicators_json,
                 json.dumps(score.get('signals', []), ensure_ascii=False),
                 kwargs['recommendation_score'],
                 kwargs['recommendation_reason'],
-                breakdown.get('support_resistance', 0)
+                klines_snapshot_json,
+                data_as_of,
+                kwargs.get('score_version', self.SCORE_VERSION),
+                kwargs.get('prompt_version', self.PROMPT_VERSION),
+                kwargs.get('ai_model'),
+                kwargs.get('analysis_mode'),
+                kwargs.get('job_id'),
+                breakdown.get('support_resistance', 0),
             ))
+            self._prune_analysis_history(
+                conn,
+                kwargs['pool_id'],
+                kwargs.get('history_retention_days', 90),
+                kwargs.get('max_history_per_stock', 30),
+            )
         
         return {
             'symbol': kwargs['symbol'],
@@ -1703,8 +1797,45 @@ class StockPickerService:
             'score': score,
             'recommendation_score': kwargs['recommendation_score'],
             'recommendation_reason': kwargs['recommendation_reason'],
-            'analysis': analysis
+            'analysis': analysis,
+            'data_as_of': str(data_as_of) if data_as_of is not None else None,
+            'score_version': kwargs.get('score_version', self.SCORE_VERSION),
+            'prompt_version': kwargs.get('prompt_version', self.PROMPT_VERSION),
+            'ai_model': kwargs.get('ai_model'),
+            'analysis_mode': kwargs.get('analysis_mode'),
+            'job_id': kwargs.get('job_id'),
         }
+
+    def _prune_analysis_history(
+        self,
+        conn,
+        pool_id: int,
+        retention_days: int,
+        max_history_per_stock: int,
+    ) -> None:
+        cutoff = datetime.now() - timedelta(days=max(1, int(retention_days)))
+        max_history = max(1, int(max_history_per_stock))
+        conn.execute(
+            """
+            DELETE FROM stock_picker_analysis
+            WHERE pool_id = ? AND analysis_time < ?
+            """,
+            (pool_id, cutoff),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM stock_picker_analysis
+            WHERE pool_id = ?
+              AND id NOT IN (
+                  SELECT id
+                  FROM stock_picker_analysis
+                  WHERE pool_id = ?
+                  ORDER BY analysis_time DESC, id DESC
+                  LIMIT {max_history}
+              )
+            """,
+            (pool_id, pool_id),
+        )
     
     def get_analysis_results(
         self,
@@ -1743,7 +1874,15 @@ class StockPickerService:
                     a.klines_snapshot,
                     a.score_support_resistance,
                     p.name,
-                    p.added_reason
+                    p.added_reason,
+                    a.ai_status,
+                    a.ai_error,
+                    a.data_as_of,
+                    a.score_version,
+                    a.prompt_version,
+                    a.ai_model,
+                    a.analysis_mode,
+                    a.job_id
                 FROM stock_picker_analysis a
                 JOIN stock_picker_pools p ON a.pool_id = p.id
                 WHERE p.is_active = TRUE
@@ -1808,13 +1947,24 @@ class StockPickerService:
                     'ai_decision': {
                         'action': row[15],
                         'confidence': row[16],
-                        'reasoning': json.loads(row[17]) if row[17] else []
+                        'reasoning': json.loads(row[17]) if row[17] else [],
+                        'status': row[26],
+                        'error': row[27],
                     },
+                    'indicators': json.loads(row[18]) if row[18] else {},
                     'signals': json.loads(row[19]) if row[19] else [],
                     'recommendation_score': row[20],
                     'recommendation_reason': row[21],
                     'name': row[24],
-                    'added_reason': row[25]
+                    'added_reason': row[25],
+                    'metadata': {
+                        'data_as_of': str(row[28]) if row[28] else None,
+                        'score_version': row[29],
+                        'prompt_version': row[30],
+                        'ai_model': row[31],
+                        'analysis_mode': row[32],
+                        'job_id': row[33],
+                    },
                 }
                 
                 if data['pool_type'] == 'LONG':
@@ -1832,6 +1982,59 @@ class StockPickerService:
                     'short_avg_score': sum(r['score']['total'] for r in short_results) / len(short_results) if short_results else 0
                 }
             }
+
+    def get_analysis_history(
+        self,
+        symbol: str,
+        pool_type: Optional[str] = None,
+        limit: int = 30,
+    ) -> List[Dict]:
+        """Return retained analysis history with version and job metadata."""
+        symbol = self._normalize_symbol(symbol)
+        if pool_type:
+            pool_type = self._validate_pool_type(pool_type)
+        safe_limit = min(500, max(1, int(limit)))
+        query = """
+            SELECT
+                id, pool_id, symbol, pool_type, analysis_time,
+                score_total, score_grade, recommendation_score,
+                recommendation_reason, ai_action, ai_confidence,
+                ai_status, ai_error, data_as_of, score_version,
+                prompt_version, ai_model, analysis_mode, job_id
+            FROM stock_picker_analysis
+            WHERE symbol = ?
+        """
+        params = [symbol]
+        if pool_type:
+            query += " AND pool_type = ?"
+            params.append(pool_type)
+        query += f" ORDER BY analysis_time DESC, id DESC LIMIT {safe_limit}"
+        with get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [
+            {
+                'id': row[0],
+                'pool_id': row[1],
+                'symbol': row[2],
+                'pool_type': row[3],
+                'analysis_time': str(row[4]),
+                'score_total': row[5],
+                'score_grade': row[6],
+                'recommendation_score': row[7],
+                'recommendation_reason': row[8],
+                'ai_action': row[9],
+                'ai_confidence': row[10],
+                'ai_status': row[11],
+                'ai_error': row[12],
+                'data_as_of': str(row[13]) if row[13] else None,
+                'score_version': row[14],
+                'prompt_version': row[15],
+                'ai_model': row[16],
+                'analysis_mode': row[17],
+                'job_id': row[18],
+            }
+            for row in rows
+        ]
 
 
 # 全局实例

@@ -34,6 +34,17 @@ export interface AIDecision {
   action: string;
   confidence: number;
   reasoning: string[];
+  status?: 'available' | 'disabled' | 'skipped' | 'fallback' | 'error';
+  error?: string;
+}
+
+export interface AnalysisMetadata {
+  data_as_of?: string;
+  score_version?: string;
+  prompt_version?: string;
+  ai_model?: string;
+  analysis_mode?: 'ai' | 'quant';
+  job_id?: string;
 }
 
 export interface Analysis {
@@ -50,6 +61,8 @@ export interface Analysis {
   signals: string[];
   recommendation_score: number;
   recommendation_reason: string;
+  indicators?: Record<string, number | string | null>;
+  metadata?: AnalysisMetadata;
   name?: string;
   added_reason?: string;
 }
@@ -85,6 +98,42 @@ export interface AnalysisResponse {
     long_avg_score: number;
     short_avg_score: number;
   };
+}
+
+export interface StockPickerConfig {
+  auto_refresh_enabled: boolean;
+  auto_refresh_interval: number;
+  max_pool_size: number;
+  cache_duration: number;
+  min_score_to_recommend: number;
+  analysis_lookback: number;
+  ai_top_n_per_pool: number;
+  history_retention_days: number;
+  max_history_per_stock: number;
+  updated_at?: string;
+}
+
+export async function getStockPickerConfig(): Promise<StockPickerConfig> {
+  const response = await fetch(`${API_BASE}/api/stock-picker/config`);
+  if (!response.ok) {
+    throw new Error('获取选股配置失败');
+  }
+  return response.json();
+}
+
+export async function updateStockPickerConfig(
+  updates: Partial<Omit<StockPickerConfig, 'updated_at'>>,
+): Promise<StockPickerConfig> {
+  const response = await fetch(`${API_BASE}/api/stock-picker/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '更新选股配置失败');
+  }
+  return response.json();
 }
 
 /**

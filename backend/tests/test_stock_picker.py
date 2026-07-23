@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from datetime import datetime, timedelta
+import json
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import duckdb
 from fastapi import BackgroundTasks, HTTPException
 from fastapi.testclient import TestClient
 
 from app.ai_analyzer import DeepSeekAnalyzer, calculate_technical_indicators
-from app.main import app
+from app.db import _run_migrations
+from app.main import app, _run_stock_picker_auto_refresh_once
 from app.routers import stock_picker as stock_picker_router
 from app.routers.stock_picker import get_pools as get_pools_route
 from app.stock_picker import StockPickerService
@@ -31,6 +36,13 @@ class _FakeConnection:
 
     def fetchall(self):
         return self.rows
+
+
+def _test_config(**overrides) -> dict:
+    config = dict(StockPickerService.DEFAULT_CONFIG)
+    config["updated_at"] = "2026-07-23T00:00:00"
+    config.update(overrides)
+    return config
 
 
 class StockPickerPersistenceTest(unittest.TestCase):
@@ -128,6 +140,8 @@ class StockPickerPersistenceTest(unittest.TestCase):
             75.0, "B", 20.0, 15.0, 10.0, 8.0, 10.0,
             "BUY", 0.8, '["test"]', None, '[]', 80.0, "test", None,
             12.0, "Test", "reason",
+            "available", None, "2026-07-23", "stock-picker-v2.1",
+            "stock-picker-v2", "deepseek-chat", "ai", "job-1",
         )
         connection = _FakeConnection([row])
         service = StockPickerService()
@@ -142,6 +156,256 @@ class StockPickerPersistenceTest(unittest.TestCase):
             12.0,
         )
         self.assertEqual(result["long_analysis"][0]["name"], "Test")
+
+
+class StockPickerConfigAndSnapshotTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.connection = duckdb.connect(":memory:")
+        _run_migrations(self.connection)
+
+        @contextmanager
+        def connection_context():
+            yield self.connection
+
+        self.connection_patcher = patch(
+            "app.stock_picker.get_connection",
+            side_effect=lambda: connection_context(),
+        )
+        self.connection_patcher.start()
+        self.service = StockPickerService()
+
+    def tearDown(self) -> None:
+        self.connection_patcher.stop()
+        self.connection.close()
+
+    def test_migration_and_config_update_expose_runtime_fields(self) -> None:
+        analysis_columns = {
+            row[1]
+            for row in self.connection.execute(
+                "PRAGMA table_info('stock_picker_analysis')"
+            ).fetchall()
+        }
+        config_columns = {
+            row[1]
+            for row in self.connection.execute(
+                "PRAGMA table_info('stock_picker_config')"
+            ).fetchall()
+        }
+
+        self.assertTrue({
+            "ai_status",
+            "ai_error",
+            "data_as_of",
+            "score_version",
+            "prompt_version",
+            "ai_model",
+            "analysis_mode",
+            "job_id",
+        }.issubset(analysis_columns))
+        self.assertTrue({
+            "analysis_lookback",
+            "ai_top_n_per_pool",
+            "history_retention_days",
+            "max_history_per_stock",
+        }.issubset(config_columns))
+
+        updated = self.service.update_config({
+            "analysis_lookback": 300,
+            "ai_top_n_per_pool": 5,
+            "cache_duration": 600,
+            "history_retention_days": 30,
+        })
+
+        self.assertEqual(updated["analysis_lookback"], 300)
+        self.assertEqual(updated["ai_top_n_per_pool"], 5)
+        self.assertEqual(updated["cache_duration"], 600)
+        self.assertEqual(updated["history_retention_days"], 30)
+
+    def test_config_http_contract_validates_and_persists_updates(self) -> None:
+        with patch(
+            "app.routers.stock_picker.get_stock_picker_service",
+            return_value=self.service,
+        ):
+            client = TestClient(app)
+            try:
+                updated = client.put(
+                    "/api/stock-picker/config",
+                    json={"analysis_lookback": 320, "ai_top_n_per_pool": 6},
+                )
+                invalid = client.put(
+                    "/api/stock-picker/config",
+                    json={"unknown_setting": 1},
+                )
+                current = client.get("/api/stock-picker/config")
+            finally:
+                client.close()
+
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["analysis_lookback"], 320)
+        self.assertEqual(invalid.status_code, 422)
+        self.assertEqual(current.status_code, 200)
+        self.assertEqual(current.json()["ai_top_n_per_pool"], 6)
+
+    def test_auto_refresh_config_creates_an_isolated_job(self) -> None:
+        disabled = asyncio.run(
+            _run_stock_picker_auto_refresh_once({
+                "auto_refresh_enabled": False,
+            })
+        )
+        with (
+            patch.object(
+                stock_picker_router,
+                "_create_analysis_job",
+                return_value="auto-job",
+            ) as create_job,
+            patch.object(
+                stock_picker_router,
+                "_run_analysis_job",
+                new=AsyncMock(),
+            ) as run_job,
+        ):
+            enabled = asyncio.run(
+                _run_stock_picker_auto_refresh_once({
+                    "auto_refresh_enabled": True,
+                })
+            )
+
+        self.assertIsNone(disabled)
+        self.assertEqual(enabled, "auto-job")
+        create_job.assert_called_once_with(None, False)
+        run_job.assert_awaited_once_with("auto-job", None, False)
+
+    def test_pool_capacity_and_symbol_normalization_are_enforced(self) -> None:
+        self.service.update_config({"max_pool_size": 1})
+        first_id = self.service.add_stock("long", " aapl.us ")
+
+        row = self.connection.execute(
+            "SELECT pool_type, symbol, is_active FROM stock_picker_pools WHERE id = ?",
+            (first_id,),
+        ).fetchone()
+        self.assertEqual(row, ("LONG", "AAPL.US", True))
+
+        with self.assertRaisesRegex(ValueError, "最多启用 1 只"):
+            self.service.add_stock("LONG", "MSFT.US")
+
+        self.service.toggle_active(first_id)
+        second_id = self.service.add_stock("LONG", "MSFT.US")
+        self.assertIsInstance(second_id, int)
+        with self.assertRaisesRegex(ValueError, "最多启用 1 只"):
+            self.service.toggle_active(first_id)
+
+    def test_config_update_invalidates_existing_cache(self) -> None:
+        self.service.cache[("pool",)] = {
+            "time": datetime.now(),
+            "data": {"symbol": "TEST.US"},
+        }
+
+        self.service.update_config({"cache_duration": 120})
+
+        self.assertEqual(self.service.cache, {})
+
+    def test_recommendation_threshold_comes_from_config(self) -> None:
+        analysis = {
+            "score": {"grade": "B"},
+            "confidence": 0.8,
+            "action": "BUY",
+            "ai_status": "available",
+        }
+
+        default_reason = self.service._generate_recommendation_reason(
+            analysis,
+            "LONG",
+            70,
+            min_score_to_recommend=65,
+        )
+        stricter_reason = self.service._generate_recommendation_reason(
+            analysis,
+            "LONG",
+            70,
+            min_score_to_recommend=80,
+        )
+
+        self.assertIn("推荐买入", default_reason)
+        self.assertIn("可考虑买入", stricter_reason)
+
+    def test_snapshot_versions_and_history_retention_are_persisted(self) -> None:
+        pool_id = self.service.add_stock("LONG", "TEST.US")
+        klines = _trend_klines(1, 60)
+        for index, bar in enumerate(klines):
+            bar["ts"] = datetime(2026, 1, 1) + timedelta(days=index)
+        score = self.service._calculate_advanced_score_v2(klines, "LONG")
+        indicators = calculate_technical_indicators(klines)
+        analysis = {
+            "score": score,
+            "indicators": indicators,
+            "action": "BUY",
+            "confidence": 0.8,
+            "reasoning": ["test"],
+            "ai_status": "available",
+        }
+
+        for job_id in ("job-1", "job-2"):
+            self.service._save_analysis_result(
+                pool_id=pool_id,
+                symbol="TEST.US",
+                pool_type="LONG",
+                klines=klines,
+                analysis=analysis,
+                recommendation_score=75,
+                recommendation_reason="test",
+                score_version="score-v1",
+                prompt_version="prompt-v1",
+                ai_model="deepseek-chat",
+                analysis_mode="ai",
+                job_id=job_id,
+                history_retention_days=90,
+                max_history_per_stock=1,
+            )
+
+        rows = self.connection.execute(
+            """
+            SELECT
+                indicators, klines_snapshot, data_as_of,
+                score_version, prompt_version, ai_model,
+                analysis_mode, job_id, ai_status
+            FROM stock_picker_analysis
+            WHERE pool_id = ?
+            """,
+            (pool_id,),
+        ).fetchall()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(json.loads(row[0])["current_price"], indicators["current_price"])
+        self.assertEqual(len(json.loads(row[1])), len(klines))
+        self.assertEqual(row[2], klines[-1]["ts"])
+        self.assertEqual(row[3:9], (
+            "score-v1",
+            "prompt-v1",
+            "deepseek-chat",
+            "ai",
+            "job-2",
+            "available",
+        ))
+
+        history = self.service.get_analysis_history("test.us", pool_type="LONG")
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["job_id"], "job-2")
+        self.assertEqual(history[0]["score_version"], "score-v1")
+        latest = self.service.get_analysis_results("LONG")
+        latest_item = latest["long_analysis"][0]
+        self.assertEqual(latest_item["ai_decision"]["status"], "available")
+        self.assertEqual(latest_item["metadata"]["job_id"], "job-2")
+        self.assertEqual(
+            latest_item["indicators"]["current_price"],
+            indicators["current_price"],
+        )
+
+        self.service.remove_stock(pool_id)
+        remaining = self.connection.execute(
+            "SELECT COUNT(*) FROM stock_picker_analysis WHERE pool_id = ?",
+            (pool_id,),
+        ).fetchone()[0]
+        self.assertEqual(remaining, 0)
 
 
 class StockPickerJobIsolationTest(unittest.TestCase):
@@ -187,7 +451,7 @@ class StockPickerJobIsolationTest(unittest.TestCase):
         second_job_id = stock_picker_router._create_analysis_job("SHORT", False)
         service = MagicMock()
 
-        async def analyze_pool(pool_type, force_refresh, progress_callback):
+        async def analyze_pool(pool_type, force_refresh, progress_callback, job_id):
             progress_callback({
                 "status": "running",
                 "total": 2,
@@ -266,7 +530,7 @@ class StockPickerJobIsolationTest(unittest.TestCase):
     def test_http_job_lifecycle_returns_isolated_sse_stream(self) -> None:
         service = MagicMock()
 
-        async def analyze_pool(pool_type, force_refresh, progress_callback):
+        async def analyze_pool(pool_type, force_refresh, progress_callback, job_id):
             progress_callback({
                 "status": "running",
                 "total": 1,
@@ -286,16 +550,19 @@ class StockPickerJobIsolationTest(unittest.TestCase):
             return_value=service,
         ):
             client = TestClient(app)
-            response = client.post(
-                "/api/stock-picker/analyze",
-                json={"pool_type": "LONG", "force_refresh": False},
-            )
+            try:
+                response = client.post(
+                    "/api/stock-picker/analyze",
+                    json={"pool_type": "LONG", "force_refresh": False},
+                )
+                self.assertEqual(response.status_code, 202)
+                job_id = response.json()["job_id"]
+                progress = client.get(
+                    f"/api/stock-picker/analysis/progress/{job_id}",
+                )
+            finally:
+                client.close()
 
-        self.assertEqual(response.status_code, 202)
-        job_id = response.json()["job_id"]
-        progress = TestClient(app).get(
-            f"/api/stock-picker/analysis/progress/{job_id}",
-        )
         self.assertEqual(progress.status_code, 200)
         self.assertIn(f'"job_id": "{job_id}"', progress.text)
         self.assertIn('"status": "completed"', progress.text)
@@ -462,9 +729,13 @@ class StockPickerDirectionalScoreTest(unittest.TestCase):
 class StockPickerPerformanceFlowTest(unittest.TestCase):
     def setUp(self) -> None:
         self.service = StockPickerService()
+        self.config = _test_config()
+        self.service.get_config = MagicMock(return_value=self.config)
         self.klines = _trend_klines(1)
 
     def test_pool_syncs_once_and_only_top_n_enters_ai(self) -> None:
+        self.config["analysis_lookback"] = 180
+        self.config["ai_top_n_per_pool"] = 4
         stocks = [
             {
                 "id": index,
@@ -477,7 +748,16 @@ class StockPickerPerformanceFlowTest(unittest.TestCase):
             return_value={"long_pool": stocks, "short_pool": []}
         )
 
-        def prepare(pool_id, symbol, pool_type, ai_creds, force_refresh, callback):
+        def prepare(
+            pool_id,
+            symbol,
+            pool_type,
+            ai_creds,
+            config,
+            force_refresh,
+            job_id,
+            callback,
+        ):
             return {
                 "pool_id": pool_id,
                 "symbol": symbol,
@@ -508,7 +788,7 @@ class StockPickerPerformanceFlowTest(unittest.TestCase):
 
         self.assertEqual(result["success"], 12)
         sync_history.assert_called_once()
-        self.assertEqual(sync_history.call_args.kwargs["count"], 250)
+        self.assertEqual(sync_history.call_args.kwargs["count"], 180)
         self.assertTrue(sync_history.call_args.kwargs["incremental"])
         self.assertEqual(
             set(sync_history.call_args.kwargs["symbols"]),
@@ -516,9 +796,9 @@ class StockPickerPerformanceFlowTest(unittest.TestCase):
         )
         self.assertEqual(
             {pool_id for pool_id, uses_ai in ai_flags.items() if uses_ai},
-            set(range(3, 13)),
+            set(range(9, 13)),
         )
-        self.assertEqual(sum(ai_flags.values()), self.service.AI_TOP_N_PER_POOL)
+        self.assertEqual(sum(ai_flags.values()), 4)
 
     def test_quant_only_result_cache_reuses_same_data_and_version(self) -> None:
         saved_result = {"symbol": "TEST.US", "cached": True}
@@ -562,6 +842,7 @@ class StockPickerPerformanceFlowTest(unittest.TestCase):
             "LONG",
             first_bars,
             {},
+            self.config,
             "quant",
         )
         second_key = self.service._build_cache_key(
@@ -570,6 +851,7 @@ class StockPickerPerformanceFlowTest(unittest.TestCase):
             "LONG",
             second_bars,
             {},
+            self.config,
             "quant",
         )
 
@@ -586,6 +868,7 @@ class StockPickerPerformanceFlowTest(unittest.TestCase):
             "indicators": indicators,
             "score": score,
             "ai_creds": {"DEEPSEEK_API_KEY": "test-key"},
+            "config": self.config,
             "force_refresh": True,
         }
 
@@ -610,6 +893,8 @@ class StockPickerPerformanceFlowTest(unittest.TestCase):
 class StockPickerUnifiedAnalysisTest(unittest.TestCase):
     def setUp(self) -> None:
         self.service = StockPickerService()
+        self.config = _test_config()
+        self.service.get_config = MagicMock(return_value=self.config)
         self.klines = _trend_klines(1)
         self.score = self.service._calculate_advanced_score_v2(self.klines, "LONG")
         self.indicators = calculate_technical_indicators(self.klines)

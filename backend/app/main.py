@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -173,6 +174,39 @@ async def _auto_sync_position_data() -> None:
         logger.error(f"auto-sync: fatal error: {e}")
 
 
+async def _run_stock_picker_auto_refresh_once(config: dict) -> Optional[str]:
+    if not config['auto_refresh_enabled']:
+        return None
+    job_id = stock_picker_router._create_analysis_job(None, False)
+    logger.info("stock-picker auto-refresh: starting job %s", job_id)
+    await stock_picker_router._run_analysis_job(job_id, None, False)
+    return job_id
+
+
+async def _auto_refresh_stock_picker() -> None:
+    """Run configured stock-picker refreshes as isolated analysis jobs."""
+    from .stock_picker import get_stock_picker_service
+
+    await asyncio.sleep(30)
+    service = get_stock_picker_service()
+    last_run = 0.0
+    while True:
+        try:
+            config = await asyncio.to_thread(service.get_config)
+            interval = max(60, int(config['auto_refresh_interval']))
+            now = asyncio.get_running_loop().time()
+            if now - last_run >= interval:
+                job_id = await _run_stock_picker_auto_refresh_once(config)
+                if job_id is not None:
+                    last_run = asyncio.get_running_loop().time()
+            await asyncio.sleep(min(30, interval))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("stock-picker auto-refresh failed: %s", exc)
+            await asyncio.sleep(30)
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     logger.info("startup: entering handler")
@@ -195,6 +229,9 @@ async def on_startup() -> None:
     # Auto-sync position historical data
     _start_background_task(_auto_sync_position_data())
     logger.info("startup: auto-sync task scheduled")
+
+    _start_background_task(_auto_refresh_stock_picker())
+    logger.info("startup: stock-picker auto-refresh scheduled")
     
     # Initialize AI Trading Engine (if enabled)
     ai_engine = get_ai_trading_engine()

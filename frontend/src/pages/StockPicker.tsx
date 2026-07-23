@@ -553,6 +553,19 @@ function StockItem({
   const priceChangeColor = analysis.price_change_1d >= 0
     ? 'text-emerald-600 dark:text-emerald-400'
     : 'text-red-600 dark:text-red-400';
+  const aiStatus = analysis.ai_decision.status || 'available';
+  const aiStatusLabels: Record<string, string> = {
+    available: 'AI 已完成',
+    disabled: 'AI 未配置',
+    skipped: '量化初筛',
+    fallback: 'AI 已降级',
+    error: 'AI 错误',
+  };
+  const aiStatusVariant: 'success' | 'warning' | 'default' = aiStatus === 'available'
+    ? 'success'
+    : aiStatus === 'fallback' || aiStatus === 'error'
+      ? 'warning'
+      : 'default';
 
   return (
     <div className="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-4 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors">
@@ -651,7 +664,19 @@ function StockItem({
 
           {/* AI分析 */}
           <div>
-            <p className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">AI分析</p>
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <p className="text-sm font-medium text-slate-700 dark:text-slate-300">分析结论</p>
+              <Badge variant={aiStatusVariant}>
+                {aiStatusLabels[aiStatus] || aiStatus}
+              </Badge>
+            </div>
+            {analysis.metadata && (
+              <p className="mb-2 text-xs text-slate-500">
+                数据截止 {analysis.metadata.data_as_of || '-'}
+                {' · '}评分 {analysis.metadata.score_version || '-'}
+                {' · '}模式 {analysis.metadata.analysis_mode || '-'}
+              </p>
+            )}
             <ul className="space-y-1">
               {analysis.ai_decision.reasoning.map((reason, i) => (
                 <li key={i} className="text-sm text-slate-600 dark:text-slate-400 flex items-start gap-2">

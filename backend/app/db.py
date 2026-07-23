@@ -169,6 +169,18 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
 
     # Backfill the V2 dimension for existing long-pool analyses where it is derivable.
     _ensure_column(conn, "stock_picker_analysis", "score_support_resistance", "DOUBLE")
+    _ensure_column(conn, "stock_picker_analysis", "ai_status", "TEXT")
+    _ensure_column(conn, "stock_picker_analysis", "ai_error", "TEXT")
+    _ensure_column(conn, "stock_picker_analysis", "data_as_of", "TIMESTAMP")
+    _ensure_column(conn, "stock_picker_analysis", "score_version", "TEXT")
+    _ensure_column(conn, "stock_picker_analysis", "prompt_version", "TEXT")
+    _ensure_column(conn, "stock_picker_analysis", "ai_model", "TEXT")
+    _ensure_column(conn, "stock_picker_analysis", "analysis_mode", "TEXT")
+    _ensure_column(conn, "stock_picker_analysis", "job_id", "TEXT")
+    _ensure_column(conn, "stock_picker_config", "analysis_lookback", "INTEGER DEFAULT 250")
+    _ensure_column(conn, "stock_picker_config", "ai_top_n_per_pool", "INTEGER DEFAULT 10")
+    _ensure_column(conn, "stock_picker_config", "history_retention_days", "INTEGER DEFAULT 90")
+    _ensure_column(conn, "stock_picker_config", "max_history_per_stock", "INTEGER DEFAULT 30")
     conn.execute("""
         UPDATE stock_picker_analysis
         SET score_support_resistance = GREATEST(
@@ -370,7 +382,15 @@ CREATE TABLE IF NOT EXISTS stock_picker_analysis (
     recommendation_score DOUBLE,
     recommendation_reason TEXT,
     klines_snapshot TEXT,
-    score_support_resistance DOUBLE
+    score_support_resistance DOUBLE,
+    ai_status TEXT,
+    ai_error TEXT,
+    data_as_of TIMESTAMP,
+    score_version TEXT,
+    prompt_version TEXT,
+    ai_model TEXT,
+    analysis_mode TEXT,
+    job_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_pool ON stock_picker_analysis(pool_id);
 CREATE INDEX IF NOT EXISTS idx_analysis_time ON stock_picker_analysis(analysis_time);
@@ -385,6 +405,10 @@ CREATE TABLE IF NOT EXISTS stock_picker_config (
     max_pool_size INTEGER DEFAULT 20,
     cache_duration INTEGER DEFAULT 300,
     min_score_to_recommend INTEGER DEFAULT 65,
+    analysis_lookback INTEGER DEFAULT 250,
+    ai_top_n_per_pool INTEGER DEFAULT 10,
+    history_retention_days INTEGER DEFAULT 90,
+    max_history_per_stock INTEGER DEFAULT 30,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 INSERT OR IGNORE INTO stock_picker_config (id) VALUES (1);
