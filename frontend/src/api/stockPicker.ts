@@ -173,6 +173,120 @@ export interface SecuritySearchResponse {
   items: SecuritySearchItem[];
 }
 
+export interface SecurityUniverseSnapshotSummary {
+  snapshot_id: string;
+  captured_at: string;
+  observation_date: string;
+  snapshot_version: string;
+  market: SecurityMarket;
+  source: string;
+  source_query: string;
+  security_count: number;
+  payload_hash: string;
+}
+
+export interface SecurityUniverseCaptureRun {
+  market: SecurityMarket;
+  observation_date: string;
+  status: 'running' | 'completed' | 'failed';
+  claim_id: string;
+  started_at: string;
+  completed_at: string | null;
+  snapshot_id: string | null;
+  security_count: number;
+  error: string | null;
+}
+
+export interface SecurityUniverseSnapshotHistory {
+  snapshot_version: string;
+  source: string;
+  items: SecurityUniverseSnapshotSummary[];
+  capture_runs: SecurityUniverseCaptureRun[];
+}
+
+export interface SecurityUniverseCoverageMarket {
+  market: SecurityMarket;
+  snapshot_count: number;
+  observation_dates: number;
+  first_observation_date: string | null;
+  latest_observation_date: string | null;
+  calendar_span_days: number;
+  comparable_transitions: number;
+  latest_interval_calendar_days: number | null;
+  maximum_interval_calendar_days: number | null;
+  latest_snapshot_id: string | null;
+  latest_security_count: number;
+  latest_payload_hash: string | null;
+  payload_integrity_checked: false;
+}
+
+export interface SecurityUniverseCoverage {
+  coverage_version: string;
+  snapshot_version: string;
+  source: string;
+  markets: SecurityUniverseCoverageMarket[];
+}
+
+export interface SecurityUniverseSnapshotDetail
+  extends SecurityUniverseSnapshotSummary {
+  computed_payload_hash: string | null;
+  integrity_valid: boolean;
+  integrity_errors: string[];
+  payload: {
+    snapshot_version: string;
+    source: string;
+    source_request: {
+      method: 'GET';
+      path: string;
+      query: string;
+    };
+    market: SecurityMarket;
+    captured_at: string;
+    observation_date: string;
+    items: SecuritySearchItem[];
+  } | null;
+}
+
+export interface SecurityUniverseComparisonSnapshot {
+  snapshot_id: string;
+  captured_at: string;
+  observation_date: string;
+  snapshot_version: string;
+  market: SecurityMarket;
+  security_count: number;
+  payload_hash: string;
+  computed_payload_hash: string | null;
+  integrity_valid: boolean;
+  integrity_errors: string[];
+}
+
+export type SecurityUniverseComparisonReason =
+  | 'base_snapshot_integrity_invalid'
+  | 'target_snapshot_integrity_invalid'
+  | 'market_mismatch'
+  | 'snapshot_version_mismatch';
+
+export interface SecurityUniverseSnapshotComparison {
+  comparison_version: string;
+  ready: boolean;
+  reasons: SecurityUniverseComparisonReason[];
+  base: SecurityUniverseComparisonSnapshot;
+  target: SecurityUniverseComparisonSnapshot;
+  detail_limit: number;
+  added_count: number | null;
+  removed_count: number | null;
+  metadata_changed_count: number | null;
+  added: SecuritySearchItem[];
+  removed: SecuritySearchItem[];
+  metadata_changed: Array<{
+    symbol: string;
+    changes: Record<string, { before: string; after: string }>;
+  }>;
+  added_truncated: boolean;
+  removed_truncated: boolean;
+  metadata_changed_truncated: boolean;
+}
+
 export type ScreenerMarket = 'US' | 'HK' | 'CN' | 'SG';
 
 export interface ScreenerStrategy {
@@ -1115,6 +1229,73 @@ export async function getStockPickerFactorCoverage(
   if (!response.ok) {
     const error = await response.json().catch(() => null);
     throw new Error(error?.detail || '获取因子快照覆盖率失败');
+  }
+  return response.json();
+}
+
+export async function getSecurityUniverseSnapshots(params: {
+  market?: SecurityMarket;
+  limit?: number;
+} = {}): Promise<SecurityUniverseSnapshotHistory> {
+  const query = new URLSearchParams({
+    limit: String(params.limit ?? 50),
+  });
+  if (params.market) query.set('market', params.market);
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/security-universe-snapshots?${query.toString()}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取证券目录快照历史失败');
+  }
+  return response.json();
+}
+
+export async function getSecurityUniverseCoverage(
+  market?: SecurityMarket,
+): Promise<SecurityUniverseCoverage> {
+  const query = new URLSearchParams();
+  if (market) query.set('market', market);
+  const suffix = query.size > 0 ? `?${query.toString()}` : '';
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/security-universe-snapshots/coverage${suffix}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取证券目录快照覆盖失败');
+  }
+  return response.json();
+}
+
+export async function getSecurityUniverseSnapshot(
+  snapshotId: string,
+): Promise<SecurityUniverseSnapshotDetail> {
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/security-universe-snapshots/${encodeURIComponent(snapshotId)}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取证券目录快照详情失败');
+  }
+  return response.json();
+}
+
+export async function compareSecurityUniverseSnapshots(params: {
+  baseSnapshotId: string;
+  targetSnapshotId: string;
+  detailLimit?: number;
+}): Promise<SecurityUniverseSnapshotComparison> {
+  const query = new URLSearchParams({
+    base_snapshot_id: params.baseSnapshotId,
+    target_snapshot_id: params.targetSnapshotId,
+    detail_limit: String(params.detailLimit ?? 100),
+  });
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/security-universe-snapshots/compare?${query.toString()}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '比较证券目录快照失败');
   }
   return response.json();
 }

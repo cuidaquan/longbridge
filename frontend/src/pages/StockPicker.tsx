@@ -93,6 +93,7 @@ import {
   type ActiveStockPickerTask,
 } from '../lib/stockPickerTaskRecovery';
 import StockPickerFactorEvaluationDialog from '../components/StockPickerFactorEvaluationDialog';
+import SecurityUniverseSnapshotPanel from '../components/SecurityUniverseSnapshotPanel';
 
 export default function StockPicker() {
   const [pools, setPools] = useState<PoolsResponse>({ long_pool: [], short_pool: [] });
@@ -1220,6 +1221,7 @@ function formatSnapshotMissingReason(reason: string): string {
 }
 
 function StockPickerSnapshotDialog({ onClose }: { onClose: () => void }) {
+  const [activeView, setActiveView] = useState<'factors' | 'universe'>('factors');
   const [config, setConfig] = useState<StockPickerConfig | null>(null);
   const [coverage, setCoverage] = useState<StockPickerFactorCoverage | null>(null);
   const [snapshotEnabled, setSnapshotEnabled] = useState(false);
@@ -1326,14 +1328,14 @@ function StockPickerSnapshotDialog({ onClose }: { onClose: () => void }) {
         <div className="mb-5 flex items-start justify-between gap-4">
           <div>
             <h3 className="text-xl font-bold text-slate-900 dark:text-white">
-              因子快照管理
+              快照管理
             </h3>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-              查看 Fundamental、执行风险与美股账户卖空能力的点时覆盖；自动采集默认关闭。
+              因子观测与官方证券目录审计
             </p>
           </div>
           <button
-            aria-label="关闭因子快照管理弹窗"
+            aria-label="关闭快照管理弹窗"
             onClick={onClose}
             className="rounded p-1 hover:bg-slate-100 dark:hover:bg-slate-700"
           >
@@ -1341,25 +1343,40 @@ function StockPickerSnapshotDialog({ onClose }: { onClose: () => void }) {
           </button>
         </div>
 
-        {error && (
-          <div className="mb-4">
-            <Alert type="error" onClose={() => setError(null)}>
-              {error}
-            </Alert>
-          </div>
-        )}
-        {success && (
-          <div className="mb-4">
-            <Alert type="success" onClose={() => setSuccess(null)}>
-              {success}
-            </Alert>
-          </div>
-        )}
+        <div className="mb-5 overflow-x-auto">
+          <Tabs
+            tabs={[
+              { id: 'factors', label: '因子快照', icon: <Science className="h-4 w-4" /> },
+              { id: 'universe', label: '证券目录', icon: <Storage className="h-4 w-4" /> },
+            ]}
+            activeTab={activeView}
+            onChange={(tab) => setActiveView(tab as 'factors' | 'universe')}
+          />
+        </div>
 
-        {loading && !coverage ? (
-          <LoadingSpinner size="md" text="加载快照覆盖与配置..." />
+        {activeView === 'universe' ? (
+          <SecurityUniverseSnapshotPanel />
         ) : (
-          <div className="space-y-5">
+          <>
+            {error && (
+              <div className="mb-4">
+                <Alert type="error" onClose={() => setError(null)}>
+                  {error}
+                </Alert>
+              </div>
+            )}
+            {success && (
+              <div className="mb-4">
+                <Alert type="success" onClose={() => setSuccess(null)}>
+                  {success}
+                </Alert>
+              </div>
+            )}
+
+            {loading && !coverage ? (
+              <LoadingSpinner size="md" text="加载快照覆盖与配置..." />
+            ) : (
+              <div className="space-y-5">
             <Card className="shadow-none hover:shadow-none">
               <CardHeader
                 title="自动采集配置"
@@ -1613,7 +1630,9 @@ function StockPickerSnapshotDialog({ onClose }: { onClose: () => void }) {
                 </Card>
               </>
             )}
-          </div>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
