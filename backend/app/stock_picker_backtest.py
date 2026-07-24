@@ -4,13 +4,22 @@ from collections import defaultdict
 from datetime import date, datetime
 import json
 import math
-from statistics import mean, median
+from statistics import mean, median, pstdev
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from .db import get_connection
 from .services import get_cached_candlesticks
 from .stock_picker import StockPickerService, get_stock_picker_service
 from .stock_screener import DEFAULT_MARKET_BENCHMARKS
+
+
+EXECUTION_COST_MODEL_VERSION = "square-root-daily-volatility-v1"
+MARKET_CURRENCIES = {
+    "US": "USD",
+    "HK": "HKD",
+    "CN": "CNY",
+    "SG": "SGD",
+}
 
 
 class StockPickerBacktestService:
@@ -39,6 +48,10 @@ class StockPickerBacktestService:
         train_ratio: float = 0.7,
         walk_forward_folds: int = 3,
         transaction_cost_bps: float = 10.0,
+        order_notional: Optional[float] = None,
+        max_participation_rate: float = 0.1,
+        impact_coefficient: float = 0.5,
+        impact_volatility_lookback: int = 20,
         persist: bool = True,
         report_metadata: Optional[Dict[str, Any]] = None,
         data_as_of: Optional[str] = None,
@@ -57,6 +70,10 @@ class StockPickerBacktestService:
             train_ratio,
             walk_forward_folds,
             transaction_cost_bps,
+            order_notional,
+            max_participation_rate,
+            impact_coefficient,
+            impact_volatility_lookback,
         )
         selected_symbols = self._resolve_symbols(direction, symbols)
         if not selected_symbols:
@@ -113,6 +130,10 @@ class StockPickerBacktestService:
                 lookback,
                 min_history,
                 step,
+                order_notional,
+                max_participation_rate,
+                impact_coefficient,
+                impact_volatility_lookback,
             )
             if symbol_records:
                 records.extend(symbol_records)
@@ -123,14 +144,19 @@ class StockPickerBacktestService:
             raise ValueError("没有足够的历史数据生成回测样本")
 
         records.sort(key=lambda item: (item["signal_date"], item["symbol"]))
+        execution_eligible_records = [
+            record
+            for record in records
+            if record["execution"]["eligible"]
+        ]
         eligible_records = (
             [
                 record
-                for record in records
+                for record in execution_eligible_records
                 if top_n_filter(record)
             ]
             if top_n_filter is not None
-            else records
+            else execution_eligible_records
         )
         top_records = self._select_top_n(eligible_records, top_n)
         signal_dates = sorted({record["signal_date"] for record in records})
@@ -154,6 +180,10 @@ class StockPickerBacktestService:
                 "train_ratio": train_ratio,
                 "walk_forward_folds": walk_forward_folds,
                 "transaction_cost_bps": transaction_cost_bps,
+                "order_notional": order_notional,
+                "max_participation_rate": max_participation_rate,
+                "impact_coefficient": impact_coefficient,
+                "impact_volatility_lookback": impact_volatility_lookback,
                 "data_as_of": normalized_data_as_of,
                 "market_benchmarks": market_benchmarks,
             },
@@ -173,8 +203,14 @@ class StockPickerBacktestService:
                 "skipped_symbols": skipped_symbols,
                 "sample_count": len(records),
                 "top_n_sample_count": len(top_records),
-                "benchmark_coverage": self._benchmark_coverage(records),
+                "benchmark_coverage": self._benchmark_coverage(
+                    execution_eligible_records
+                ),
             },
+            "execution": self._execution_summary(
+                records,
+                order_notional,
+            ),
             "selection": {
                 "all": self._selection_summary(
                     records,
@@ -191,21 +227,21 @@ class StockPickerBacktestService:
             },
             "periods": {
                 "train": self._summarize_period(
-                    records,
+                    execution_eligible_records,
                     top_records,
                     set(train_dates),
                     normalized_horizons,
                     cost_rate,
                 ),
                 "validation": self._summarize_period(
-                    records,
+                    execution_eligible_records,
                     top_records,
                     set(validation_dates),
                     normalized_horizons,
                     cost_rate,
                 ),
                 "all": self._summarize_period(
-                    records,
+                    execution_eligible_records,
                     top_records,
                     set(signal_dates),
                     normalized_horizons,
@@ -213,7 +249,7 @@ class StockPickerBacktestService:
                 ),
             },
             "walk_forward": self._walk_forward_report(
-                records,
+                execution_eligible_records,
                 top_records,
                 signal_dates,
                 validation_dates,
@@ -230,6 +266,12 @@ class StockPickerBacktestService:
                 ),
                 "top_n": "每个信号日按方向化技术机会分降序选择",
                 "transaction_cost": "每条信号收益一次性扣减 transaction_cost_bps",
+                "execution_cost": (
+                    "order_notional 为 null 时不启用动态成本；启用时仅使用"
+                    "信号日及之前的成交额，以及最近指定窗口收盘到收盘日收益的"
+                    "非年化总体标准差，按平方根参与率模型估算冲击成本，并在"
+                    "Top N 前排除缺失或参与率超限样本"
+                ),
                 "industry_or_market_calibration": (
                     "本报告只评估当前固定评分版本，不使用验证期调参"
                 ),
@@ -329,6 +371,10 @@ class StockPickerBacktestService:
         lookback: int,
         min_history: int,
         step: int,
+        order_notional: Optional[float] = None,
+        max_participation_rate: float = 0.1,
+        impact_coefficient: float = 0.5,
+        impact_volatility_lookback: int = 20,
     ) -> List[Dict[str, Any]]:
         direction = 1 if pool_type == "LONG" else -1
         max_horizon = max(horizons)
@@ -354,6 +400,14 @@ class StockPickerBacktestService:
                 end_index,
                 benchmark_closes,
                 direction,
+            )
+            execution = self._execution_features(
+                bars,
+                end_index,
+                order_notional,
+                max_participation_rate,
+                impact_coefficient,
+                impact_volatility_lookback,
             )
             horizon_returns = {}
             for horizon in horizons:
@@ -389,9 +443,219 @@ class StockPickerBacktestService:
                 "grade": score["grade"],
                 "benchmark_symbol": benchmark_symbol,
                 "features": features,
+                "execution": execution,
                 "returns": horizon_returns,
             })
         return records
+
+    def _execution_features(
+        self,
+        bars: List[Dict[str, Any]],
+        end_index: int,
+        order_notional: Optional[float],
+        max_participation_rate: float,
+        impact_coefficient: float,
+        volatility_lookback: int,
+    ) -> Dict[str, Any]:
+        if order_notional is None:
+            return {
+                "enabled": False,
+                "eligible": True,
+                "exclusion_reason": None,
+                "order_notional": None,
+                "signal_turnover": None,
+                "turnover_source": None,
+                "participation_rate": None,
+                "historical_daily_volatility": None,
+                "dynamic_cost_rate": 0.0,
+            }
+
+        signal_bar = bars[end_index]
+        signal_turnover = self._positive_number(
+            signal_bar.get("turnover")
+        )
+        turnover_source = "turnover" if signal_turnover is not None else None
+        if signal_turnover is None:
+            close = self._positive_close(signal_bar)
+            volume = self._positive_number(signal_bar.get("volume"))
+            if close is not None and volume is not None:
+                signal_turnover = close * volume
+                turnover_source = "close_x_volume"
+
+        volatility = self._historical_daily_volatility(
+            bars,
+            end_index,
+            volatility_lookback,
+        )
+        participation_rate = (
+            order_notional / signal_turnover
+            if signal_turnover is not None
+            else None
+        )
+        dynamic_cost_rate = (
+            impact_coefficient
+            * volatility
+            * math.sqrt(participation_rate)
+            if (
+                volatility is not None
+                and participation_rate is not None
+            )
+            else None
+        )
+
+        exclusion_reason = None
+        if signal_turnover is None:
+            exclusion_reason = "missing_turnover"
+        elif volatility is None:
+            exclusion_reason = "insufficient_volatility_history"
+        elif participation_rate is None or not math.isfinite(participation_rate):
+            exclusion_reason = "invalid_participation_rate"
+        elif participation_rate > max_participation_rate:
+            exclusion_reason = "participation_rate_exceeded"
+
+        return {
+            "enabled": True,
+            "eligible": exclusion_reason is None,
+            "exclusion_reason": exclusion_reason,
+            "order_notional": order_notional,
+            "signal_turnover": signal_turnover,
+            "turnover_source": turnover_source,
+            "participation_rate": participation_rate,
+            "historical_daily_volatility": volatility,
+            "dynamic_cost_rate": (
+                dynamic_cost_rate
+                if exclusion_reason is None and dynamic_cost_rate is not None
+                else None
+            ),
+        }
+
+    def _historical_daily_volatility(
+        self,
+        bars: List[Dict[str, Any]],
+        end_index: int,
+        lookback: int,
+    ) -> Optional[float]:
+        start_index = end_index - lookback
+        if start_index < 0:
+            return None
+        closes = [
+            self._positive_close(bars[index])
+            for index in range(start_index, end_index + 1)
+        ]
+        if any(value is None for value in closes):
+            return None
+        returns = [
+            closes[index] / closes[index - 1] - 1
+            for index in range(1, len(closes))
+        ]
+        if len(returns) != lookback or not all(
+            math.isfinite(value)
+            for value in returns
+        ):
+            return None
+        return pstdev(returns)
+
+    def _execution_summary(
+        self,
+        records: List[Dict[str, Any]],
+        order_notional: Optional[float],
+    ) -> Dict[str, Any]:
+        enabled = order_notional is not None
+        total = len(records)
+        executable = [
+            record
+            for record in records
+            if record["execution"]["eligible"]
+        ]
+        markets = sorted({
+            self._market_for_symbol(record["symbol"])
+            for record in records
+        })
+        summary: Dict[str, Any] = {
+            "enabled": enabled,
+            "model_version": (
+                EXECUTION_COST_MODEL_VERSION
+                if enabled
+                else None
+            ),
+            "order_notional": order_notional,
+            "order_currency_by_market": {
+                market: MARKET_CURRENCIES[market]
+                for market in markets
+            },
+            "sample_count": total,
+            "executable_sample_count": len(executable),
+            "executable_coverage": len(executable) / total if total else 0,
+            "turnover_coverage": None,
+            "volatility_coverage": None,
+            "turnover_source_counts": {},
+            "exclusion_counts": {},
+            "participation_rate": {
+                "average": None,
+                "median": None,
+                "p95": None,
+                "maximum": None,
+            },
+            "dynamic_cost_rate": {
+                "average": None,
+                "median": None,
+                "p95": None,
+                "maximum": None,
+            },
+        }
+        if not enabled:
+            return summary
+
+        turnover_values = [
+            record["execution"]["signal_turnover"]
+            for record in records
+            if record["execution"]["signal_turnover"] is not None
+        ]
+        volatility_values = [
+            record["execution"]["historical_daily_volatility"]
+            for record in records
+            if record["execution"]["historical_daily_volatility"] is not None
+        ]
+        participation_values = [
+            record["execution"]["participation_rate"]
+            for record in records
+            if record["execution"]["participation_rate"] is not None
+        ]
+        dynamic_cost_values = [
+            record["execution"]["dynamic_cost_rate"]
+            for record in executable
+            if record["execution"]["dynamic_cost_rate"] is not None
+        ]
+        source_counts: Dict[str, int] = defaultdict(int)
+        exclusion_counts: Dict[str, int] = defaultdict(int)
+        for record in records:
+            execution = record["execution"]
+            if execution["turnover_source"]:
+                source_counts[execution["turnover_source"]] += 1
+            if execution["exclusion_reason"]:
+                exclusion_counts[execution["exclusion_reason"]] += 1
+
+        summary.update({
+            "turnover_coverage": (
+                len(turnover_values) / total
+                if total
+                else 0
+            ),
+            "volatility_coverage": (
+                len(volatility_values) / total
+                if total
+                else 0
+            ),
+            "turnover_source_counts": dict(sorted(source_counts.items())),
+            "exclusion_counts": dict(sorted(exclusion_counts.items())),
+            "participation_rate": self._distribution_summary(
+                participation_values
+            ),
+            "dynamic_cost_rate": self._distribution_summary(
+                dynamic_cost_values
+            ),
+        })
+        return summary
 
     def _market_relative_strength_features(
         self,
@@ -536,22 +800,38 @@ class StockPickerBacktestService:
         for horizon in horizons:
             key = str(horizon)
             samples = [
-                record["returns"][key]
+                (record, record["returns"][key])
                 for record in records
                 if key in record["returns"]
             ]
-            gross = [sample["gross_return"] for sample in samples]
-            net = [value - cost_rate for value in gross]
+            gross = [
+                sample["gross_return"]
+                for _, sample in samples
+            ]
+            dynamic_costs = [
+                self._dynamic_cost_rate(record)
+                for record, _ in samples
+            ]
+            total_costs = [
+                cost_rate + dynamic_cost
+                for dynamic_cost in dynamic_costs
+            ]
+            net = [
+                sample["gross_return"] - total_cost
+                for (_, sample), total_cost in zip(samples, total_costs)
+            ]
             excess = [
                 sample["excess_return"]
-                for sample in samples
+                for _, sample in samples
                 if sample["excess_return"] is not None
             ]
             date_returns: Dict[str, List[float]] = defaultdict(list)
             for record in records:
                 if key in record["returns"]:
                     date_returns[record["signal_date"]].append(
-                        record["returns"][key]["gross_return"] - cost_rate
+                        record["returns"][key]["gross_return"]
+                        - cost_rate
+                        - self._dynamic_cost_rate(record)
                     )
             portfolio_returns = [
                 mean(date_returns[signal_date])
@@ -573,7 +853,16 @@ class StockPickerBacktestService:
                     if samples
                     else 0
                 ),
-                "estimated_cost_sum": cost_rate * len(samples),
+                "avg_fixed_cost_rate": (
+                    cost_rate
+                    if samples
+                    else None
+                ),
+                "avg_dynamic_cost_rate": self._safe_mean(dynamic_costs),
+                "avg_total_cost_rate": self._safe_mean(total_costs),
+                "estimated_fixed_cost_sum": cost_rate * len(samples),
+                "estimated_dynamic_cost_sum": sum(dynamic_costs),
+                "estimated_cost_sum": sum(total_costs),
                 "max_drawdown": self._max_drawdown(portfolio_returns),
             }
         return {
@@ -669,6 +958,10 @@ class StockPickerBacktestService:
         train_ratio: float,
         folds: int,
         transaction_cost_bps: float,
+        order_notional: Optional[float],
+        max_participation_rate: float,
+        impact_coefficient: float,
+        impact_volatility_lookback: int,
     ) -> None:
         if not horizons or any(value < 1 or value > 60 for value in horizons):
             raise ValueError("horizons 必须包含 1～60 的交易日")
@@ -686,6 +979,28 @@ class StockPickerBacktestService:
             raise ValueError("walk_forward_folds 必须在 1～10 之间")
         if not 0 <= transaction_cost_bps <= 1000:
             raise ValueError("transaction_cost_bps 必须在 0～1000 之间")
+        if order_notional is not None and (
+            isinstance(order_notional, bool)
+            or not math.isfinite(order_notional)
+            or order_notional <= 0
+        ):
+            raise ValueError("order_notional 必须是大于 0 的有限数值或 null")
+        if (
+            isinstance(max_participation_rate, bool)
+            or not math.isfinite(max_participation_rate)
+            or not 0 < max_participation_rate <= 1
+        ):
+            raise ValueError("max_participation_rate 必须在 0～1 之间")
+        if (
+            isinstance(impact_coefficient, bool)
+            or not math.isfinite(impact_coefficient)
+            or not 0 <= impact_coefficient <= 10
+        ):
+            raise ValueError("impact_coefficient 必须在 0～10 之间")
+        if not 2 <= impact_volatility_lookback <= 252:
+            raise ValueError(
+                "impact_volatility_lookback 必须在 2～252 之间"
+            )
 
     @staticmethod
     def _market_for_symbol(symbol: str) -> str:
@@ -714,6 +1029,64 @@ class StockPickerBacktestService:
         except (TypeError, ValueError):
             return None
         return value if value > 0 and math.isfinite(value) else None
+
+    @staticmethod
+    def _positive_number(value: Any) -> Optional[float]:
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError):
+            return None
+        return (
+            normalized
+            if normalized > 0 and math.isfinite(normalized)
+            else None
+        )
+
+    @staticmethod
+    def _dynamic_cost_rate(record: Dict[str, Any]) -> float:
+        execution = record.get("execution") or {}
+        value = execution.get("dynamic_cost_rate", 0)
+        try:
+            normalized = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return (
+            normalized
+            if normalized >= 0 and math.isfinite(normalized)
+            else 0.0
+        )
+
+    def _distribution_summary(
+        self,
+        values: List[float],
+    ) -> Dict[str, Optional[float]]:
+        return {
+            "average": self._safe_mean(values),
+            "median": self._safe_median(values),
+            "p95": self._percentile(values, 0.95),
+            "maximum": max(values) if values else None,
+        }
+
+    @staticmethod
+    def _percentile(
+        values: List[float],
+        percentile: float,
+    ) -> Optional[float]:
+        if not values:
+            return None
+        ordered = sorted(values)
+        if len(ordered) == 1:
+            return ordered[0]
+        position = (len(ordered) - 1) * percentile
+        lower_index = math.floor(position)
+        upper_index = math.ceil(position)
+        if lower_index == upper_index:
+            return ordered[lower_index]
+        weight = position - lower_index
+        return (
+            ordered[lower_index] * (1 - weight)
+            + ordered[upper_index] * weight
+        )
 
     @staticmethod
     def _benchmark_coverage(records: List[Dict[str, Any]]) -> float:

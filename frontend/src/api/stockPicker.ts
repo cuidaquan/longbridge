@@ -286,6 +286,11 @@ export interface StockPickerBacktestHorizonMetrics {
   hit_rate: number | null;
   avg_excess_return: number | null;
   excess_coverage: number;
+  avg_fixed_cost_rate?: number | null;
+  avg_dynamic_cost_rate?: number | null;
+  avg_total_cost_rate?: number | null;
+  estimated_fixed_cost_sum?: number;
+  estimated_dynamic_cost_sum?: number;
   estimated_cost_sum: number;
   max_drawdown: number | null;
 }
@@ -312,6 +317,38 @@ export interface StockPickerBacktestMetadata {
   limitations?: string[];
 }
 
+export interface StockPickerBacktestDistribution {
+  average: number | null;
+  median: number | null;
+  p95: number | null;
+  maximum: number | null;
+}
+
+export interface StockPickerBacktestExecution {
+  enabled: boolean;
+  model_version: string | null;
+  order_notional: number | null;
+  order_currency_by_market: Record<string, string>;
+  sample_count: number;
+  executable_sample_count: number;
+  executable_coverage: number;
+  turnover_coverage: number | null;
+  volatility_coverage: number | null;
+  turnover_source_counts: Record<string, number>;
+  exclusion_counts: Record<string, number>;
+  participation_rate: StockPickerBacktestDistribution;
+  dynamic_cost_rate: StockPickerBacktestDistribution;
+}
+
+export interface StockPickerBacktestSelectionSummary {
+  sample_count: number;
+  eligible_sample_count: number;
+  eligible_coverage: number;
+  signal_dates: number;
+  eligible_signal_dates: number;
+  underfilled_signal_dates: number;
+}
+
 export interface StockPickerBacktestReport {
   id?: number;
   score_version: string;
@@ -328,6 +365,10 @@ export interface StockPickerBacktestReport {
     train_ratio: number;
     walk_forward_folds: number;
     transaction_cost_bps: number;
+    order_notional?: number | null;
+    max_participation_rate?: number;
+    impact_coefficient?: number;
+    impact_volatility_lookback?: number;
     data_as_of?: string | null;
     market_benchmarks: Record<string, string>;
   };
@@ -341,6 +382,11 @@ export interface StockPickerBacktestReport {
     sample_count: number;
     top_n_sample_count: number;
     benchmark_coverage: number;
+  };
+  execution?: StockPickerBacktestExecution;
+  selection?: {
+    all: StockPickerBacktestSelectionSummary;
+    validation: StockPickerBacktestSelectionSummary;
   };
   periods: {
     train: StockPickerBacktestPeriod;
@@ -361,6 +407,7 @@ export interface StockPickerBacktestReport {
     directional_return: string;
     top_n: string;
     transaction_cost: string;
+    execution_cost?: string;
     industry_or_market_calibration: string;
     overlap_warning: string;
   };
@@ -618,6 +665,10 @@ export async function runStockPickerBacktest(params: {
   trainRatio?: number;
   walkForwardFolds?: number;
   transactionCostBps?: number;
+  orderNotional?: number | null;
+  maxParticipationRate?: number;
+  impactCoefficient?: number;
+  impactVolatilityLookback?: number;
 }): Promise<StockPickerBacktestReport> {
   const response = await fetch(`${API_BASE}/api/stock-picker/backtest`, {
     method: 'POST',
@@ -634,6 +685,10 @@ export async function runStockPickerBacktest(params: {
       train_ratio: params.trainRatio ?? 0.7,
       walk_forward_folds: params.walkForwardFolds ?? 3,
       transaction_cost_bps: params.transactionCostBps ?? 10,
+      order_notional: params.orderNotional ?? null,
+      max_participation_rate: params.maxParticipationRate ?? 0.1,
+      impact_coefficient: params.impactCoefficient ?? 0.5,
+      impact_volatility_lookback: params.impactVolatilityLookback ?? 20,
     }),
   });
   if (!response.ok) {

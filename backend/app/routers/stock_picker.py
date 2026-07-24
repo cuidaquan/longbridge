@@ -195,6 +195,10 @@ class StockPickerBacktestRequest(BaseModel):
     train_ratio: float = Field(default=0.7, ge=0.5, le=0.9)
     walk_forward_folds: int = Field(default=3, ge=1, le=10)
     transaction_cost_bps: float = Field(default=10, ge=0, le=1000)
+    order_notional: Optional[float] = Field(default=None, gt=0)
+    max_participation_rate: float = Field(default=0.1, gt=0, le=1)
+    impact_coefficient: float = Field(default=0.5, ge=0, le=10)
+    impact_volatility_lookback: int = Field(default=20, ge=2, le=252)
 
 
 class StockPickerFactorSnapshotCaptureRequest(BaseModel):
@@ -453,6 +457,12 @@ async def run_stock_picker_backtest(request: StockPickerBacktestRequest):
             train_ratio=request.train_ratio,
             walk_forward_folds=request.walk_forward_folds,
             transaction_cost_bps=request.transaction_cost_bps,
+            order_notional=request.order_notional,
+            max_participation_rate=request.max_participation_rate,
+            impact_coefficient=request.impact_coefficient,
+            impact_volatility_lookback=(
+                request.impact_volatility_lookback
+            ),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

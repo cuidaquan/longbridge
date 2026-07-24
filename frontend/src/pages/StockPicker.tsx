@@ -1147,6 +1147,11 @@ function StockPickerBacktestDialog({ onClose }: { onClose: () => void }) {
   const [topN, setTopN] = useState(5);
   const [transactionCostBps, setTransactionCostBps] = useState(10);
   const [step, setStep] = useState(5);
+  const [executionCostEnabled, setExecutionCostEnabled] = useState(false);
+  const [orderNotional, setOrderNotional] = useState(100000);
+  const [maxParticipationPercent, setMaxParticipationPercent] = useState(10);
+  const [impactCoefficient, setImpactCoefficient] = useState(0.5);
+  const [impactVolatilityLookback, setImpactVolatilityLookback] = useState(20);
   const [running, setRunning] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [history, setHistory] = useState<StockPickerBacktestHistoryItem[]>([]);
@@ -1181,6 +1186,10 @@ function StockPickerBacktestDialog({ onClose }: { onClose: () => void }) {
         topN,
         transactionCostBps,
         step,
+        orderNotional: executionCostEnabled ? orderNotional : null,
+        maxParticipationRate: maxParticipationPercent / 100,
+        impactCoefficient,
+        impactVolatilityLookback,
       });
       setReport(result);
       setHistory((current) => [
@@ -1193,7 +1202,10 @@ function StockPickerBacktestDialog({ onClose }: { onClose: () => void }) {
           result: {
             score_version: result.score_version,
             pool_type: result.pool_type,
+            metadata: result.metadata,
             data: result.data,
+            execution: result.execution,
+            selection: result.selection,
             periods: result.periods,
             walk_forward: result.walk_forward,
             methodology: result.methodology,
@@ -1214,6 +1226,16 @@ function StockPickerBacktestDialog({ onClose }: { onClose: () => void }) {
     setTopN(item.parameters.top_n);
     setTransactionCostBps(item.parameters.transaction_cost_bps);
     setStep(item.parameters.step);
+    const historicalOrderNotional = item.parameters.order_notional;
+    setExecutionCostEnabled(historicalOrderNotional != null);
+    setOrderNotional(historicalOrderNotional ?? 100000);
+    setMaxParticipationPercent(
+      (item.parameters.max_participation_rate ?? 0.1) * 100,
+    );
+    setImpactCoefficient(item.parameters.impact_coefficient ?? 0.5);
+    setImpactVolatilityLookback(
+      item.parameters.impact_volatility_lookback ?? 20,
+    );
     setReport({
       ...item.result,
       id: item.id,
@@ -1225,10 +1247,35 @@ function StockPickerBacktestDialog({ onClose }: { onClose: () => void }) {
   const formatPercent = (value: number | null | undefined) => (
     value == null ? '-' : `${(value * 100).toFixed(2)}%`
   );
+  const formatPrecisePercent = (value: number | null | undefined) => (
+    value == null ? '-' : `${(value * 100).toFixed(4)}%`
+  );
+  const formatBps = (value: number | null | undefined) => (
+    value == null ? '-' : `${(value * 10000).toFixed(2)} bps`
+  );
   const validation = report?.periods.validation;
   const overlap = report
     ? report.parameters.step < Math.max(...report.parameters.horizons)
     : false;
+  const executionConfigValid = !executionCostEnabled || (
+    Number.isFinite(orderNotional)
+    && orderNotional > 0
+    && Number.isFinite(maxParticipationPercent)
+    && maxParticipationPercent > 0
+    && maxParticipationPercent <= 100
+    && Number.isFinite(impactCoefficient)
+    && impactCoefficient >= 0
+    && impactCoefficient <= 10
+    && Number.isInteger(impactVolatilityLookback)
+    && impactVolatilityLookback >= 2
+    && impactVolatilityLookback <= 252
+  );
+  const exclusionLabels: Record<string, string> = {
+    missing_turnover: '缺少成交额',
+    insufficient_volatility_history: '波动率历史不足',
+    invalid_participation_rate: '参与率无效',
+    participation_rate_exceeded: '参与率超限',
+  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -1302,15 +1349,108 @@ function StockPickerBacktestDialog({ onClose }: { onClose: () => void }) {
           ))}
         </div>
 
+        <div className="mt-4 rounded-lg border border-slate-200 p-4 dark:border-slate-700">
+          <label className="flex cursor-pointer items-start gap-3">
+            <input
+              type="checkbox"
+              checked={executionCostEnabled}
+              disabled={running}
+              onChange={(event) => setExecutionCostEnabled(event.target.checked)}
+              className="mt-1 h-4 w-4 rounded border-slate-300 text-cyan-600"
+            />
+            <span>
+              <span className="block text-sm font-semibold text-slate-800 dark:text-slate-100">
+                启用订单规模与冲击成本代理
+              </span>
+              <span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">
+                使用信号日成交额和历史日波动率估算参与率与动态成本；默认关闭。
+              </span>
+            </span>
+          </label>
+
+          {executionCostEnabled && (
+            <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                <span className="mb-1 block">每笔名义金额（市场本币）</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="1000"
+                  value={orderNotional}
+                  disabled={running}
+                  onChange={(event) => setOrderNotional(Number(event.target.value))}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2
+                    text-slate-900 focus:border-cyan-500 focus:outline-none focus:ring-2
+                    focus:ring-cyan-500/30 disabled:opacity-60 dark:border-slate-600
+                    dark:bg-slate-900 dark:text-white"
+                />
+              </label>
+              <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                <span className="mb-1 block">最大参与率（%）</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  max="100"
+                  step="0.1"
+                  value={maxParticipationPercent}
+                  disabled={running}
+                  onChange={(event) => setMaxParticipationPercent(Number(event.target.value))}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2
+                    text-slate-900 focus:border-cyan-500 focus:outline-none focus:ring-2
+                    focus:ring-cyan-500/30 disabled:opacity-60 dark:border-slate-600
+                    dark:bg-slate-900 dark:text-white"
+                />
+              </label>
+              <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                <span className="mb-1 block">冲击系数</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="10"
+                  step="0.1"
+                  value={impactCoefficient}
+                  disabled={running}
+                  onChange={(event) => setImpactCoefficient(Number(event.target.value))}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2
+                    text-slate-900 focus:border-cyan-500 focus:outline-none focus:ring-2
+                    focus:ring-cyan-500/30 disabled:opacity-60 dark:border-slate-600
+                    dark:bg-slate-900 dark:text-white"
+                />
+              </label>
+              <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                <span className="mb-1 block">波动率窗口（日）</span>
+                <input
+                  type="number"
+                  min="2"
+                  max="252"
+                  step="1"
+                  value={impactVolatilityLookback}
+                  disabled={running}
+                  onChange={(event) => setImpactVolatilityLookback(Number(event.target.value))}
+                  className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2
+                    text-slate-900 focus:border-cyan-500 focus:outline-none focus:ring-2
+                    focus:ring-cyan-500/30 disabled:opacity-60 dark:border-slate-600
+                    dark:bg-slate-900 dark:text-white"
+                />
+              </label>
+            </div>
+          )}
+        </div>
+
         <div className="mt-4 flex items-center justify-between gap-3">
           <p className="text-xs text-slate-500 dark:text-slate-400">
-            默认使用当前方向池中的启用股票；每条信号一次性扣除所填成本。
+            默认使用当前方向池中的启用股票；固定成本每条信号扣除一次，动态模型不代表真实成交滑点。
           </p>
           <Button
             type="button"
             onClick={runBacktest}
             loading={running}
-            disabled={topN < 1 || step < 1 || transactionCostBps < 0}
+            disabled={
+              topN < 1
+              || step < 1
+              || transactionCostBps < 0
+              || !executionConfigValid
+            }
           >
             运行评估
           </Button>
@@ -1357,6 +1497,77 @@ function StockPickerBacktestDialog({ onClose }: { onClose: () => void }) {
               </Alert>
             ) : null}
 
+            {report.execution?.enabled && (
+              <div className="rounded-lg border border-cyan-200 bg-cyan-50/40 p-4 dark:border-cyan-900 dark:bg-cyan-950/20">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900 dark:text-white">
+                      订单规模与执行成本代理
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                      每笔 {report.execution.order_notional?.toLocaleString() ?? '-'}；
+                      币种按市场本币（
+                      {Object.entries(report.execution.order_currency_by_market)
+                        .map(([market, currency]) => `${market} ${currency}`)
+                        .join('、') || '-'}
+                      ）
+                    </p>
+                  </div>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    {report.execution.model_version}
+                  </p>
+                </div>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  <SnapshotMetric
+                    label="可执行样本"
+                    value={`${report.execution.executable_sample_count}/${report.execution.sample_count}`}
+                  />
+                  <SnapshotMetric
+                    label="成交额覆盖"
+                    value={formatPercent(report.execution.turnover_coverage)}
+                  />
+                  <SnapshotMetric
+                    label="波动率覆盖"
+                    value={formatPercent(report.execution.volatility_coverage)}
+                  />
+                  <SnapshotMetric
+                    label="参与率均值 / P95"
+                    value={`${formatPrecisePercent(report.execution.participation_rate.average)} / ${formatPrecisePercent(report.execution.participation_rate.p95)}`}
+                  />
+                  <SnapshotMetric
+                    label="冲击成本均值 / P95"
+                    value={`${formatBps(report.execution.dynamic_cost_rate.average)} / ${formatBps(report.execution.dynamic_cost_rate.p95)}`}
+                  />
+                </div>
+                <div className="mt-3 text-xs text-slate-600 dark:text-slate-300">
+                  <span className="font-medium">排除原因：</span>
+                  {Object.keys(report.execution.exclusion_counts).length === 0
+                    ? '无'
+                    : Object.entries(report.execution.exclusion_counts)
+                      .map(([reason, count]) => (
+                        `${exclusionLabels[reason] || reason} ${count}`
+                      ))
+                      .join('；')}
+                  {report.selection?.validation ? (
+                    <>
+                      ；验证期可选集合 Top N 欠配
+                      {' '}
+                      {report.selection.validation.underfilled_signal_dates}
+                      /
+                      {report.selection.validation.signal_dates}
+                      {' '}
+                      个信号日
+                    </>
+                  ) : null}
+                </div>
+                <div className="mt-3">
+                  <Alert type="info">
+                    该结果只使用日 K 成交额和历史波动率估算成本，不包含历史盘口价差、盘中成交分布、借券费或真实成交概率。
+                  </Alert>
+                </div>
+              </div>
+            )}
+
             <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
               <table className="min-w-full text-sm">
                 <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500 dark:bg-slate-900/50 dark:text-slate-400">
@@ -1364,6 +1575,9 @@ function StockPickerBacktestDialog({ onClose }: { onClose: () => void }) {
                     <th className="px-3 py-2">持有期</th>
                     <th className="px-3 py-2">样本数</th>
                     <th className="px-3 py-2">平均净收益</th>
+                    <th className="px-3 py-2">固定成本（bps）</th>
+                    <th className="px-3 py-2">冲击成本（bps）</th>
+                    <th className="px-3 py-2">总成本（bps）</th>
                     <th className="px-3 py-2">命中率</th>
                     <th className="px-3 py-2">平均超额</th>
                     <th className="px-3 py-2">基准覆盖</th>
@@ -1373,11 +1587,19 @@ function StockPickerBacktestDialog({ onClose }: { onClose: () => void }) {
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
                   {report.parameters.horizons.map((horizon) => {
                     const metrics = validation.top_n.horizons[String(horizon)];
+                    const fixedCost = metrics?.avg_fixed_cost_rate
+                      ?? report.parameters.transaction_cost_bps / 10000;
+                    const dynamicCost = metrics?.avg_dynamic_cost_rate ?? 0;
+                    const totalCost = metrics?.avg_total_cost_rate
+                      ?? fixedCost + dynamicCost;
                     return (
                       <tr key={horizon} className="text-slate-700 dark:text-slate-300">
                         <td className="px-3 py-2 font-medium">{horizon} 日</td>
                         <td className="px-3 py-2">{metrics?.sample_count ?? 0}</td>
                         <td className="px-3 py-2">{formatPercent(metrics?.avg_net_return)}</td>
+                        <td className="px-3 py-2">{formatBps(fixedCost)}</td>
+                        <td className="px-3 py-2">{formatBps(dynamicCost)}</td>
+                        <td className="px-3 py-2">{formatBps(totalCost)}</td>
                         <td className="px-3 py-2">{formatPercent(metrics?.hit_rate)}</td>
                         <td className="px-3 py-2">{formatPercent(metrics?.avg_excess_return)}</td>
                         <td className="px-3 py-2">{formatPercent(metrics?.excess_coverage)}</td>

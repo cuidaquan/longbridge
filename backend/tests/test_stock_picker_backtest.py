@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
+import math
+from statistics import pstdev
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -21,13 +23,15 @@ def _bars(
     price = start_price
     start = date(2024, 1, 1)
     for index in range(count):
+        volume = 1_000_000 + index * 1_000
         rows.append({
             "date": (start + timedelta(days=index)).isoformat(),
             "open": price * 0.995,
             "high": price * 1.01,
             "low": price * 0.99,
             "close": price,
-            "volume": 1_000_000 + index * 1_000,
+            "volume": volume,
+            "turnover": price * volume,
         })
         price *= 1 + daily_return
     return rows
@@ -330,6 +334,346 @@ class StockPickerBacktestServiceTests(unittest.TestCase):
             with_cost["horizons"]["5"]["estimated_cost_sum"],
             0.001,
         )
+        self.assertAlmostEqual(
+            with_cost["horizons"]["5"]["estimated_fixed_cost_sum"],
+            0.001,
+        )
+        self.assertEqual(
+            with_cost["horizons"]["5"]["estimated_dynamic_cost_sum"],
+            0,
+        )
+
+    def test_dynamic_cost_is_added_to_fixed_cost_per_signal(self) -> None:
+        records = [{
+            "symbol": "AAA.US",
+            "signal_date": "2024-01-01",
+            "score": 80.0,
+            "execution": {
+                "dynamic_cost_rate": 0.002,
+            },
+            "returns": {
+                "5": {
+                    "gross_return": 0.03,
+                    "excess_return": 0.01,
+                }
+            },
+        }]
+
+        metrics = self.service._summarize_records(
+            records,
+            [5],
+            0.001,
+        )["horizons"]["5"]
+
+        self.assertAlmostEqual(metrics["avg_net_return"], 0.027)
+        self.assertAlmostEqual(metrics["avg_fixed_cost_rate"], 0.001)
+        self.assertAlmostEqual(metrics["avg_dynamic_cost_rate"], 0.002)
+        self.assertAlmostEqual(metrics["avg_total_cost_rate"], 0.003)
+        self.assertAlmostEqual(metrics["estimated_fixed_cost_sum"], 0.001)
+        self.assertAlmostEqual(metrics["estimated_dynamic_cost_sum"], 0.002)
+        self.assertAlmostEqual(metrics["estimated_cost_sum"], 0.003)
+
+    def test_execution_features_use_only_signal_date_and_prior_bars(
+        self,
+    ) -> None:
+        original = _bars(90)
+        modified = [dict(bar) for bar in original]
+        signal_index = 40
+        modified[signal_index + 1]["close"] *= 4
+        modified[signal_index + 1]["turnover"] *= 20
+
+        first = self.service._execution_features(
+            original,
+            signal_index,
+            order_notional=1_000_000,
+            max_participation_rate=0.5,
+            impact_coefficient=0.5,
+            volatility_lookback=20,
+        )
+        second = self.service._execution_features(
+            modified,
+            signal_index,
+            order_notional=1_000_000,
+            max_participation_rate=0.5,
+            impact_coefficient=0.5,
+            volatility_lookback=20,
+        )
+
+        self.assertEqual(first, second)
+        self.assertTrue(first["eligible"])
+
+    def test_dynamic_cost_uses_square_root_participation_formula(
+        self,
+    ) -> None:
+        bars = _bars(50)
+        price = 100.0
+        for index, bar in enumerate(bars):
+            price *= 1.02 if index % 2 else 0.99
+            bar["close"] = price
+            bar["turnover"] = 10_000_000
+        signal_index = 40
+
+        execution = self.service._execution_features(
+            bars,
+            signal_index,
+            order_notional=100_000,
+            max_participation_rate=0.1,
+            impact_coefficient=0.5,
+            volatility_lookback=20,
+        )
+        closes = [
+            bars[index]["close"]
+            for index in range(signal_index - 20, signal_index + 1)
+        ]
+        returns = [
+            closes[index] / closes[index - 1] - 1
+            for index in range(1, len(closes))
+        ]
+        expected_volatility = pstdev(returns)
+        expected_participation = 100_000 / 10_000_000
+        expected_cost = (
+            0.5
+            * expected_volatility
+            * math.sqrt(expected_participation)
+        )
+
+        self.assertTrue(execution["eligible"])
+        self.assertAlmostEqual(
+            execution["historical_daily_volatility"],
+            expected_volatility,
+        )
+        self.assertAlmostEqual(
+            execution["participation_rate"],
+            expected_participation,
+        )
+        self.assertAlmostEqual(
+            execution["dynamic_cost_rate"],
+            expected_cost,
+        )
+
+    def test_dynamic_cost_is_direction_neutral_for_long_and_short(
+        self,
+    ) -> None:
+        bars = _bars(70, daily_return=0.02)
+        long_record = self.service._evaluate_symbol(
+            "AAA.US",
+            "LONG",
+            bars,
+            "SPY.US",
+            {},
+            [5],
+            40,
+            30,
+            5,
+            order_notional=100_000,
+            max_participation_rate=0.5,
+        )[0]
+        short_record = self.service._evaluate_symbol(
+            "AAA.US",
+            "SHORT",
+            bars,
+            "SPY.US",
+            {},
+            [5],
+            40,
+            30,
+            5,
+            order_notional=100_000,
+            max_participation_rate=0.5,
+        )[0]
+
+        self.assertEqual(long_record["execution"], short_record["execution"])
+        self.assertAlmostEqual(
+            long_record["returns"]["5"]["gross_return"],
+            -short_record["returns"]["5"]["gross_return"],
+        )
+
+    def test_turnover_falls_back_to_signal_close_times_volume(self) -> None:
+        bars = _bars(60)
+        signal_index = 40
+        bars[signal_index]["turnover"] = None
+
+        execution = self.service._execution_features(
+            bars,
+            signal_index,
+            order_notional=100_000,
+            max_participation_rate=0.5,
+            impact_coefficient=0.5,
+            volatility_lookback=20,
+        )
+
+        expected_turnover = (
+            bars[signal_index]["close"]
+            * bars[signal_index]["volume"]
+        )
+        self.assertTrue(execution["eligible"])
+        self.assertEqual(execution["turnover_source"], "close_x_volume")
+        self.assertAlmostEqual(
+            execution["signal_turnover"],
+            expected_turnover,
+        )
+        self.assertAlmostEqual(
+            execution["participation_rate"],
+            100_000 / expected_turnover,
+        )
+
+    def test_missing_turnover_is_excluded_instead_of_zero_cost(self) -> None:
+        bars = _bars(60)
+        signal_index = 40
+        bars[signal_index]["turnover"] = None
+        bars[signal_index]["volume"] = None
+
+        execution = self.service._execution_features(
+            bars,
+            signal_index,
+            order_notional=100_000,
+            max_participation_rate=0.5,
+            impact_coefficient=0.5,
+            volatility_lookback=20,
+        )
+
+        self.assertFalse(execution["eligible"])
+        self.assertEqual(execution["exclusion_reason"], "missing_turnover")
+        self.assertIsNone(execution["dynamic_cost_rate"])
+
+    def test_insufficient_volatility_history_is_excluded(self) -> None:
+        execution = self.service._execution_features(
+            _bars(20),
+            end_index=10,
+            order_notional=100_000,
+            max_participation_rate=0.5,
+            impact_coefficient=0.5,
+            volatility_lookback=20,
+        )
+
+        self.assertFalse(execution["eligible"])
+        self.assertEqual(
+            execution["exclusion_reason"],
+            "insufficient_volatility_history",
+        )
+        self.assertIsNone(execution["dynamic_cost_rate"])
+
+    def test_participation_limit_excludes_before_top_n_selection(self) -> None:
+        symbols = ["AAA.US", "BBB.US"]
+        stock_picker = _StubStockPicker(symbols)
+        source = {
+            "AAA.US": _bars(100, 100, 0.01),
+            "BBB.US": _bars(100, 80, 0.005),
+            "SPY.US": _bars(100, 200, 0.003),
+        }
+        for bar in source["AAA.US"]:
+            bar["turnover"] = 500_000
+        for bar in source["BBB.US"]:
+            bar["turnover"] = 5_000_000
+        service = StockPickerBacktestService(
+            stock_picker=stock_picker,
+            bar_loader=lambda symbol, period="day", limit=1000,
+            end_date=None: source[symbol][-limit:],
+        )
+
+        report = service.run(
+            "LONG",
+            horizons=[5],
+            lookback=60,
+            max_bars=100,
+            min_history=30,
+            step=5,
+            top_n=2,
+            train_ratio=0.6,
+            order_notional=100_000,
+            max_participation_rate=0.1,
+            persist=False,
+        )
+
+        self.assertTrue(report["execution"]["enabled"])
+        self.assertEqual(
+            report["execution"]["exclusion_counts"],
+            {"participation_rate_exceeded": report["data"]["sample_count"] // 2},
+        )
+        self.assertEqual(report["execution"]["executable_coverage"], 0.5)
+        self.assertEqual(
+            report["selection"]["all"]["underfilled_signal_dates"],
+            report["selection"]["all"]["signal_dates"],
+        )
+        self.assertEqual(
+            report["periods"]["all"]["top_n"]["sample_count"],
+            report["selection"]["all"]["signal_dates"],
+        )
+
+    def test_all_execution_samples_can_be_excluded_without_failure(
+        self,
+    ) -> None:
+        source = {
+            "AAA.US": _bars(100, 100, 0.01),
+            "SPY.US": _bars(100, 200, 0.004),
+        }
+        service = StockPickerBacktestService(
+            stock_picker=self.stock_picker,
+            bar_loader=lambda symbol, period="day", limit=1000,
+            end_date=None: source[symbol][-limit:],
+        )
+
+        report = service.run(
+            "LONG",
+            horizons=[5],
+            lookback=60,
+            max_bars=100,
+            min_history=30,
+            step=5,
+            top_n=1,
+            order_notional=1_000_000_000_000,
+            max_participation_rate=0.0001,
+            persist=False,
+        )
+        metrics = report["periods"]["all"]["top_n"]["horizons"]["5"]
+
+        self.assertEqual(report["execution"]["executable_sample_count"], 0)
+        self.assertEqual(report["execution"]["executable_coverage"], 0)
+        self.assertEqual(metrics["sample_count"], 0)
+        self.assertIsNone(metrics["avg_net_return"])
+        self.assertEqual(metrics["estimated_cost_sum"], 0)
+        self.assertEqual(
+            report["selection"]["all"]["underfilled_signal_dates"],
+            report["selection"]["all"]["signal_dates"],
+        )
+
+    def test_disabled_execution_model_preserves_fixed_cost_baseline(
+        self,
+    ) -> None:
+        source = {
+            "AAA.US": _bars(100, 100, 0.01),
+            "SPY.US": _bars(100, 200, 0.004),
+        }
+        service = StockPickerBacktestService(
+            stock_picker=self.stock_picker,
+            bar_loader=lambda symbol, period="day", limit=1000,
+            end_date=None: source[symbol][-limit:],
+        )
+
+        report = service.run(
+            "LONG",
+            horizons=[5],
+            lookback=60,
+            max_bars=100,
+            min_history=30,
+            step=5,
+            transaction_cost_bps=10,
+            order_notional=None,
+            persist=False,
+        )
+        metrics = report["periods"]["all"]["all"]["horizons"]["5"]
+
+        self.assertFalse(report["execution"]["enabled"])
+        self.assertEqual(
+            report["execution"]["executable_sample_count"],
+            report["data"]["sample_count"],
+        )
+        self.assertEqual(metrics["avg_dynamic_cost_rate"], 0)
+        self.assertAlmostEqual(metrics["avg_fixed_cost_rate"], 0.001)
+        self.assertAlmostEqual(
+            metrics["estimated_cost_sum"],
+            0.001 * metrics["sample_count"],
+        )
 
     def test_excess_return_and_missing_benchmark_coverage(self) -> None:
         bars = _bars(70, 100, 0.01)
@@ -414,6 +758,8 @@ class StockPickerBacktestServiceTests(unittest.TestCase):
         self.assertEqual(history[0]["id"], report["id"])
         self.assertEqual(history[0]["pool_type"], "LONG")
         self.assertEqual(history[0]["parameters"]["horizons"], [5])
+        self.assertIsNone(history[0]["parameters"]["order_notional"])
+        self.assertFalse(history[0]["result"]["execution"]["enabled"])
         self.assertEqual(
             history[0]["result"]["score_version"],
             self.stock_picker.SCORE_VERSION,
@@ -489,6 +835,28 @@ class StockPickerBacktestServiceTests(unittest.TestCase):
                 persist=False,
             )
 
+    def test_invalid_execution_parameters_are_rejected(self) -> None:
+        invalid_cases = [
+            ({"order_notional": 0}, "order_notional"),
+            ({"max_participation_rate": 0}, "max_participation_rate"),
+            ({"max_participation_rate": 1.1}, "max_participation_rate"),
+            ({"impact_coefficient": -0.1}, "impact_coefficient"),
+            (
+                {"impact_volatility_lookback": 1},
+                "impact_volatility_lookback",
+            ),
+        ]
+        for parameters, expected_message in invalid_cases:
+            with self.subTest(parameters=parameters):
+                with self.assertRaisesRegex(ValueError, expected_message):
+                    self.service.run(
+                        "LONG",
+                        symbols=["AAA.US"],
+                        horizons=[5],
+                        persist=False,
+                        **parameters,
+                    )
+
 
 class StockPickerBacktestHttpTests(unittest.TestCase):
     def test_run_and_history_contracts(self) -> None:
@@ -519,6 +887,10 @@ class StockPickerBacktestHttpTests(unittest.TestCase):
                         "train_ratio": 0.7,
                         "walk_forward_folds": 2,
                         "transaction_cost_bps": 15,
+                        "order_notional": 250000,
+                        "max_participation_rate": 0.08,
+                        "impact_coefficient": 0.6,
+                        "impact_volatility_lookback": 30,
                     },
                 )
                 history = client.get(
@@ -540,6 +912,10 @@ class StockPickerBacktestHttpTests(unittest.TestCase):
             train_ratio=0.7,
             walk_forward_folds=2,
             transaction_cost_bps=15.0,
+            order_notional=250000.0,
+            max_participation_rate=0.08,
+            impact_coefficient=0.6,
+            impact_volatility_lookback=30,
         )
         self.assertEqual(history.status_code, 200)
         self.assertEqual(history.json(), {"items": [{"id": 7}]})
@@ -556,6 +932,13 @@ class StockPickerBacktestHttpTests(unittest.TestCase):
                     "/api/stock-picker/backtest",
                     json={"pool_type": "LONG", "top_n": 0},
                 )
+                invalid_execution = client.post(
+                    "/api/stock-picker/backtest",
+                    json={
+                        "pool_type": "LONG",
+                        "max_participation_rate": 0,
+                    },
+                )
                 service.run.side_effect = ValueError(
                     "必须满足 30 <= min_history <= lookback <= max_bars <= 5000"
                 )
@@ -569,6 +952,7 @@ class StockPickerBacktestHttpTests(unittest.TestCase):
                 )
 
         self.assertEqual(invalid_schema.status_code, 422)
+        self.assertEqual(invalid_execution.status_code, 422)
         self.assertEqual(invalid_relationship.status_code, 400)
         self.assertIn("min_history", invalid_relationship.json()["detail"])
 
