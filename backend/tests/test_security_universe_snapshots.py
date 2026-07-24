@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import unittest
 from unittest.mock import MagicMock, patch
@@ -16,6 +16,7 @@ from app.routers.stock_picker import (
     router,
 )
 from app.security_universe_snapshots import (
+    CAPTURE_CLAIM_LEASE_MINUTES,
     SNAPSHOT_SOURCE,
     SNAPSHOT_VERSION,
     SecurityUniverseSnapshotService,
@@ -81,7 +82,16 @@ class SecurityUniverseSnapshotTests(unittest.TestCase):
                 "minimum_security_counts",
                 {"US": 1, "HK": 1, "CN": 1},
             ),
+            trading_day_loader=kwargs.get(
+                "trading_day_loader",
+                lambda market, observation_date: True,
+            ),
         )
+
+    @staticmethod
+    def _call_directly(service, operation, callback, *args, **kwargs):
+        kwargs.pop("retry_if", None)
+        return callback(*args, **kwargs)
 
     def test_migration_is_idempotent_and_has_daily_unique_key(self) -> None:
         _run_migrations(self.connection)
@@ -282,6 +292,180 @@ class SecurityUniverseSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "不能为空"):
             service.get_snapshot(" ")
         self.assertIsNone(service.get_snapshot("missing"))
+
+    def test_due_capture_applies_local_close_and_daily_idempotency(self) -> None:
+        loader = MagicMock(side_effect=lambda market: _items(market))
+        calendar = MagicMock(return_value=True)
+        service = self._service(
+            catalog_loader=loader,
+            trading_day_loader=calendar,
+        )
+        with patch(
+            "app.security_universe_snapshots.run_external_call",
+            side_effect=self._call_directly,
+        ):
+            first = service.capture_due()
+            second = service.capture_due()
+
+        self.assertEqual(
+            [item["market"] for item in first["captured"]],
+            ["HK"],
+        )
+        self.assertEqual(first["security_count"], 2)
+        self.assertEqual(
+            first["skipped"],
+            [{
+                "market": "US",
+                "observation_date": "2026-07-24",
+                "reason": "session_not_closed",
+            }],
+        )
+        self.assertEqual(second["captured"], [])
+        self.assertIn(
+            "already_captured",
+            {item["reason"] for item in second["skipped"]},
+        )
+        loader.assert_called_once_with("HK")
+        calendar.assert_called_once_with("HK", date(2026, 7, 24))
+        history = service.get_history("HK")
+        self.assertEqual(history["capture_runs"][0]["status"], "completed")
+        self.assertEqual(history["capture_runs"][0]["security_count"], 2)
+
+    def test_due_capture_fails_closed_and_caches_market_closed(self) -> None:
+        loader = MagicMock()
+        calendar = MagicMock(return_value=False)
+        service = self._service(
+            catalog_loader=loader,
+            trading_day_loader=calendar,
+        )
+        with patch(
+            "app.security_universe_snapshots.run_external_call",
+            side_effect=self._call_directly,
+        ):
+            first = service.capture_due()
+            second = service.capture_due()
+
+        self.assertEqual(first["captured"], [])
+        self.assertEqual(first["errors"], [])
+        self.assertIn(
+            "market_closed",
+            {item["reason"] for item in first["skipped"]},
+        )
+        self.assertEqual(second["captured"], [])
+        calendar.assert_called_once_with("HK", date(2026, 7, 24))
+        loader.assert_not_called()
+
+    def test_calendar_error_does_not_claim_or_fetch(self) -> None:
+        loader = MagicMock()
+        service = self._service(
+            catalog_loader=loader,
+            trading_day_loader=MagicMock(
+                side_effect=RuntimeError("calendar token=secret"),
+            ),
+        )
+        with patch(
+            "app.security_universe_snapshots.run_external_call",
+            side_effect=self._call_directly,
+        ):
+            result = service.capture_due()
+
+        run_count = self.connection.execute(
+            "SELECT COUNT(*) FROM security_universe_snapshot_runs"
+        ).fetchone()[0]
+        self.assertEqual(run_count, 0)
+        self.assertEqual(result["captured"], [])
+        self.assertEqual(
+            result["errors"][0]["reason"],
+            "trading_calendar_unavailable",
+        )
+        self.assertNotIn("secret", result["errors"][0]["error"])
+        loader.assert_not_called()
+
+    def test_failed_capture_retries_and_replaces_failed_run(self) -> None:
+        loader = MagicMock(
+            side_effect=[RuntimeError("refresh failed"), _items("HK")],
+        )
+        service = self._service(catalog_loader=loader)
+        with patch(
+            "app.security_universe_snapshots.run_external_call",
+            side_effect=self._call_directly,
+        ):
+            first = service.capture_due()
+            second = service.capture_due()
+
+        self.assertEqual(first["captured"], [])
+        self.assertIn("refresh failed", first["errors"][0]["error"])
+        self.assertEqual(len(second["captured"]), 1)
+        run = service.get_history("HK")["capture_runs"][0]
+        self.assertEqual(run["status"], "completed")
+        self.assertEqual(run["snapshot_id"], second["captured"][0]["snapshot_id"])
+
+    def test_claim_blocks_concurrency_and_stale_owner_cannot_finish(self) -> None:
+        service = self._service()
+        now = datetime(2026, 7, 24, 12, tzinfo=timezone.utc)
+        observation_date = date(2026, 7, 24)
+        first = service._claim_capture("HK", observation_date, now)
+        blocked = service._claim_capture(
+            "HK",
+            observation_date,
+            now + timedelta(minutes=1),
+        )
+        replacement = service._claim_capture(
+            "HK",
+            observation_date,
+            now + timedelta(minutes=CAPTURE_CLAIM_LEASE_MINUTES + 1),
+        )
+        service._finish_capture_claim(
+            "HK",
+            observation_date,
+            first,
+            status="completed",
+            completed_at=now + timedelta(minutes=32),
+            snapshot_id="stale-snapshot",
+            security_count=999,
+        )
+
+        row = self.connection.execute(
+            """
+            SELECT status, claim_id, snapshot_id, security_count
+            FROM security_universe_snapshot_runs
+            WHERE market = 'HK' AND observation_date = ?
+            """,
+            [observation_date],
+        ).fetchone()
+        self.assertIsNotNone(first)
+        self.assertIsNone(blocked)
+        self.assertIsNotNone(replacement)
+        self.assertNotEqual(first, replacement)
+        self.assertEqual(row, ("running", replacement, None, 0))
+
+    def test_existing_snapshot_reconciles_interrupted_running_claim(self) -> None:
+        service = self._service()
+        now = datetime(2026, 7, 24, 12, tzinfo=timezone.utc)
+        observation_date = date(2026, 7, 24)
+        claim_id = service._claim_capture("HK", observation_date, now)
+        snapshot = service.capture_market("HK")
+
+        result = service.capture_due()
+        row = self.connection.execute(
+            """
+            SELECT status, snapshot_id, security_count, error
+            FROM security_universe_snapshot_runs
+            WHERE market = 'HK' AND observation_date = ?
+            """,
+            [observation_date],
+        ).fetchone()
+
+        self.assertIsNotNone(claim_id)
+        self.assertEqual(result["captured"], [])
+        self.assertIn(
+            "already_captured",
+            {item["reason"] for item in result["skipped"]},
+        )
+        self.assertEqual(
+            row,
+            ("completed", snapshot["snapshot_id"], 2, None),
+        )
 
 
 class SecurityUniverseSnapshotHttpTests(unittest.TestCase):

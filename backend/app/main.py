@@ -223,11 +223,22 @@ async def _run_stock_picker_factor_snapshot_once(
     from .stock_picker_factor_snapshots import (
         get_stock_picker_factor_snapshot_service,
     )
+    from .security_universe_snapshots import (
+        get_security_universe_snapshot_service,
+    )
 
-    return await asyncio.to_thread(
+    factor_result = await asyncio.to_thread(
         get_stock_picker_factor_snapshot_service().capture_due_baseline,
         persist=True,
     )
+    universe_result = await asyncio.to_thread(
+        get_security_universe_snapshot_service().capture_due,
+        persist=True,
+    )
+    return {
+        **factor_result,
+        "security_universes": universe_result,
+    }
 
 
 async def _auto_capture_stock_picker_factor_snapshots() -> None:
@@ -264,6 +275,20 @@ async def _auto_capture_stock_picker_factor_snapshots() -> None:
                 for error in result["errors"]:
                     logger.warning(
                         "stock-picker factor snapshot group failed: %s",
+                        error,
+                    )
+                universe = result["security_universes"]
+                logger.info(
+                    "security universe snapshots: captured=%s "
+                    "skipped=%s errors=%s securities=%s",
+                    len(universe["captured"]),
+                    len(universe["skipped"]),
+                    len(universe["errors"]),
+                    universe["security_count"],
+                )
+                for error in universe["errors"]:
+                    logger.warning(
+                        "security universe snapshot failed: %s",
                         error,
                     )
         except asyncio.CancelledError:

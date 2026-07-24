@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -9,7 +9,13 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .db import get_connection
+from .external_service_resilience import (
+    ExternalServiceTimeoutError,
+    run_external_call,
+)
 from .security_catalog import get_security_catalog_service
+from .stock_candidate_data import is_market_trading_day
+from .stock_picker_ai_snapshots import sanitize_error
 
 
 SNAPSHOT_VERSION = "security-universe-snapshot-v1"
@@ -27,6 +33,9 @@ MINIMUM_SECURITY_COUNTS = {
     "HK": 1000,
     "CN": 1000,
 }
+AUTO_CAPTURE_MARKETS = ("US", "HK")
+AUTO_CAPTURE_LOCAL_HOUR = 17
+CAPTURE_CLAIM_LEASE_MINUTES = 30
 
 
 class SecurityUniverseSnapshotService:
@@ -40,6 +49,7 @@ class SecurityUniverseSnapshotService:
             lambda: datetime.now(timezone.utc)
         ),
         minimum_security_counts: Optional[Dict[str, int]] = None,
+        trading_day_loader: Callable = is_market_trading_day,
     ) -> None:
         self.catalog_loader = catalog_loader or self._refresh_catalog
         self.connection_factory = connection_factory
@@ -49,6 +59,8 @@ class SecurityUniverseSnapshotService:
             if minimum_security_counts is not None
             else dict(MINIMUM_SECURITY_COUNTS)
         )
+        self.trading_day_loader = trading_day_loader
+        self._trading_day_cache: Dict[tuple[str, date], bool] = {}
 
     def capture_market(
         self,
@@ -132,6 +144,99 @@ class SecurityUniverseSnapshotService:
             "persisted": persist and status == "captured",
         }
 
+    def capture_due(self, *, persist: bool = True) -> Dict[str, Any]:
+        now = self._as_utc(self.clock())
+        captured = []
+        skipped = []
+        errors = []
+
+        for market in AUTO_CAPTURE_MARKETS:
+            local_now = now.astimezone(ZoneInfo(MARKET_TIMEZONES[market]))
+            observation_date = local_now.date()
+            scope = {
+                "market": market,
+                "observation_date": observation_date.isoformat(),
+            }
+            if local_now.hour < AUTO_CAPTURE_LOCAL_HOUR:
+                skipped.append({**scope, "reason": "session_not_closed"})
+                continue
+            existing = self._find_existing_summary(
+                market,
+                observation_date,
+            )
+            if existing:
+                if persist:
+                    self._reconcile_existing_run(existing, now)
+                skipped.append({**scope, "reason": "already_captured"})
+                continue
+            try:
+                if not self._is_market_trading_day(
+                    market,
+                    observation_date,
+                ):
+                    skipped.append({**scope, "reason": "market_closed"})
+                    continue
+            except Exception as exc:
+                error = sanitize_error(exc)
+                errors.append({
+                    **scope,
+                    "reason": "trading_calendar_unavailable",
+                    "error": error,
+                })
+                continue
+
+            claim_id = None
+            if persist:
+                claim_id = self._claim_capture(
+                    market,
+                    observation_date,
+                    now,
+                )
+                if claim_id is None:
+                    skipped.append({
+                        **scope,
+                        "reason": "capture_claim_unavailable",
+                    })
+                    continue
+            try:
+                result = self.capture_market(market, persist=persist)
+            except Exception as exc:
+                error = sanitize_error(exc)
+                if claim_id is not None:
+                    self._finish_capture_claim(
+                        market,
+                        observation_date,
+                        claim_id,
+                        status="failed",
+                        completed_at=self._as_utc(self.clock()),
+                        error=error,
+                    )
+                errors.append({**scope, "error": error})
+                continue
+
+            if claim_id is not None:
+                self._finish_capture_claim(
+                    market,
+                    observation_date,
+                    claim_id,
+                    status="completed",
+                    completed_at=self._as_utc(self.clock()),
+                    snapshot_id=result["snapshot_id"],
+                    security_count=result["security_count"],
+                )
+            captured.append(result)
+
+        return {
+            "snapshot_version": SNAPSHOT_VERSION,
+            "auto_capture_markets": list(AUTO_CAPTURE_MARKETS),
+            "captured": captured,
+            "skipped": skipped,
+            "errors": errors,
+            "security_count": sum(
+                item["security_count"] for item in captured
+            ),
+        }
+
     def get_history(
         self,
         market: Optional[str] = None,
@@ -161,10 +266,22 @@ class SecurityUniverseSnapshotService:
                 """,
                 parameters,
             ).fetchall()
+            run_rows = connection.execute(
+                """
+                SELECT market, observation_date, status, claim_id,
+                       started_at, completed_at, snapshot_id,
+                       security_count, error
+                FROM security_universe_snapshot_runs
+                ORDER BY started_at DESC, market
+                LIMIT ?
+                """,
+                [int(limit)],
+            ).fetchall()
         return {
             "snapshot_version": SNAPSHOT_VERSION,
             "source": SNAPSHOT_SOURCE,
             "items": [self._summary(row) for row in rows],
+            "capture_runs": [self._run_summary(row) for row in run_rows],
         }
 
     def get_snapshot(self, snapshot_id: str) -> Optional[Dict[str, Any]]:
@@ -242,6 +359,140 @@ class SecurityUniverseSnapshotService:
             "integrity_errors": integrity_errors,
             "payload": payload,
         }
+
+    def _is_market_trading_day(
+        self,
+        market: str,
+        observation_date: date,
+    ) -> bool:
+        key = (market, observation_date)
+        cached = self._trading_day_cache.get(key)
+        if cached is not None:
+            return cached
+        result = bool(run_external_call(
+            "quote",
+            "security_universe_trading_calendar",
+            self.trading_day_loader,
+            market,
+            observation_date,
+            retry_if=lambda error: not isinstance(
+                error,
+                ExternalServiceTimeoutError,
+            ),
+        ))
+        self._trading_day_cache[key] = result
+        return result
+
+    def _claim_capture(
+        self,
+        market: str,
+        observation_date: date,
+        started_at: datetime,
+    ) -> Optional[str]:
+        claim_id = uuid4().hex
+        stale_before = started_at - timedelta(
+            minutes=CAPTURE_CLAIM_LEASE_MINUTES,
+        )
+        with self.connection_factory() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO security_universe_snapshot_runs (
+                    market, observation_date, status, claim_id, started_at
+                ) VALUES (?, ?, 'running', ?, ?)
+                ON CONFLICT (market, observation_date) DO UPDATE SET
+                    status = 'running',
+                    claim_id = excluded.claim_id,
+                    started_at = excluded.started_at,
+                    completed_at = NULL,
+                    snapshot_id = NULL,
+                    security_count = 0,
+                    error = NULL
+                WHERE (
+                    security_universe_snapshot_runs.status IN (
+                        'failed', 'completed'
+                    )
+                    OR (
+                        security_universe_snapshot_runs.status = 'running'
+                        AND security_universe_snapshot_runs.started_at < ?
+                    )
+                )
+                RETURNING claim_id
+                """,
+                [
+                    market,
+                    observation_date,
+                    claim_id,
+                    started_at.replace(tzinfo=None),
+                    stale_before.replace(tzinfo=None),
+                ],
+            ).fetchone()
+        return claim_id if row and row[0] == claim_id else None
+
+    def _finish_capture_claim(
+        self,
+        market: str,
+        observation_date: date,
+        claim_id: str,
+        *,
+        status: str,
+        completed_at: datetime,
+        snapshot_id: Optional[str] = None,
+        security_count: int = 0,
+        error: Optional[str] = None,
+    ) -> None:
+        if status not in {"completed", "failed"}:
+            raise ValueError("status 必须是 completed 或 failed")
+        with self.connection_factory() as connection:
+            connection.execute(
+                """
+                UPDATE security_universe_snapshot_runs
+                SET status = ?,
+                    completed_at = ?,
+                    snapshot_id = ?,
+                    security_count = ?,
+                    error = ?
+                WHERE market = ?
+                  AND observation_date = ?
+                  AND claim_id = ?
+                """,
+                [
+                    status,
+                    completed_at.replace(tzinfo=None),
+                    snapshot_id,
+                    int(security_count),
+                    error,
+                    market,
+                    observation_date,
+                    claim_id,
+                ],
+            )
+
+    def _reconcile_existing_run(
+        self,
+        snapshot: Dict[str, Any],
+        completed_at: datetime,
+    ) -> None:
+        with self.connection_factory() as connection:
+            connection.execute(
+                """
+                UPDATE security_universe_snapshot_runs
+                SET status = 'completed',
+                    completed_at = COALESCE(completed_at, ?),
+                    snapshot_id = ?,
+                    security_count = ?,
+                    error = NULL
+                WHERE market = ?
+                  AND observation_date = ?
+                  AND status != 'completed'
+                """,
+                [
+                    completed_at.replace(tzinfo=None),
+                    snapshot["snapshot_id"],
+                    int(snapshot["security_count"]),
+                    snapshot["market"],
+                    date.fromisoformat(snapshot["observation_date"]),
+                ],
+            )
 
     def _save_snapshot(
         self,
@@ -414,6 +665,26 @@ class SecurityUniverseSnapshotService:
             "source_query": row[6],
             "security_count": row[7],
             "payload_hash": row[8],
+        }
+
+    @staticmethod
+    def _run_summary(row: tuple) -> Dict[str, Any]:
+        return {
+            "market": row[0],
+            "observation_date": row[1].isoformat(),
+            "status": row[2],
+            "claim_id": row[3],
+            "started_at": row[4].replace(
+                tzinfo=timezone.utc
+            ).isoformat(),
+            "completed_at": (
+                row[5].replace(tzinfo=timezone.utc).isoformat()
+                if row[5] is not None
+                else None
+            ),
+            "snapshot_id": row[6],
+            "security_count": row[7],
+            "error": row[8],
         }
 
     @staticmethod

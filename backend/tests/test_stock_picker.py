@@ -311,12 +311,24 @@ class StockPickerConfigAndSnapshotTest(unittest.TestCase):
         snapshot_service.capture_due_baseline.return_value = {
             "captured": [],
             "skipped": [],
+            "errors": [],
             "row_count": 0,
+        }
+        universe_service = MagicMock()
+        universe_service.capture_due.return_value = {
+            "captured": [],
+            "skipped": [],
+            "errors": [],
+            "security_count": 0,
         }
         with patch(
             "app.stock_picker_factor_snapshots."
             "get_stock_picker_factor_snapshot_service",
             return_value=snapshot_service,
+        ), patch(
+            "app.security_universe_snapshots."
+            "get_security_universe_snapshot_service",
+            return_value=universe_service,
         ):
             enabled = asyncio.run(
                 _run_stock_picker_factor_snapshot_once({
@@ -328,6 +340,11 @@ class StockPickerConfigAndSnapshotTest(unittest.TestCase):
         self.assertEqual(enabled["row_count"], 0)
         snapshot_service.capture_due_baseline.assert_called_once_with(
             persist=True,
+        )
+        universe_service.capture_due.assert_called_once_with(persist=True)
+        self.assertEqual(
+            enabled["security_universes"]["security_count"],
+            0,
         )
 
     def test_screener_auto_capture_runs_only_when_enabled(self) -> None:
