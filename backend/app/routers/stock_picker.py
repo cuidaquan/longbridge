@@ -138,6 +138,10 @@ class ScreenerIndexFilters(BaseModel):
         default=None,
         ge=0,
     )
+    min_short_selling_quantity: Optional[float] = Field(
+        default=None,
+        ge=0,
+    )
 
 
 class ScreenerSearchRequest(BaseModel):
@@ -160,6 +164,7 @@ class ScreenerSearchRequest(BaseModel):
     require_normal_trade_status: bool = True
     include_fundamentals: bool = False
     include_margin_requirements: bool = False
+    include_short_capacity: bool = False
     fundamental_event_window_days: int = Field(
         default=30,
         ge=1,
@@ -490,6 +495,7 @@ async def search_screener_candidates(request: ScreenerSearchRequest):
             include_margin_requirements=(
                 request.include_margin_requirements
             ),
+            include_short_capacity=request.include_short_capacity,
             fundamental_event_window_days=(
                 request.fundamental_event_window_days
             ),

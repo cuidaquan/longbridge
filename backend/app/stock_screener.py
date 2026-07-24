@@ -18,6 +18,7 @@ from .stock_candidate_data import (
     get_fundamental_profiles,
     get_margin_requirements,
     get_security_tradeability,
+    get_short_selling_capacity,
 )
 
 
@@ -81,6 +82,9 @@ FUNDAMENTAL_FILTER_KEYS = {
 MARGIN_FILTER_KEYS = {
     "max_initial_margin_ratio",
 }
+SHORT_CAPACITY_FILTER_KEYS = {
+    "min_short_selling_quantity",
+}
 
 
 def _retry_candidate_batch(error: BaseException) -> bool:
@@ -110,12 +114,16 @@ class StockScreenerService:
         margin_loader: Callable[..., Dict[str, Dict[str, Any]]] = (
             get_margin_requirements
         ),
+        short_capacity_loader: Callable[
+            ..., Dict[str, Dict[str, Any]]
+        ] = get_short_selling_capacity,
     ) -> None:
         self._index_loader = index_loader
         self._short_risk_loader = short_risk_loader
         self._tradeability_loader = tradeability_loader
         self._fundamental_loader = fundamental_loader
         self._margin_loader = margin_loader
+        self._short_capacity_loader = short_capacity_loader
 
     @staticmethod
     def normalize_market(market: str) -> str:
@@ -237,6 +245,7 @@ class StockScreenerService:
         require_normal_trade_status: bool = True,
         include_fundamentals: bool = False,
         include_margin_requirements: bool = False,
+        include_short_capacity: bool = False,
         fundamental_event_window_days: int = 30,
         include_corporate_actions: bool = False,
     ) -> Dict[str, Any]:
@@ -265,6 +274,15 @@ class StockScreenerService:
             and SHORT_RISK_FILTER_KEYS.intersection(normalized_filters)
         ):
             raise ValueError("做空拥挤度过滤仅适用于 SHORT 方向")
+        hard_short_capacity_filters = (
+            SHORT_CAPACITY_FILTER_KEYS.intersection(normalized_filters)
+        )
+        if normalized_direction != "SHORT" and (
+            include_short_capacity or hard_short_capacity_filters
+        ):
+            raise ValueError("账户卖空能力仅适用于 SHORT 方向")
+        if normalized_market != "US" and hard_short_capacity_filters:
+            raise ValueError("账户卖空数量过滤仅支持美股 SHORT 候选")
         if (
             not include_tradeability
             and (
@@ -648,6 +666,79 @@ class StockScreenerService:
                 "borrow_fee_rate": None,
             })
 
+        needs_short_capacity = bool(
+            normalized_direction == "SHORT"
+            and (
+                include_short_capacity
+                or hard_short_capacity_filters
+            )
+        )
+        short_capacity_status = {
+            "status": (
+                "not_applicable"
+                if normalized_direction != "SHORT"
+                else "unsupported"
+                if needs_short_capacity and normalized_market != "US"
+                else "disabled"
+            ),
+            "error": None,
+            "supported_market": "US",
+            "account_specific": True,
+            "borrow_fee_rate": None,
+            "recall_risk": "unknown",
+        }
+        if (
+            needs_short_capacity
+            and normalized_market == "US"
+            and candidates
+        ):
+            try:
+                short_capacity = run_external_call(
+                    "trade",
+                    "short_selling_capacity",
+                    self._short_capacity_loader,
+                    candidate_symbols,
+                    retry_if=_retry_candidate_batch,
+                )
+            except Exception as exc:
+                if hard_short_capacity_filters:
+                    raise LongbridgeAPIError(
+                        f"无法应用账户卖空数量过滤: {exc}"
+                    ) from exc
+                logger.warning(
+                    "Longbridge short-selling capacity unavailable: %s",
+                    exc,
+                )
+                short_capacity_status["status"] = "fallback"
+                short_capacity_status["error"] = str(exc)
+            else:
+                for candidate in candidates:
+                    candidate["short_capacity"] = short_capacity.get(
+                        candidate["symbol"],
+                        {
+                            "status": "no_data",
+                            "error": None,
+                            "cash_max_qty": None,
+                            "margin_max_qty": None,
+                            "short_selling_max_qty": None,
+                            "availability": "unknown",
+                            "borrow_fee_rate": None,
+                            "recall_risk": "unknown",
+                        },
+                    )
+                short_capacity_status["status"] = "available"
+        for candidate in candidates:
+            candidate.setdefault("short_capacity", {
+                "status": short_capacity_status["status"],
+                "error": short_capacity_status["error"],
+                "cash_max_qty": None,
+                "margin_max_qty": None,
+                "short_selling_max_qty": None,
+                "availability": "unknown",
+                "borrow_fee_rate": None,
+                "recall_risk": "unknown",
+            })
+
         before_filter_count = len(candidates)
         candidates, exclusion_reasons = self._apply_candidate_filters(
             candidates,
@@ -691,6 +782,7 @@ class StockScreenerService:
             "tradeability": tradeability_status,
             "fundamentals": fundamental_status,
             "margin_requirements": margin_status,
+            "short_capacity": short_capacity_status,
             "filters": {
                 "applied": {
                     **normalized_filters,
@@ -735,6 +827,7 @@ class StockScreenerService:
             "min_days_to_financial_event": (0, 365),
             "min_days_to_corporate_action": (0, 365),
             "max_initial_margin_ratio": (0, None),
+            "min_short_selling_quantity": (0, None),
         }
         unknown = set(filters) - set(supported)
         if unknown:
@@ -894,6 +987,12 @@ class StockScreenerService:
                 "margin_requirements",
                 "initial_margin_ratio",
                 "max",
+            ),
+            (
+                "min_short_selling_quantity",
+                "short_capacity",
+                "short_selling_max_qty",
+                "min",
             ),
         )
         kept = []

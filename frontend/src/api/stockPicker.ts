@@ -256,6 +256,19 @@ export interface ScreenerCandidate {
     borrow_fee_rate?: number | null;
     note?: string;
   };
+  short_capacity: {
+    status: 'available' | 'no_data' | 'error' | 'fallback' | 'disabled'
+      | 'unsupported' | 'not_applicable';
+    error?: string | null;
+    cash_max_qty?: number | null;
+    margin_max_qty?: number | null;
+    short_selling_max_qty?: number | null;
+    availability: 'available' | 'unavailable' | 'unknown';
+    borrow_fee_rate?: number | null;
+    recall_risk: 'unknown';
+    source?: 'longbridge_estimate_max_purchase_quantity';
+    note?: string;
+  };
 }
 
 export interface ScreenerIndexFilters {
@@ -286,6 +299,7 @@ export interface ScreenerIndexFilters {
   min_days_to_financial_event?: number;
   min_days_to_corporate_action?: number;
   max_initial_margin_ratio?: number;
+  min_short_selling_quantity?: number;
 }
 
 export interface ScreenerSearchResponse {
@@ -325,6 +339,15 @@ export interface ScreenerSearchResponse {
     status: 'available' | 'fallback' | 'disabled';
     error?: string | null;
     borrow_availability: 'unknown';
+  };
+  short_capacity: {
+    status: 'available' | 'fallback' | 'disabled' | 'unsupported'
+      | 'not_applicable';
+    error?: string | null;
+    supported_market: 'US';
+    account_specific: true;
+    borrow_fee_rate?: number | null;
+    recall_risk: 'unknown';
   };
   filters: {
     applied: ScreenerIndexFilters & {
@@ -813,6 +836,7 @@ export async function searchScreenerCandidates(params: {
   requireNormalTradeStatus?: boolean;
   includeFundamentals?: boolean;
   includeMarginRequirements?: boolean;
+  includeShortCapacity?: boolean;
   fundamentalEventWindowDays?: number;
   includeCorporateActions?: boolean;
 }): Promise<ScreenerSearchResponse> {
@@ -833,6 +857,7 @@ export async function searchScreenerCandidates(params: {
       require_normal_trade_status: params.requireNormalTradeStatus ?? true,
       include_fundamentals: params.includeFundamentals ?? false,
       include_margin_requirements: params.includeMarginRequirements ?? false,
+      include_short_capacity: params.includeShortCapacity ?? false,
       fundamental_event_window_days: params.fundamentalEventWindowDays ?? 30,
       include_corporate_actions: params.includeCorporateActions ?? false,
     }),

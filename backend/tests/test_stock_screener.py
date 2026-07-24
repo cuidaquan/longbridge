@@ -29,6 +29,7 @@ class _ServiceWithContext(StockScreenerService):
         tradeability_loader=None,
         fundamental_loader=None,
         margin_loader=None,
+        short_capacity_loader=None,
     ) -> None:
         super().__init__(
             index_loader=index_loader or (lambda _symbols: {}),
@@ -59,6 +60,10 @@ class _ServiceWithContext(StockScreenerService):
                 or (lambda *_args, **_kwargs: {})
             ),
             margin_loader=margin_loader or (lambda _symbols: {}),
+            short_capacity_loader=(
+                short_capacity_loader
+                or (lambda _symbols: {})
+            ),
         )
         self.context = context
 
@@ -785,6 +790,169 @@ class StockScreenerServiceTest(unittest.TestCase):
         )
         margin_loader.assert_called_once_with(["LOW.US", "HIGH.US"])
 
+    def test_short_capacity_filter_uses_account_estimate_for_us_short(
+        self,
+    ) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "items": [
+                {"symbol": "ENOUGH.US", "name": "Enough"},
+                {"symbol": "SMALL.US", "name": "Small"},
+                {"symbol": "UNKNOWN.US", "name": "Unknown"},
+            ],
+        })
+        capacity_loader = MagicMock(return_value={
+            "ENOUGH.US": {
+                "status": "available",
+                "cash_max_qty": 10,
+                "margin_max_qty": 500,
+                "short_selling_max_qty": 500,
+                "availability": "available",
+                "borrow_fee_rate": None,
+                "recall_risk": "unknown",
+            },
+            "SMALL.US": {
+                "status": "available",
+                "cash_max_qty": 0,
+                "margin_max_qty": 50,
+                "short_selling_max_qty": 50,
+                "availability": "available",
+                "borrow_fee_rate": None,
+                "recall_risk": "unknown",
+            },
+            "UNKNOWN.US": {
+                "status": "error",
+                "error": "permission denied",
+                "short_selling_max_qty": None,
+                "availability": "unknown",
+                "borrow_fee_rate": None,
+                "recall_risk": "unknown",
+            },
+        })
+        service = _ServiceWithContext(
+            context,
+            short_capacity_loader=capacity_loader,
+        )
+
+        result = service.search(
+            "US",
+            101,
+            include_indexes=False,
+            include_short_risk=False,
+            target_direction="SHORT",
+            filters={"min_short_selling_quantity": 100},
+        )
+
+        self.assertEqual(
+            [item["symbol"] for item in result["items"]],
+            ["ENOUGH.US"],
+        )
+        self.assertEqual(
+            result["items"][0]["short_capacity"][
+                "short_selling_max_qty"
+            ],
+            500,
+        )
+        self.assertEqual(result["short_capacity"]["status"], "available")
+        self.assertTrue(result["short_capacity"]["account_specific"])
+        self.assertIsNone(result["short_capacity"]["borrow_fee_rate"])
+        self.assertEqual(result["short_capacity"]["recall_risk"], "unknown")
+        self.assertEqual(
+            result["filters"]["reasons"],
+            {
+                "below_min_short_selling_quantity": 1,
+                "missing_short_selling_max_qty": 1,
+            },
+        )
+        capacity_loader.assert_called_once_with([
+            "ENOUGH.US",
+            "SMALL.US",
+            "UNKNOWN.US",
+        ])
+
+    def test_short_capacity_scope_and_failure_semantics(self) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "items": [{"symbol": "AAA.US", "name": "Alpha"}],
+        })
+
+        def fail_capacity(_symbols):
+            raise RuntimeError("trade estimate unavailable")
+
+        service = _ServiceWithContext(
+            context,
+            short_capacity_loader=fail_capacity,
+        )
+        degraded = service.search(
+            "US",
+            101,
+            include_indexes=False,
+            include_short_risk=False,
+            target_direction="SHORT",
+            include_short_capacity=True,
+        )
+        self.assertEqual(degraded["short_capacity"]["status"], "fallback")
+        self.assertEqual(
+            degraded["items"][0]["short_capacity"]["status"],
+            "fallback",
+        )
+
+        reset_stock_picker_reliability_metrics()
+        with self.assertRaisesRegex(
+            LongbridgeAPIError,
+            "无法应用账户卖空数量过滤",
+        ):
+            service.search(
+                "US",
+                101,
+                include_indexes=False,
+                include_short_risk=False,
+                target_direction="SHORT",
+                filters={"min_short_selling_quantity": 1},
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "仅适用于 SHORT",
+        ):
+            service.search(
+                "US",
+                101,
+                include_indexes=False,
+                target_direction="LONG",
+                include_short_capacity=True,
+            )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "仅支持美股",
+        ):
+            service.search(
+                "HK",
+                101,
+                include_indexes=False,
+                include_short_risk=False,
+                target_direction="SHORT",
+                filters={"min_short_selling_quantity": 1},
+            )
+
+        unsupported = service.search(
+            "HK",
+            101,
+            include_indexes=False,
+            include_short_risk=False,
+            target_direction="SHORT",
+            include_short_capacity=True,
+        )
+        self.assertEqual(
+            unsupported["short_capacity"]["status"],
+            "unsupported",
+        )
+        self.assertEqual(
+            unsupported["items"][0]["short_capacity"]["status"],
+            "unsupported",
+        )
+
     def test_fundamental_and_margin_failures_only_degrade_without_filters(
         self,
     ) -> None:
@@ -960,9 +1128,12 @@ class StockScreenerRouteTest(unittest.TestCase):
                             "max_spread_bps": 50,
                             "min_revenue_yoy": 0.1,
                             "max_initial_margin_ratio": 0.6,
+                            "min_short_selling_quantity": 100,
                         },
+                        "target_direction": "SHORT",
                         "include_fundamentals": True,
                         "include_margin_requirements": True,
+                        "include_short_capacity": True,
                         "fundamental_event_window_days": 60,
                         "include_corporate_actions": True,
                     },
@@ -990,15 +1161,17 @@ class StockScreenerRouteTest(unittest.TestCase):
                 "max_spread_bps": 50.0,
                 "min_revenue_yoy": 0.1,
                 "max_initial_margin_ratio": 0.6,
+                "min_short_selling_quantity": 100.0,
             },
             include_indexes=True,
-            target_direction="LONG",
+            target_direction="SHORT",
             benchmark_symbol=None,
             include_short_risk=True,
             include_tradeability=True,
             require_normal_trade_status=True,
             include_fundamentals=True,
             include_margin_requirements=True,
+            include_short_capacity=True,
             fundamental_event_window_days=60,
             include_corporate_actions=True,
         )

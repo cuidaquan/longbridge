@@ -267,6 +267,113 @@ def get_margin_requirements(
     return results
 
 
+def get_short_selling_capacity(
+    symbols: Iterable[str],
+) -> Dict[str, Dict[str, Any]]:
+    symbol_list = _symbols(symbols)
+    if not symbol_list:
+        return {}
+
+    results = {
+        symbol: {
+            "status": "unsupported",
+            "error": None,
+            "cash_max_qty": None,
+            "margin_max_qty": None,
+            "short_selling_max_qty": None,
+            "availability": "unknown",
+            "borrow_fee_rate": None,
+            "recall_risk": "unknown",
+            "source": "longbridge_estimate_max_purchase_quantity",
+            "note": "账户点时预估不包含融券费率或召回风险",
+        }
+        for symbol in symbol_list
+        if not symbol.endswith(".US")
+    }
+    us_symbols = [
+        symbol
+        for symbol in symbol_list
+        if symbol.endswith(".US")
+    ]
+    if not us_symbols:
+        return results
+
+    try:
+        from longbridge.openapi import OrderSide, OrderType
+    except ModuleNotFoundError as exc:  # pragma: no cover - environment dependent
+        raise LongbridgeDependencyMissing(
+            "未找到 longbridge Python SDK，请先运行 `pip install longbridge`。"
+        ) from exc
+
+    try:
+        with _context("trade") as context:
+            for symbol in us_symbols:
+                try:
+                    response = context.estimate_max_purchase_quantity(
+                        symbol,
+                        OrderType.LO,
+                        OrderSide.Sell,
+                    )
+                    cash_max_qty = _non_negative_float(
+                        getattr(response, "cash_max_qty", None)
+                    )
+                    margin_max_qty = _non_negative_float(
+                        getattr(response, "margin_max_qty", None)
+                    )
+                    results[symbol] = {
+                        "status": (
+                            "available"
+                            if margin_max_qty is not None
+                            else "no_data"
+                        ),
+                        "error": None,
+                        "cash_max_qty": cash_max_qty,
+                        "margin_max_qty": margin_max_qty,
+                        "short_selling_max_qty": margin_max_qty,
+                        "availability": (
+                            "available"
+                            if margin_max_qty is not None
+                            and margin_max_qty > 0
+                            else "unavailable"
+                            if margin_max_qty == 0
+                            else "unknown"
+                        ),
+                        "borrow_fee_rate": None,
+                        "recall_risk": "unknown",
+                        "source": (
+                            "longbridge_estimate_max_purchase_quantity"
+                        ),
+                        "note": (
+                            "Longbridge 账户风险控制点时预估；"
+                            "不包含融券费率或召回风险"
+                        ),
+                    }
+                except Exception as exc:
+                    results[symbol] = {
+                        "status": "error",
+                        "error": str(exc),
+                        "cash_max_qty": None,
+                        "margin_max_qty": None,
+                        "short_selling_max_qty": None,
+                        "availability": "unknown",
+                        "borrow_fee_rate": None,
+                        "recall_risk": "unknown",
+                        "source": (
+                            "longbridge_estimate_max_purchase_quantity"
+                        ),
+                        "note": (
+                            "查询失败不能区分账户权限、风险控制或临时服务错误"
+                        ),
+                    }
+    except (ValueError, LongbridgeDependencyMissing, LongbridgeAPIError):
+        raise
+    except Exception as exc:
+        raise LongbridgeAPIError(
+            f"获取账户预估可卖空数量失败: {exc}"
+        ) from exc
+    return results
+
+
 def get_fundamental_profiles(
     symbols: Iterable[str],
     market: str,
@@ -647,6 +754,13 @@ def _enum_name(value: Any) -> Optional[str]:
             text = value.__class__.__name__
     normalized = str(text).split(".")[-1].strip().lower()
     return normalized or None
+
+
+def _non_negative_float(value: Any) -> Optional[float]:
+    number = _safe_float(value)
+    if number is None or number < 0:
+        return None
+    return number
 
 
 def _ratio(value: Any) -> Optional[float]:

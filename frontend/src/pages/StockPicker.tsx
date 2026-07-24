@@ -2605,6 +2605,7 @@ function StockDiscoveryDialog({
   const [showFilters, setShowFilters] = useState(false);
   const [includeFundamentalDetails, setIncludeFundamentalDetails] = useState(false);
   const [includeMarginDetails, setIncludeMarginDetails] = useState(false);
+  const [includeShortCapacity, setIncludeShortCapacity] = useState(false);
   const [filterInputs, setFilterInputs] = useState({
     min_turnover: '',
     min_market_value: '',
@@ -2633,6 +2634,7 @@ function StockDiscoveryDialog({
     min_days_to_financial_event: '',
     min_days_to_corporate_action: '',
     max_initial_margin_ratio: '',
+    min_short_selling_quantity: '',
   });
 
   useEffect(() => {
@@ -2692,6 +2694,9 @@ function StockDiscoveryDialog({
         requireNormalTradeStatus: true,
         includeFundamentals: includeFundamentalDetails,
         includeMarginRequirements: poolType === 'SHORT' && includeMarginDetails,
+        includeShortCapacity: (
+          market === 'US' && poolType === 'SHORT' && includeShortCapacity
+        ),
         includeCorporateActions: includeFundamentalDetails,
       });
       setResult(response);
@@ -2791,6 +2796,13 @@ function StockDiscoveryDialog({
           ['max_short_ratio', '最高做空比例', 'SDK 数值'],
           ['max_short_ratio_change', '最高做空比例增量', '可输入负数'],
           ['max_initial_margin_ratio', '最高初始保证金比例', '小数，例如 0.6'],
+          ...(market === 'US'
+            ? [[
+                'min_short_selling_quantity',
+                '最低账户预估可卖空股数',
+                '例如 100',
+              ]] as Array<[keyof typeof filterInputs, string, string]>
+            : []),
         ] as Array<[keyof typeof filterInputs, string, string]>
       : []),
   ];
@@ -2831,7 +2843,18 @@ function StockDiscoveryDialog({
                 <button
                   key={value}
                   type="button"
-                  onClick={() => setMarket(value)}
+                  onClick={() => {
+                    setMarket(value);
+                    setResult(null);
+                    setSelectedSymbols(new Set());
+                    if (value !== 'US') {
+                      setIncludeShortCapacity(false);
+                      setFilterInputs((current) => ({
+                        ...current,
+                        min_short_selling_quantity: '',
+                      }));
+                    }
+                  }}
                   className={`rounded-lg border px-2 py-2 text-sm font-medium transition-colors ${
                     market === value
                       ? 'border-cyan-500 bg-cyan-50 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300'
@@ -2862,12 +2885,14 @@ function StockDiscoveryDialog({
                     setSelectedSymbols(new Set());
                     if (value === 'LONG') {
                       setIncludeMarginDetails(false);
+                      setIncludeShortCapacity(false);
                       setFilterInputs((current) => ({
                         ...current,
                         max_days_to_cover: '',
                         max_short_ratio: '',
                         max_short_ratio_change: '',
                         max_initial_margin_ratio: '',
+                        min_short_selling_quantity: '',
                       }));
                     }
                   }}
@@ -2980,6 +3005,28 @@ function StockDiscoveryDialog({
               </span>
             </label>
           )}
+          {market === 'US' && poolType === 'SHORT' && (
+            <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+              <input
+                type="checkbox"
+                checked={includeShortCapacity}
+                onChange={(event) => {
+                  setIncludeShortCapacity(event.target.checked);
+                  setResult(null);
+                  setSelectedSymbols(new Set());
+                }}
+                className="mt-0.5 h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500"
+              />
+              <span>
+                <span className="block text-sm text-slate-700 dark:text-slate-300">
+                  补充账户预估卖空能力
+                </span>
+                <span className="block text-xs text-slate-500">
+                  美股账户点时预估；不提供融券费率或召回风险
+                </span>
+              </span>
+            </label>
+          )}
         </div>
 
         <div className="mt-3 rounded-lg border border-slate-200 dark:border-slate-700">
@@ -3050,6 +3097,7 @@ function StockDiscoveryDialog({
                     min_days_to_financial_event: '',
                     min_days_to_corporate_action: '',
                     max_initial_margin_ratio: '',
+                    min_short_selling_quantity: '',
                   });
                   setResult(null);
                   setSelectedSymbols(new Set());
@@ -3134,10 +3182,24 @@ function StockDiscoveryDialog({
                 </Alert>
               </div>
             )}
+            {result.short_capacity.status === 'fallback' && (
+              <div className="mb-2">
+                <Alert type="warning">
+                  账户预估可卖空数量暂不可用；无法判断账户权限、风险控制或临时服务错误。
+                </Alert>
+              </div>
+            )}
+            {result.short_capacity.status === 'unsupported' && (
+              <div className="mb-2">
+                <Alert type="warning">
+                  账户预估可卖空数量目前仅支持美股做空候选。
+                </Alert>
+              </div>
+            )}
             {poolType === 'SHORT' && (
               <p className="mb-2 text-xs text-amber-600 dark:text-amber-400">
-                做空拥挤度和保证金比例都不代表实时可借券或融券费率；
-                当前券源与融券费明确标记为未知。
+                做空拥挤度、保证金比例和账户预估数量都不是实时券源清单；
+                当前融券费率与召回风险明确标记为未知。
               </p>
             )}
             {poolType === 'SHORT' && result.short_risk.status === 'fallback' && (
@@ -3302,6 +3364,22 @@ function StockDiscoveryDialog({
                                   )}
                                 </span>
                                 <span>券源/融券费 未知</span>
+                              </>
+                            )}
+                            {!['disabled', 'not_applicable'].includes(
+                              candidate.short_capacity.status,
+                            ) && (
+                              <>
+                                <span>
+                                  账户预估可卖空 {
+                                    candidate.short_capacity.short_selling_max_qty == null
+                                      ? '-'
+                                      : `${formatIndex(
+                                          candidate.short_capacity.short_selling_max_qty,
+                                        )} 股`
+                                  }
+                                </span>
+                                <span>融券费率/召回风险 未知</span>
                               </>
                             )}
                           </>

@@ -155,6 +155,83 @@ class StockCandidateDataTests(unittest.TestCase):
         self.assertIsNone(item["borrow_fee_rate"])
         self.assertIn("不代表实时券源", item["note"])
 
+    def test_short_selling_capacity_uses_account_sell_estimate(self) -> None:
+        trade_context = MagicMock()
+        trade_context.estimate_max_purchase_quantity.side_effect = [
+            _namespace(cash_max_qty="10", margin_max_qty="250.5"),
+            _namespace(cash_max_qty="0", margin_max_qty="0"),
+            RuntimeError("permission or risk control rejected"),
+        ]
+
+        @contextmanager
+        def fake_context(kind):
+            self.assertEqual(kind, "trade")
+            yield trade_context
+
+        with patch.object(stock_candidate_data, "_context", fake_context):
+            result = stock_candidate_data.get_short_selling_capacity([
+                "AAA.US",
+                "ZERO.US",
+                "ERROR.US",
+                "700.HK",
+            ])
+
+        available = result["AAA.US"]
+        self.assertEqual(available["status"], "available")
+        self.assertEqual(available["cash_max_qty"], 10)
+        self.assertEqual(available["margin_max_qty"], 250.5)
+        self.assertEqual(available["short_selling_max_qty"], 250.5)
+        self.assertEqual(available["availability"], "available")
+        self.assertIsNone(available["borrow_fee_rate"])
+        self.assertEqual(available["recall_risk"], "unknown")
+
+        unavailable = result["ZERO.US"]
+        self.assertEqual(unavailable["status"], "available")
+        self.assertEqual(unavailable["short_selling_max_qty"], 0)
+        self.assertEqual(unavailable["availability"], "unavailable")
+
+        failed = result["ERROR.US"]
+        self.assertEqual(failed["status"], "error")
+        self.assertEqual(failed["availability"], "unknown")
+        self.assertIn("permission or risk control", failed["error"])
+
+        unsupported = result["700.HK"]
+        self.assertEqual(unsupported["status"], "unsupported")
+        self.assertEqual(unsupported["availability"], "unknown")
+        self.assertEqual(
+            trade_context.estimate_max_purchase_quantity.call_count,
+            3,
+        )
+        from longbridge.openapi import OrderSide, OrderType
+
+        for call in (
+            trade_context.estimate_max_purchase_quantity.call_args_list
+        ):
+            self.assertEqual(call.args[1], OrderType.LO)
+            self.assertEqual(call.args[2], OrderSide.Sell)
+
+    def test_short_selling_capacity_rejects_invalid_sdk_quantities(
+        self,
+    ) -> None:
+        trade_context = MagicMock()
+        trade_context.estimate_max_purchase_quantity.return_value = (
+            _namespace(cash_max_qty="-1", margin_max_qty="not-a-number")
+        )
+
+        @contextmanager
+        def fake_context(_kind):
+            yield trade_context
+
+        with patch.object(stock_candidate_data, "_context", fake_context):
+            result = stock_candidate_data.get_short_selling_capacity([
+                "AAA.US",
+            ])
+
+        self.assertEqual(result["AAA.US"]["status"], "no_data")
+        self.assertIsNone(result["AAA.US"]["cash_max_qty"])
+        self.assertIsNone(result["AAA.US"]["short_selling_max_qty"])
+        self.assertEqual(result["AAA.US"]["availability"], "unknown")
+
     def test_fundamentals_are_directional_and_calendar_is_paginated(self) -> None:
         current_date = date(2026, 7, 24)
         fundamental_context = MagicMock()
@@ -382,6 +459,9 @@ class StockCandidateDataTests(unittest.TestCase):
         self.assertTrue(hasattr(QuoteContext, "depth"))
         self.assertTrue(hasattr(QuoteContext, "trading_days"))
         self.assertTrue(hasattr(TradeContext, "margin_ratio"))
+        self.assertTrue(
+            hasattr(TradeContext, "estimate_max_purchase_quantity")
+        )
         self.assertTrue(hasattr(FundamentalContext, "operating"))
         self.assertTrue(hasattr(FundamentalContext, "institution_rating"))
         self.assertTrue(hasattr(FundamentalContext, "forecast_eps"))
