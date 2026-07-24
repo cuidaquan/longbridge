@@ -10,6 +10,7 @@ import {
   Delete,
   DeleteSweep,
   Analytics,
+  Psychology,
   ExpandMore,
   ExpandLess,
   Close,
@@ -46,6 +47,8 @@ import {
   importScreenerCandidates,
   runStockPickerBacktest,
   getStockPickerBacktests,
+  runStockPickerAIIncrementEvaluation,
+  getStockPickerAIIncrementEvaluations,
   getStockPickerConfig,
   updateStockPickerConfig,
   getStockPickerFactorCoverage,
@@ -63,6 +66,8 @@ import {
   type ScreenerIndexFilters,
   type StockPickerBacktestReport,
   type StockPickerBacktestHistoryItem,
+  type StockPickerAIIncrementEvaluationReport,
+  type StockPickerAIIncrementEvaluationHistoryItem,
   type StockPickerConfig,
   type StockPickerFactorCoverage,
 } from '../api/stockPicker';
@@ -76,6 +81,7 @@ export default function StockPicker() {
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [showDiscoveryDialog, setShowDiscoveryDialog] = useState(false);
   const [showBacktestDialog, setShowBacktestDialog] = useState(false);
+  const [showAIEvaluationDialog, setShowAIEvaluationDialog] = useState(false);
   const [showSnapshotDialog, setShowSnapshotDialog] = useState(false);
   const [addDialogType, setAddDialogType] = useState<'LONG' | 'SHORT'>('LONG');
   const [error, setError] = useState<string | null>(null);
@@ -234,6 +240,13 @@ export default function StockPicker() {
               icon={<Storage className="w-4 h-4" />}
             >
               快照管理
+            </Button>
+            <Button
+              variant="secondary"
+              onClick={() => setShowAIEvaluationDialog(true)}
+              icon={<Psychology className="w-4 h-4" />}
+            >
+              AI 增量评估
             </Button>
             <Button
               variant="secondary"
@@ -420,6 +433,12 @@ export default function StockPicker() {
 
       {showBacktestDialog && (
         <StockPickerBacktestDialog onClose={() => setShowBacktestDialog(false)} />
+      )}
+
+      {showAIEvaluationDialog && (
+        <StockPickerAIIncrementEvaluationDialog
+          onClose={() => setShowAIEvaluationDialog(false)}
+        />
       )}
 
       {showSnapshotDialog && (
@@ -1296,6 +1315,430 @@ function SnapshotMetric({
     <div className="rounded-lg bg-slate-50 px-3 py-2 dark:bg-slate-900/50">
       <p className="text-xs text-slate-500 dark:text-slate-400">{label}</p>
       <p className="mt-1 text-lg font-semibold text-slate-900 dark:text-white">{value}</p>
+    </div>
+  );
+}
+
+function StockPickerAIIncrementEvaluationDialog({
+  onClose,
+}: {
+  onClose: () => void;
+}) {
+  const [poolType, setPoolType] = useState<'LONG' | 'SHORT'>('LONG');
+  const [topK, setTopK] = useState(3);
+  const [lookbackDays, setLookbackDays] = useState(365);
+  const [minimumBatches, setMinimumBatches] = useState(20);
+  const [minimumLabels, setMinimumLabels] = useState(60);
+  const [minimumCompletionPercent, setMinimumCompletionPercent] = useState(90);
+  const [newsMode, setNewsMode] = useState<
+    'all' | 'enabled' | 'disabled'
+  >('all');
+  const [running, setRunning] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(true);
+  const [history, setHistory] = useState<
+    StockPickerAIIncrementEvaluationHistoryItem[]
+  >([]);
+  const [report, setReport] = useState<
+    StockPickerAIIncrementEvaluationReport | null
+  >(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getStockPickerAIIncrementEvaluations(5)
+      .then((response) => {
+        if (!cancelled) setHistory(response.items);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(
+            err instanceof Error ? err.message : '获取 AI 增量评估历史失败',
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingHistory(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const runEvaluation = async () => {
+    setRunning(true);
+    setError(null);
+    try {
+      const result = await runStockPickerAIIncrementEvaluation({
+        poolType,
+        topK,
+        lookbackDays,
+        minimumCompleteBatches: minimumBatches,
+        minimumLabeledRecords: minimumLabels,
+        minimumAICompletionRate: minimumCompletionPercent / 100,
+        newsMode,
+      });
+      setReport(result);
+      setHistory((current) => [
+        {
+          id: result.id || 0,
+          created_at: new Date().toISOString(),
+          pool_type: result.pool_type,
+          evaluation_version: result.evaluation_version,
+          parameters: result.parameters,
+          result: {
+            evaluation_version: result.evaluation_version,
+            pool_type: result.pool_type,
+            ready: result.ready,
+            gate: result.gate,
+            coverage: result.coverage,
+            metrics: result.metrics,
+            methodology: result.methodology,
+          },
+          ready: result.ready,
+          data_as_of: result.coverage.latest_label_date,
+        },
+        ...current.filter((item) => item.id !== result.id),
+      ].slice(0, 5));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'AI 增量评估失败');
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const openHistory = (
+    item: StockPickerAIIncrementEvaluationHistoryItem,
+  ) => {
+    setPoolType(item.pool_type);
+    setTopK(item.parameters.top_k);
+    setLookbackDays(item.parameters.lookback_days);
+    setMinimumBatches(item.parameters.minimum_complete_batches);
+    setMinimumLabels(item.parameters.minimum_labeled_records);
+    setMinimumCompletionPercent(
+      item.parameters.minimum_ai_completion_rate * 100,
+    );
+    setNewsMode(item.parameters.news_mode || 'all');
+    setReport({
+      ...item.result,
+      id: item.id,
+      parameters: item.parameters,
+    });
+    setError(null);
+  };
+
+  const formatPercent = (value: number | null | undefined) => (
+    value == null ? '-' : `${(value * 100).toFixed(2)}%`
+  );
+  const gateLabels: Record<string, string> = {
+    insufficient_ai_complete_batches: 'AI 完整批次数不足',
+    insufficient_ai_completion_rate: 'AI 完成率不足',
+  };
+  const exclusionLabels: Record<string, string> = {
+    missing_or_invalid_snapshot: '输入快照缺失或无法解析',
+    unsupported_snapshot_version: '输入快照版本不支持',
+    not_pool_ranking: '不是完整股票池排名批次',
+    version_cohort_mismatch: '评分、提示词或模型版本不匹配',
+    missing_news_mode: '新闻状态缺失',
+    input_hash_invalid: '输入哈希校验失败',
+    missing_selection: '选择上下文缺失',
+    missing_ranking: '量化排名缺失',
+    missing_selection_version: '选择版本缺失',
+    selection_version_invalid: '选择版本校验失败',
+    mixed_selection_versions: '批次包含多个选择版本',
+    mixed_news_mode: '批次包含多个新闻状态',
+    news_mode_mismatch: '不属于当前新闻 cohort',
+    inconsistent_ranking: '批次排名不一致',
+    invalid_ranking: '批次排名格式无效',
+    incomplete_batch: '方向排名记录不完整',
+    missing_quant_rank: '量化名次缺失',
+    insufficient_ai_candidates: 'AI 候选数不足以比较 Top K',
+    missing_or_invalid_output_snapshot: 'AI 输出快照缺失或无法解析',
+    unsupported_output_snapshot_version: 'AI 输出快照版本不支持',
+    missing_analysis_values: '分析价格、分数或日期缺失',
+    snapshot_record_mismatch: '快照与分析字段不一致',
+    missing_parsed_ai_output: 'AI 解析输出缺失',
+    invalid_ai_confidence: 'AI 信心度无效',
+    derived_score_mismatch: '最终机会分重算不一致',
+    ai_incomplete_batch: 'AI Top N 未全部成功',
+  };
+  const gateReasonLabel = (reason: string) => {
+    const pairedMatch = reason.match(/^insufficient_paired_batches_(\d+)d$/);
+    if (pairedMatch) return `${pairedMatch[1]} 日配对批次数不足`;
+    const labelMatch = reason.match(/^insufficient_labeled_records_(\d+)d$/);
+    if (labelMatch) return `${labelMatch[1]} 日后验标签不足`;
+    return gateLabels[reason] || reason;
+  };
+  const parametersValid = (
+    Number.isInteger(topK)
+    && topK >= 1
+    && topK <= 100
+    && Number.isInteger(lookbackDays)
+    && lookbackDays >= 1
+    && lookbackDays <= 3650
+    && Number.isInteger(minimumBatches)
+    && minimumBatches >= 1
+    && minimumBatches <= 1000
+    && Number.isInteger(minimumLabels)
+    && minimumLabels >= 1
+    && minimumLabels <= 100000
+    && Number.isFinite(minimumCompletionPercent)
+    && minimumCompletionPercent >= 0
+    && minimumCompletionPercent <= 100
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="max-h-[calc(100vh-2rem)] w-full max-w-4xl overflow-y-auto rounded-xl bg-white p-6 shadow-2xl dark:bg-slate-800">
+        <div className="mb-5 flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-xl font-bold text-slate-900 dark:text-white">
+              AI 增量评估
+            </h3>
+            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+              在相同 AI Top N 候选内，配对比较纯量化与 AI 重排结果。
+            </p>
+          </div>
+          <button
+            type="button"
+            aria-label="关闭 AI 增量评估弹窗"
+            onClick={onClose}
+            className="rounded p-1 hover:bg-slate-100 dark:hover:bg-slate-700"
+          >
+            <Close className="h-5 w-5 text-slate-500" />
+          </button>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div>
+            <span className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-300">
+              评估方向
+            </span>
+            <div className="grid grid-cols-2 gap-2">
+              {(['LONG', 'SHORT'] as const).map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  disabled={running}
+                  onClick={() => setPoolType(value)}
+                  className={`rounded-lg border px-3 py-2 text-sm font-medium ${
+                    poolType === value
+                      ? value === 'LONG'
+                        ? 'border-emerald-500 bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
+                        : 'border-red-500 bg-red-50 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+                      : 'border-slate-200 text-slate-600 dark:border-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  {value}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <span className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-300">
+              新闻 cohort
+            </span>
+            <div className="grid grid-cols-3 gap-2">
+              {([
+                ['all', '全部'],
+                ['enabled', '含新闻'],
+                ['disabled', '无新闻'],
+              ] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  disabled={running}
+                  onClick={() => setNewsMode(value)}
+                  className={`rounded-lg border px-2 py-2 text-xs font-medium ${
+                    newsMode === value
+                      ? 'border-cyan-500 bg-cyan-50 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300'
+                      : 'border-slate-200 text-slate-600 dark:border-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {([
+            ['比较 Top K', topK, setTopK, 1, 100],
+            ['回看天数', lookbackDays, setLookbackDays, 1, 3650],
+            ['最少完整批次', minimumBatches, setMinimumBatches, 1, 1000],
+            ['最少标签数', minimumLabels, setMinimumLabels, 1, 100000],
+            [
+              '最低 AI 完成率（%）',
+              minimumCompletionPercent,
+              setMinimumCompletionPercent,
+              0,
+              100,
+            ],
+          ] as Array<
+            [string, number, React.Dispatch<React.SetStateAction<number>>, number, number]
+          >).map(([label, value, setter, min, max]) => (
+            <label key={label} className="text-sm font-medium text-slate-700 dark:text-slate-300">
+              <span className="mb-1 block">{label}</span>
+              <input
+                type="number"
+                min={min}
+                max={max}
+                step="1"
+                value={value}
+                disabled={running}
+                onChange={(event) => setter(Number(event.target.value))}
+                className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2
+                  text-slate-900 focus:border-cyan-500 focus:outline-none focus:ring-2
+                  focus:ring-cyan-500/30 disabled:opacity-60 dark:border-slate-600
+                  dark:bg-slate-900 dark:text-white"
+              />
+            </label>
+          ))}
+        </div>
+
+        <div className="mt-4 flex justify-end">
+          <Button
+            type="button"
+            onClick={runEvaluation}
+            loading={running}
+            disabled={!parametersValid}
+          >
+            运行评估
+          </Button>
+        </div>
+
+        {error && (
+          <div className="mt-4">
+            <Alert type="error">{error}</Alert>
+          </div>
+        )}
+
+        {report && (
+          <div className="mt-5 space-y-4">
+            <Alert type={report.ready ? 'success' : 'warning'}>
+              {report.ready
+                ? '样本门禁已通过，可以查看配对描述性指标。'
+                : `样本门禁未通过：${report.gate.reasons.map(gateReasonLabel).join('；')}`}
+            </Alert>
+
+            <p className="break-words text-xs text-slate-500 dark:text-slate-400">
+              {report.parameters.score_version}
+              {' · '}{report.parameters.prompt_version}
+              {' · '}{report.parameters.ai_model}
+              {' · '}新闻 {report.parameters.news_mode}
+            </p>
+
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <SnapshotMetric
+                label="完整方向批次"
+                value={`${report.coverage.structurally_complete_batches}/${report.coverage.raw_batches}`}
+              />
+              <SnapshotMetric
+                label="AI 完整批次"
+                value={report.coverage.ai_complete_batches}
+              />
+              <SnapshotMetric
+                label="AI 完成率"
+                value={formatPercent(report.coverage.ai_completion_rate)}
+              />
+              <SnapshotMetric
+                label="最新后验标签"
+                value={report.coverage.latest_label_date || '-'}
+              />
+            </div>
+
+            <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-slate-700">
+              <table className="min-w-full text-sm">
+                <thead className="bg-slate-50 text-left text-xs uppercase text-slate-500 dark:bg-slate-900/50 dark:text-slate-400">
+                  <tr>
+                    <th className="px-3 py-2">持有期</th>
+                    <th className="px-3 py-2">标签数</th>
+                    <th className="px-3 py-2">配对批次</th>
+                    <th className="px-3 py-2">量化 Top K</th>
+                    <th className="px-3 py-2">AI Top K</th>
+                    <th className="px-3 py-2">配对增量</th>
+                    <th className="px-3 py-2">重排批次</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
+                  {report.parameters.horizons.map((horizon) => {
+                    const metric = report.metrics?.[String(horizon)];
+                    return (
+                      <tr key={horizon} className="text-slate-700 dark:text-slate-300">
+                        <td className="px-3 py-2 font-medium">{horizon} 日</td>
+                        <td className="px-3 py-2">
+                          {report.coverage.labeled_records_by_horizon[String(horizon)] || 0}
+                        </td>
+                        <td className="px-3 py-2">
+                          {report.coverage.paired_batches_by_horizon[String(horizon)] || 0}
+                        </td>
+                        <td className="px-3 py-2">
+                          {metric ? formatPercent(metric.quant_top_k.average) : '-'}
+                        </td>
+                        <td className="px-3 py-2">
+                          {metric ? formatPercent(metric.ai_top_k.average) : '-'}
+                        </td>
+                        <td className="px-3 py-2">
+                          {metric ? formatPercent(metric.paired_delta.average) : '-'}
+                        </td>
+                        <td className="px-3 py-2">
+                          {metric
+                            ? `${metric.selection_changed_batches}/${metric.paired_batches}`
+                            : '-'}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {Object.keys(report.coverage.excluded_batches).length > 0 && (
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                排除批次：
+                {' '}
+                {Object.entries(report.coverage.excluded_batches)
+                  .map(([reason, count]) => (
+                    `${exclusionLabels[reason] || reason} ${count}`
+                  ))
+                  .join('；')}
+              </p>
+            )}
+
+            <Alert type="info">
+              {report.methodology.causal_limit}
+            </Alert>
+          </div>
+        )}
+
+        <div className="mt-6 border-t border-slate-200 pt-4 dark:border-slate-700">
+          <p className="mb-2 text-sm font-semibold text-slate-900 dark:text-white">
+            最近评估
+          </p>
+          {loadingHistory ? (
+            <LoadingSpinner size="sm" text="加载评估历史..." />
+          ) : history.length === 0 ? (
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              暂无评估记录
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {history.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => openHistory(item)}
+                  className="rounded-lg border border-slate-200 px-3 py-2 text-left text-xs text-slate-600 hover:border-cyan-400 dark:border-slate-600 dark:text-slate-300"
+                >
+                  <span className="block font-medium">
+                    {item.pool_type} · Top {item.parameters.top_k}
+                  </span>
+                  <span className="mt-1 block">
+                    {item.ready ? '门禁已通过' : '样本不足'} · {new Date(item.created_at).toLocaleString()}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

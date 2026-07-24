@@ -494,6 +494,87 @@ export interface StockPickerBacktestHistoryItem {
   data_as_of: string | null;
 }
 
+export interface StockPickerAIReturnSummary {
+  sample_count: number;
+  average: number | null;
+  median: number | null;
+  positive_rate: number | null;
+  p05: number | null;
+  p95: number | null;
+}
+
+export interface StockPickerAIIncrementMetrics {
+  paired_batches: number;
+  quant_top_k: StockPickerAIReturnSummary;
+  ai_top_k: StockPickerAIReturnSummary;
+  paired_delta: StockPickerAIReturnSummary;
+  selection_changed_batches: number;
+  selection_change_rate: number | null;
+  average_selection_overlap: number | null;
+}
+
+export interface StockPickerAIIncrementEvaluationReport {
+  id?: number;
+  evaluation_version: string;
+  pool_type: 'LONG' | 'SHORT';
+  ready: boolean;
+  parameters: {
+    horizons: number[];
+    top_k: number;
+    lookback_days: number;
+    max_bars: number;
+    minimum_complete_batches: number;
+    minimum_labeled_records: number;
+    minimum_ai_completion_rate: number;
+    snapshot_version: string;
+    score_version: string;
+    prompt_version: string;
+    ai_model: string;
+    news_mode: 'all' | 'enabled' | 'disabled';
+  };
+  gate: {
+    ready: boolean;
+    reasons: string[];
+  };
+  coverage: {
+    raw_analysis_records: number;
+    raw_batches: number;
+    structurally_complete_batches: number;
+    ai_complete_batches: number;
+    selected_records: number;
+    ai_completed_records: number;
+    ai_completion_rate: number | null;
+    labeled_records_by_horizon: Record<string, number>;
+    paired_batches_by_horizon: Record<string, number>;
+    excluded_batches: Record<string, number>;
+    latest_analysis_time: string | null;
+    latest_label_date: string | null;
+  };
+  metrics: Record<string, StockPickerAIIncrementMetrics> | null;
+  methodology: {
+    comparison: string;
+    no_lookahead: string;
+    batch_integrity: string;
+    gate: string;
+    causal_limit: string;
+    costs: string;
+  };
+}
+
+export interface StockPickerAIIncrementEvaluationHistoryItem {
+  id: number;
+  created_at: string;
+  pool_type: 'LONG' | 'SHORT';
+  evaluation_version: string;
+  parameters: StockPickerAIIncrementEvaluationReport['parameters'];
+  result: Omit<
+    StockPickerAIIncrementEvaluationReport,
+    'id' | 'parameters'
+  >;
+  ready: boolean;
+  data_as_of: string | null;
+}
+
 export interface StockPickerConfig {
   auto_refresh_enabled: boolean;
   auto_refresh_interval: number;
@@ -779,6 +860,67 @@ export async function getStockPickerBacktests(
   if (!response.ok) {
     const error = await response.json().catch(() => null);
     throw new Error(error?.detail || '获取智能选股回测历史失败');
+  }
+  return response.json();
+}
+
+export async function runStockPickerAIIncrementEvaluation(params: {
+  poolType: 'LONG' | 'SHORT';
+  horizons?: number[];
+  topK?: number;
+  lookbackDays?: number;
+  maxBars?: number;
+  minimumCompleteBatches?: number;
+  minimumLabeledRecords?: number;
+  minimumAICompletionRate?: number;
+  scoreVersion?: string;
+  promptVersion?: string;
+  aiModel?: string;
+  newsMode?: 'all' | 'enabled' | 'disabled';
+}): Promise<StockPickerAIIncrementEvaluationReport> {
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/ai-evaluation`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pool_type: params.poolType,
+        horizons: params.horizons ?? [5, 10, 20],
+        top_k: params.topK ?? 3,
+        lookback_days: params.lookbackDays ?? 365,
+        max_bars: params.maxBars ?? 5000,
+        minimum_complete_batches:
+          params.minimumCompleteBatches ?? 20,
+        minimum_labeled_records:
+          params.minimumLabeledRecords ?? 60,
+        minimum_ai_completion_rate:
+          params.minimumAICompletionRate ?? 0.9,
+        score_version: params.scoreVersion,
+        prompt_version: params.promptVersion,
+        ai_model: params.aiModel,
+        news_mode: params.newsMode ?? 'all',
+      }),
+    },
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '运行 AI 增量评估失败');
+  }
+  return response.json();
+}
+
+export async function getStockPickerAIIncrementEvaluations(
+  limit = 20,
+): Promise<{
+  items: StockPickerAIIncrementEvaluationHistoryItem[];
+}> {
+  const queryParams = new URLSearchParams({ limit: String(limit) });
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/ai-evaluations?${queryParams.toString()}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取 AI 增量评估历史失败');
   }
   return response.json();
 }

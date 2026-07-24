@@ -16,6 +16,9 @@ from ..exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
 from ..models import SecuritySearchResponse
 from ..security_catalog import get_security_catalog_service
 from ..stock_picker_backtest import get_stock_picker_backtest_service
+from ..stock_picker_ai_evaluation import (
+    get_stock_picker_ai_evaluation_service,
+)
 from ..stock_picker_factor_snapshots import (
     get_stock_picker_factor_snapshot_service,
 )
@@ -199,6 +202,51 @@ class StockPickerBacktestRequest(BaseModel):
     max_participation_rate: float = Field(default=0.1, gt=0, le=1)
     impact_coefficient: float = Field(default=0.5, ge=0, le=10)
     impact_volatility_lookback: int = Field(default=20, ge=2, le=252)
+
+
+class StockPickerAIIncrementEvaluationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pool_type: Literal["LONG", "SHORT"]
+    horizons: List[int] = Field(
+        default_factory=lambda: [5, 10, 20],
+        min_length=1,
+        max_length=10,
+    )
+    top_k: int = Field(default=3, ge=1, le=100)
+    lookback_days: int = Field(default=365, ge=1, le=3650)
+    max_bars: int = Field(default=5000, ge=2, le=5000)
+    minimum_complete_batches: int = Field(
+        default=20,
+        ge=1,
+        le=1000,
+    )
+    minimum_labeled_records: int = Field(
+        default=60,
+        ge=1,
+        le=100000,
+    )
+    minimum_ai_completion_rate: float = Field(
+        default=0.9,
+        ge=0,
+        le=1,
+    )
+    score_version: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+    )
+    prompt_version: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+    )
+    ai_model: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+    )
+    news_mode: Literal["all", "enabled", "disabled"] = "all"
 
 
 class StockPickerFactorSnapshotCaptureRequest(BaseModel):
@@ -484,6 +532,59 @@ async def get_stock_picker_backtests(
         }
     except Exception as exc:
         logger.error("获取智能选股回测历史失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/ai-evaluation")
+async def run_stock_picker_ai_evaluation(
+    request: StockPickerAIIncrementEvaluationRequest,
+):
+    try:
+        return await asyncio.to_thread(
+            get_stock_picker_ai_evaluation_service().run,
+            pool_type=request.pool_type,
+            horizons=request.horizons,
+            top_k=request.top_k,
+            lookback_days=request.lookback_days,
+            max_bars=request.max_bars,
+            minimum_complete_batches=request.minimum_complete_batches,
+            minimum_labeled_records=request.minimum_labeled_records,
+            minimum_ai_completion_rate=(
+                request.minimum_ai_completion_rate
+            ),
+            score_version=request.score_version,
+            prompt_version=request.prompt_version,
+            ai_model=request.ai_model,
+            news_mode=request.news_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(
+            "运行智能选股 AI 增量评估失败: %s",
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/ai-evaluations")
+async def get_stock_picker_ai_evaluations(
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    try:
+        return {
+            "items": await asyncio.to_thread(
+                get_stock_picker_ai_evaluation_service().get_history,
+                limit,
+            )
+        }
+    except Exception as exc:
+        logger.error(
+            "获取智能选股 AI 增量评估历史失败: %s",
+            exc,
+            exc_info=True,
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
