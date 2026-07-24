@@ -37,6 +37,8 @@ MIN_FACTOR_COVERAGE = 0.9
 MIN_DISTINCT_SYMBOLS = 10
 MAX_SNAPSHOT_AGE_HOURS = 48
 EVENT_WINDOW_DAYS = 365
+FUNDAMENTAL_CAPTURE_CHUNK_SIZE = 2
+MARGIN_CAPTURE_CHUNK_SIZE = 1
 AUTO_CAPTURE_LOCAL_HOUR = 17
 CAPTURE_CLAIM_LEASE_MINUTES = 30
 MARKET_TIMEZONES = {
@@ -206,24 +208,28 @@ class StockPickerFactorSnapshotService:
             normalized_symbols,
             True,
         )
-        fundamentals = self._load_channel(
+        fundamentals = self._load_symbol_channel(
             channel_status,
             "fundamental",
             "factor_snapshot_fundamental",
             self.fundamental_loader,
             normalized_symbols,
+            FUNDAMENTAL_CAPTURE_CHUNK_SIZE,
+            self._fundamental_channel_error,
             normalized_market,
             direction,
             EVENT_WINDOW_DAYS,
             True,
             observation_date,
         )
-        margin = self._load_channel(
+        margin = self._load_symbol_channel(
             channel_status,
             "trade",
             "factor_snapshot_margin",
             self.margin_loader,
             normalized_symbols,
+            MARGIN_CAPTURE_CHUNK_SIZE,
+            self._margin_channel_error,
         )
         short_risk = (
             self._load_channel(
@@ -241,6 +247,10 @@ class StockPickerFactorSnapshotService:
                 "status": "not_applicable",
                 "error": None,
             }
+        margin_timed_out = channel_status["margin"].get(
+            "timed_out",
+            False,
+        )
         short_capacity = (
             self._load_channel(
                 channel_status,
@@ -249,7 +259,9 @@ class StockPickerFactorSnapshotService:
                 self.short_capacity_loader,
                 normalized_symbols,
             )
-            if normalized_market == "US" and direction == "SHORT"
+            if normalized_market == "US"
+            and direction == "SHORT"
+            and not margin_timed_out
             else {}
         )
         if direction != "SHORT":
@@ -261,6 +273,12 @@ class StockPickerFactorSnapshotService:
             channel_status["short_capacity"] = {
                 "status": "unsupported",
                 "error": None,
+            }
+        elif margin_timed_out:
+            channel_status["short_capacity"] = {
+                "status": "skipped",
+                "error": "保证金分片超时，未继续调用交易服务",
+                "failure_category": "timeout",
             }
 
         source_versions = {
@@ -1005,6 +1023,96 @@ class StockPickerFactorSnapshotService:
             "error": None,
         }
         return result or {}
+
+    def _load_symbol_channel(
+        self,
+        status: Dict[str, Dict[str, Any]],
+        channel: str,
+        operation: str,
+        loader: Callable,
+        symbols: List[str],
+        chunk_size: int,
+        error_factory: Callable[[str, str], Dict[str, Any]],
+        *loader_args: Any,
+    ) -> Dict[str, Dict[str, Any]]:
+        status_key = operation.removeprefix("factor_snapshot_")
+        results: Dict[str, Dict[str, Any]] = {}
+        completed_count = 0
+        failure: Optional[BaseException] = None
+
+        for offset in range(0, len(symbols), chunk_size):
+            chunk = symbols[offset:offset + chunk_size]
+            try:
+                chunk_result = run_external_call(
+                    channel,
+                    operation,
+                    loader,
+                    chunk,
+                    *loader_args,
+                    retry_if=lambda error: not isinstance(
+                        error,
+                        ExternalServiceTimeoutError,
+                    ),
+                )
+            except Exception as exc:
+                failure = exc
+                error = str(exc)
+                for symbol in chunk:
+                    results[symbol] = error_factory("error", error)
+                skipped_error = f"前序分片失败，未执行: {error}"
+                for symbol in symbols[offset + len(chunk):]:
+                    results[symbol] = error_factory(
+                        "skipped",
+                        skipped_error,
+                    )
+                break
+            results.update(chunk_result or {})
+            completed_count += len(chunk)
+
+        if failure is None:
+            status[status_key] = {
+                "status": "available",
+                "error": None,
+                "chunk_size": chunk_size,
+                "completed_symbol_count": completed_count,
+                "failed_symbol_count": 0,
+                "timed_out": False,
+            }
+        else:
+            status[status_key] = {
+                "status": "partial" if completed_count else "error",
+                "error": str(failure),
+                "chunk_size": chunk_size,
+                "completed_symbol_count": completed_count,
+                "failed_symbol_count": len(symbols) - completed_count,
+                "timed_out": isinstance(
+                    failure,
+                    ExternalServiceTimeoutError,
+                ),
+            }
+        return results
+
+    @staticmethod
+    def _fundamental_channel_error(
+        status: str,
+        error: str,
+    ) -> Dict[str, Any]:
+        return {
+            "status": status,
+            "errors": [error],
+        }
+
+    @staticmethod
+    def _margin_channel_error(
+        status: str,
+        error: str,
+    ) -> Dict[str, Any]:
+        return {
+            "status": status,
+            "error": error,
+            "borrow_availability": "unknown",
+            "borrow_fee_rate": None,
+        }
 
     @staticmethod
     def _relative_strength(

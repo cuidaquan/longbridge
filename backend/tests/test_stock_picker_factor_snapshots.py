@@ -9,10 +9,13 @@ import duckdb
 from fastapi.testclient import TestClient
 
 from app.db import _run_migrations
+from app.external_service_resilience import ExternalServiceTimeoutError
 from app.main import app
 from app.stock_picker_factor_snapshots import (
     AUTO_CAPTURE_LOCAL_HOUR,
     CAPTURE_CLAIM_LEASE_MINUTES,
+    FUNDAMENTAL_CAPTURE_CHUNK_SIZE,
+    MARGIN_CAPTURE_CHUNK_SIZE,
     MAX_SNAPSHOT_AGE_HOURS,
     MIN_OBSERVATION_DATES,
     SNAPSHOT_VERSION,
@@ -171,6 +174,17 @@ class _ConnectionContext:
 
 
 class StockPickerFactorSnapshotTests(unittest.TestCase):
+    @staticmethod
+    def _call_loader_directly(
+        channel,
+        operation,
+        loader,
+        *args,
+        **kwargs,
+    ):
+        kwargs.pop("retry_if", None)
+        return loader(*args, **kwargs)
+
     def test_capture_records_directional_rs_and_all_point_in_time_sections(
         self,
     ) -> None:
@@ -334,6 +348,113 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
             "fundamental unavailable",
             snapshot["fundamentals"]["errors"][0],
         )
+
+    def test_fundamental_chunks_keep_success_and_mark_unstarted_symbols(
+        self,
+    ) -> None:
+        calls = []
+
+        def partially_available(symbols, *args):
+            calls.append(symbols)
+            if symbols == ["CCC.US", "DDD.US"]:
+                raise ExternalServiceTimeoutError("fundamental timeout")
+            return _fundamentals(symbols, *args)
+
+        service = _service(fundamental_loader=partially_available)
+        with patch(
+            "app.stock_picker_factor_snapshots.run_external_call",
+            side_effect=self._call_loader_directly,
+        ):
+            result = service.capture_group(
+                "US",
+                "LONG",
+                ["AAA.US", "BBB.US", "CCC.US", "DDD.US", "EEE.US"],
+                persist=False,
+                include_payloads=True,
+            )
+
+        self.assertEqual(FUNDAMENTAL_CAPTURE_CHUNK_SIZE, 2)
+        self.assertEqual(
+            calls,
+            [["AAA.US", "BBB.US"], ["CCC.US", "DDD.US"]],
+        )
+        channel = result["channel_status"]["fundamental"]
+        self.assertEqual(channel["status"], "partial")
+        self.assertEqual(channel["completed_symbol_count"], 2)
+        self.assertEqual(channel["failed_symbol_count"], 3)
+        self.assertTrue(channel["timed_out"])
+        payloads = {
+            row["symbol"]: row["payload"]["fundamentals"]
+            for row in result["snapshots"]
+        }
+        self.assertEqual(payloads["AAA.US"]["status"], "available")
+        self.assertEqual(payloads["CCC.US"]["status"], "error")
+        self.assertIn("fundamental timeout", payloads["CCC.US"]["errors"][0])
+        self.assertEqual(payloads["EEE.US"]["status"], "skipped")
+        self.assertIn("未执行", payloads["EEE.US"]["errors"][0])
+
+    def test_margin_timeout_keeps_success_and_stops_trade_channel(self) -> None:
+        margin_calls = []
+
+        def partially_available(symbols):
+            margin_calls.append(symbols)
+            if symbols == ["BBB.US"]:
+                raise ExternalServiceTimeoutError("margin timeout")
+            return _margin(symbols)
+
+        capacity_loader = MagicMock(side_effect=_short_capacity)
+        service = _service(
+            margin_loader=partially_available,
+            short_capacity_loader=capacity_loader,
+        )
+        with patch(
+            "app.stock_picker_factor_snapshots.run_external_call",
+            side_effect=self._call_loader_directly,
+        ):
+            result = service.capture_group(
+                "US",
+                "SHORT",
+                ["AAA.US", "BBB.US", "CCC.US"],
+                persist=False,
+                include_payloads=True,
+            )
+
+        self.assertEqual(MARGIN_CAPTURE_CHUNK_SIZE, 1)
+        self.assertEqual(margin_calls, [["AAA.US"], ["BBB.US"]])
+        channel = result["channel_status"]["margin"]
+        self.assertEqual(channel["status"], "partial")
+        self.assertEqual(channel["completed_symbol_count"], 1)
+        self.assertEqual(channel["failed_symbol_count"], 2)
+        self.assertTrue(channel["timed_out"])
+        capacity_loader.assert_not_called()
+        self.assertEqual(
+            result["channel_status"]["short_capacity"],
+            {
+                "status": "skipped",
+                "error": "保证金分片超时，未继续调用交易服务",
+                "failure_category": "timeout",
+            },
+        )
+        payloads = {
+            row["symbol"]: row["payload"]
+            for row in result["snapshots"]
+        }
+        self.assertEqual(
+            payloads["AAA.US"]["margin_requirements"]["status"],
+            "available",
+        )
+        self.assertEqual(
+            payloads["BBB.US"]["margin_requirements"]["status"],
+            "error",
+        )
+        self.assertEqual(
+            payloads["CCC.US"]["margin_requirements"]["status"],
+            "skipped",
+        )
+        self.assertTrue(all(
+            payload["short_capacity"]["status"] == "skipped"
+            for payload in payloads.values()
+        ))
 
     def test_capture_persists_grouped_rows_and_coverage_is_not_premature(
         self,
