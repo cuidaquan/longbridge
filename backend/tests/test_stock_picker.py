@@ -17,6 +17,7 @@ from app.main import (
     app,
     _run_stock_picker_auto_refresh_once,
     _run_stock_picker_factor_snapshot_once,
+    _run_stock_screener_auto_capture_once,
 )
 from app.routers import stock_picker as stock_picker_router
 from app.routers.stock_picker import get_pools as get_pools_route
@@ -217,6 +218,8 @@ class StockPickerConfigAndSnapshotTest(unittest.TestCase):
             "max_history_per_stock",
             "factor_snapshot_enabled",
             "factor_snapshot_poll_interval",
+            "screener_auto_capture_enabled",
+            "screener_auto_capture_poll_interval",
         }.issubset(config_columns))
 
         updated = self.service.update_config({
@@ -226,6 +229,8 @@ class StockPickerConfigAndSnapshotTest(unittest.TestCase):
             "history_retention_days": 30,
             "factor_snapshot_enabled": True,
             "factor_snapshot_poll_interval": 600,
+            "screener_auto_capture_enabled": True,
+            "screener_auto_capture_poll_interval": 1200,
         })
 
         self.assertEqual(updated["analysis_lookback"], 300)
@@ -233,6 +238,11 @@ class StockPickerConfigAndSnapshotTest(unittest.TestCase):
         self.assertEqual(updated["cache_duration"], 600)
         self.assertEqual(updated["history_retention_days"], 30)
         self.assertTrue(updated["factor_snapshot_enabled"])
+        self.assertTrue(updated["screener_auto_capture_enabled"])
+        self.assertEqual(
+            updated["screener_auto_capture_poll_interval"],
+            1200,
+        )
         self.assertEqual(
             updated["factor_snapshot_poll_interval"],
             600,
@@ -319,6 +329,33 @@ class StockPickerConfigAndSnapshotTest(unittest.TestCase):
         snapshot_service.capture_due_baseline.assert_called_once_with(
             persist=True,
         )
+
+    def test_screener_auto_capture_runs_only_when_enabled(self) -> None:
+        disabled = asyncio.run(
+            _run_stock_screener_auto_capture_once({
+                "screener_auto_capture_enabled": False,
+            })
+        )
+        capture_service = MagicMock()
+        capture_service.capture_due.return_value = {
+            "captured": [],
+            "skipped": [],
+            "errors": [],
+        }
+        with patch(
+            "app.stock_screener_auto_capture."
+            "get_stock_screener_auto_capture_service",
+            return_value=capture_service,
+        ):
+            enabled = asyncio.run(
+                _run_stock_screener_auto_capture_once({
+                    "screener_auto_capture_enabled": True,
+                })
+            )
+
+        self.assertIsNone(disabled)
+        self.assertEqual(enabled["captured"], [])
+        capture_service.capture_due.assert_called_once_with()
 
     def test_pool_capacity_and_symbol_normalization_are_enforced(self) -> None:
         self.service.update_config({"max_pool_size": 1})

@@ -276,6 +276,61 @@ async def _auto_capture_stock_picker_factor_snapshots() -> None:
         await asyncio.sleep(poll_interval)
 
 
+async def _run_stock_screener_auto_capture_once(
+    config: dict,
+) -> Optional[dict]:
+    if not config["screener_auto_capture_enabled"]:
+        return None
+    from .stock_screener_auto_capture import (
+        get_stock_screener_auto_capture_service,
+    )
+
+    return await asyncio.to_thread(
+        get_stock_screener_auto_capture_service().capture_due
+    )
+
+
+async def _auto_capture_stock_screener_snapshots() -> None:
+    """Replay saved lightweight Screener cohorts after market close."""
+    from .stock_picker import get_stock_picker_service
+
+    await asyncio.sleep(75)
+    config_service = get_stock_picker_service()
+    while True:
+        poll_interval = 900
+        try:
+            config = await asyncio.to_thread(config_service.get_config)
+            poll_interval = max(
+                300,
+                min(
+                    3600,
+                    int(config["screener_auto_capture_poll_interval"]),
+                ),
+            )
+            result = await _run_stock_screener_auto_capture_once(config)
+            if result is not None:
+                logger.info(
+                    "stock-screener auto-capture: captured=%s "
+                    "skipped=%s errors=%s",
+                    len(result["captured"]),
+                    len(result["skipped"]),
+                    len(result["errors"]),
+                )
+                for error in result["errors"]:
+                    logger.warning(
+                        "stock-screener auto-capture failed: %s",
+                        error,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "stock-screener auto-capture poll failed: %s",
+                exc,
+            )
+        await asyncio.sleep(poll_interval)
+
+
 async def _persist_stock_picker_reliability() -> None:
     """Persist interval metrics and update durable alert state."""
     await asyncio.sleep(RELIABILITY_CAPTURE_INTERVAL_SECONDS)
@@ -379,6 +434,11 @@ async def on_startup() -> None:
             _auto_capture_stock_picker_factor_snapshots()
         )
         logger.info("startup: stock-picker factor snapshots scheduled")
+
+        _start_background_task(
+            _auto_capture_stock_screener_snapshots()
+        )
+        logger.info("startup: stock-screener auto-capture scheduled")
 
         _start_background_task(_persist_stock_picker_reliability())
         logger.info(

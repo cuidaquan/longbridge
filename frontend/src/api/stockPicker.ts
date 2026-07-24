@@ -547,6 +547,41 @@ export interface ScreenerSnapshotCoverage {
   groups: ScreenerSnapshotCoverageGroup[];
 }
 
+export interface ScreenerAutoCaptureStatus {
+  enabled: boolean;
+  poll_interval: number;
+  auto_capture_version: string;
+  max_daily_attempts: number;
+  template_count: number;
+  eligible_template_count: number;
+  status_counts: Record<string, number>;
+  templates: Array<{
+    market: ScreenerMarket;
+    target_direction: 'LONG' | 'SHORT';
+    strategy_id: number;
+    strategy_name?: string | null;
+    policy_hash: string;
+    source_snapshot_id: string;
+    latest_capture_date: string;
+    eligible: boolean;
+    ineligible_reason?: string | null;
+  }>;
+  runs: Array<{
+    run_id: string;
+    started_at: string;
+    completed_at?: string | null;
+    capture_date: string;
+    market: ScreenerMarket;
+    target_direction: 'LONG' | 'SHORT';
+    strategy_id: number;
+    policy_hash: string;
+    source_snapshot_id: string;
+    status: 'running' | 'succeeded' | 'failed';
+    snapshot_id?: string | null;
+    error?: string | null;
+  }>;
+}
+
 export interface AnalysisResponse {
   long_analysis: Analysis[];
   short_analysis: Analysis[];
@@ -819,6 +854,8 @@ export interface StockPickerConfig {
   max_history_per_stock: number;
   factor_snapshot_enabled: boolean;
   factor_snapshot_poll_interval: number;
+  screener_auto_capture_enabled: boolean;
+  screener_auto_capture_poll_interval: number;
   updated_at?: string;
 }
 
@@ -1103,6 +1140,20 @@ export async function getScreenerSnapshotCoverage(params: {
   if (!response.ok) {
     const error = await response.json().catch(() => null);
     throw new Error(error?.detail || '获取扫描快照覆盖率失败');
+  }
+  return response.json();
+}
+
+export async function getScreenerAutoCaptureStatus(
+  limit = 20,
+): Promise<ScreenerAutoCaptureStatus> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/screener/snapshots/auto-capture?${query.toString()}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取 Screener 自动采集状态失败');
   }
   return response.json();
 }

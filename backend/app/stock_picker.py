@@ -59,6 +59,8 @@ class StockPickerService:
         'max_history_per_stock': 30,
         'factor_snapshot_enabled': False,
         'factor_snapshot_poll_interval': 900,
+        'screener_auto_capture_enabled': False,
+        'screener_auto_capture_poll_interval': 900,
     }
     
     def __init__(self):
@@ -81,6 +83,8 @@ class StockPickerService:
                     max_history_per_stock,
                     factor_snapshot_enabled,
                     factor_snapshot_poll_interval,
+                    screener_auto_capture_enabled,
+                    screener_auto_capture_poll_interval,
                     updated_at
                 FROM stock_picker_config
                 WHERE id = 1
@@ -113,6 +117,7 @@ class StockPickerService:
             'history_retention_days': (1, 3650),
             'max_history_per_stock': (1, 1000),
             'factor_snapshot_poll_interval': (300, 3600),
+            'screener_auto_capture_poll_interval': (300, 3600),
         }
         for key, (minimum, maximum) in ranges.items():
             if key in updates and not minimum <= int(updates[key]) <= maximum:
@@ -130,6 +135,14 @@ class StockPickerService:
             )
         ):
             raise ValueError("factor_snapshot_enabled 必须是布尔值")
+        if (
+            'screener_auto_capture_enabled' in updates
+            and not isinstance(
+                updates['screener_auto_capture_enabled'],
+                bool,
+            )
+        ):
+            raise ValueError("screener_auto_capture_enabled 必须是布尔值")
 
         assignments = ", ".join(f"{key} = ?" for key in updates)
         values = list(updates.values())

@@ -163,6 +163,7 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_STOCK_PICKER_FACTOR_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_PICKER_FACTOR_SNAPSHOT_RUN_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_SCAN_SNAPSHOT_TABLE_SQL)
+    conn.execute(_STOCK_SCREENER_AUTO_CAPTURE_RUN_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_ALERT_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_DELIVERY_TABLE_SQL)
@@ -213,6 +214,18 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
         conn,
         "stock_picker_config",
         "factor_snapshot_poll_interval",
+        "INTEGER DEFAULT 900",
+    )
+    _ensure_column(
+        conn,
+        "stock_picker_config",
+        "screener_auto_capture_enabled",
+        "BOOLEAN DEFAULT FALSE",
+    )
+    _ensure_column(
+        conn,
+        "stock_picker_config",
+        "screener_auto_capture_poll_interval",
         "INTEGER DEFAULT 900",
     )
     _ensure_column(
@@ -490,6 +503,8 @@ CREATE TABLE IF NOT EXISTS stock_picker_config (
     max_history_per_stock INTEGER DEFAULT 30,
     factor_snapshot_enabled BOOLEAN DEFAULT FALSE,
     factor_snapshot_poll_interval INTEGER DEFAULT 900,
+    screener_auto_capture_enabled BOOLEAN DEFAULT FALSE,
+    screener_auto_capture_poll_interval INTEGER DEFAULT 900,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 INSERT OR IGNORE INTO stock_picker_config (id) VALUES (1);
@@ -625,6 +640,36 @@ CREATE INDEX IF NOT EXISTS idx_stock_screener_snapshot_scope
 ON stock_screener_scan_snapshots(
     market, target_direction, strategy_id, captured_at DESC
 );
+"""
+
+_STOCK_SCREENER_AUTO_CAPTURE_RUN_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS stock_screener_auto_capture_runs (
+    run_id TEXT PRIMARY KEY,
+    started_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ,
+    capture_date DATE NOT NULL,
+    market TEXT NOT NULL,
+    target_direction TEXT NOT NULL,
+    strategy_id BIGINT NOT NULL,
+    policy_hash TEXT NOT NULL,
+    source_snapshot_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    snapshot_id TEXT,
+    error TEXT,
+    CHECK (target_direction IN ('LONG', 'SHORT')),
+    CHECK (status IN ('running', 'succeeded', 'failed'))
+);
+CREATE INDEX IF NOT EXISTS idx_stock_screener_auto_capture_scope
+ON stock_screener_auto_capture_runs(
+    market,
+    target_direction,
+    strategy_id,
+    policy_hash,
+    capture_date,
+    started_at DESC
+);
+CREATE INDEX IF NOT EXISTS idx_stock_screener_auto_capture_status
+ON stock_screener_auto_capture_runs(status, started_at DESC);
 """
 
 _STOCK_PICKER_RELIABILITY_SNAPSHOT_TABLE_SQL = """

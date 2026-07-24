@@ -31,6 +31,9 @@ from ..stock_picker_reliability import (
 )
 from ..stock_screener import get_stock_screener_service
 from ..stock_screener_snapshots import get_stock_screener_snapshot_service
+from ..stock_screener_auto_capture import (
+    get_stock_screener_auto_capture_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +84,12 @@ class StockPickerConfigUpdate(BaseModel):
     max_history_per_stock: Optional[int] = Field(None, ge=1, le=1000)
     factor_snapshot_enabled: Optional[bool] = None
     factor_snapshot_poll_interval: Optional[int] = Field(
+        None,
+        ge=300,
+        le=3600,
+    )
+    screener_auto_capture_enabled: Optional[bool] = None
+    screener_auto_capture_poll_interval: Optional[int] = Field(
         None,
         ge=300,
         le=3600,
@@ -571,6 +580,39 @@ async def get_screener_snapshot_coverage(
     except Exception as exc:
         logger.error("获取 Screener 扫描快照覆盖率失败: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="获取扫描快照覆盖率失败") from exc
+
+
+@router.get("/screener/snapshots/auto-capture")
+async def get_screener_auto_capture_status(
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    try:
+        config = await asyncio.to_thread(
+            get_stock_picker_service().get_config
+        )
+        status = await asyncio.to_thread(
+            get_stock_screener_auto_capture_service().get_status,
+            limit,
+        )
+        return {
+            "enabled": bool(config["screener_auto_capture_enabled"]),
+            "poll_interval": int(
+                config["screener_auto_capture_poll_interval"]
+            ),
+            **status,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(
+            "获取 Screener 自动采集状态失败: %s",
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="获取 Screener 自动采集状态失败",
+        ) from exc
 
 
 @router.get("/screener/snapshots/{snapshot_id}")

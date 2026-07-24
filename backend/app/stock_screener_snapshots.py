@@ -253,6 +253,59 @@ class StockScreenerSnapshotService:
             raise KeyError(normalized_id)
         return {**self._summary(row[:17]), "payload": json.loads(row[17])}
 
+    def get_auto_capture_templates(self) -> List[Dict[str, Any]]:
+        """Return the latest intact v2 request for each saved cohort."""
+        with self.connection_factory() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    snapshot_id,
+                    captured_at,
+                    snapshot_version,
+                    market,
+                    target_direction,
+                    strategy_id,
+                    strategy_name,
+                    strategy_source,
+                    payload_hash,
+                    payload
+                FROM stock_screener_scan_snapshots
+                WHERE snapshot_version = ?
+                ORDER BY captured_at DESC, snapshot_id DESC
+                """,
+                [SNAPSHOT_VERSION],
+            ).fetchall()
+
+        templates: List[Dict[str, Any]] = []
+        seen: set[Tuple[str, str, int, str]] = set()
+        for row in rows:
+            coverage = self._coverage_row(row)
+            if not coverage["integrity_valid"]:
+                continue
+            key = (
+                coverage["market"],
+                coverage["target_direction"],
+                coverage["strategy_id"],
+                coverage["policy_hash"],
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            payload = json.loads(row[9])
+            templates.append({
+                "source_snapshot_id": coverage["snapshot_id"],
+                "captured_at": _utc_iso(coverage["captured_at"]),
+                "capture_date": coverage["capture_date"],
+                "market": coverage["market"],
+                "target_direction": coverage["target_direction"],
+                "strategy_id": coverage["strategy_id"],
+                "strategy_name": coverage["strategy_name"],
+                "strategy_source": coverage["strategy_source"],
+                "policy_hash": coverage["policy_hash"],
+                "request": payload["request"],
+            })
+        return templates
+
     def get_coverage(
         self,
         *,

@@ -48,6 +48,7 @@ import {
   searchScreenerCandidates,
   getScreenerSnapshots,
   getScreenerSnapshotCoverage,
+  getScreenerAutoCaptureStatus,
   getScreenerSnapshot,
   importScreenerCandidates,
   runStockPickerBacktest,
@@ -71,6 +72,7 @@ import {
   type ScreenerSnapshotSummary,
   type ScreenerSnapshotDetail,
   type ScreenerSnapshotCoverage,
+  type ScreenerAutoCaptureStatus,
   type ScreenerIndexFilters,
   type StockPickerBacktestReport,
   type StockPickerBacktestHistoryItem,
@@ -2713,6 +2715,16 @@ const screenerEnvironmentReasonLabels: Record<string, string> = {
   incomplete_benchmark_returns: '基准收益周期不完整',
 };
 
+const screenerAutoCaptureReasonLabels: Record<string, string> = {
+  heavy_enrichment_not_supported: '包含重型补充，不参与自动采集',
+  session_not_closed: '市场尚未收盘',
+  already_captured: '当日已采集',
+  capture_running: '采集正在执行',
+  market_closed: '非交易日',
+  trading_calendar_unavailable: '交易日历不可用',
+  attempt_limit_reached: '当日失败尝试已达上限',
+};
+
 function StockDiscoveryDialog({
   onClose,
   onComplete,
@@ -2739,6 +2751,11 @@ function StockDiscoveryDialog({
   const [showSnapshotHistory, setShowSnapshotHistory] = useState(false);
   const [snapshotHistory, setSnapshotHistory] = useState<ScreenerSnapshotSummary[]>([]);
   const [snapshotCoverage, setSnapshotCoverage] = useState<ScreenerSnapshotCoverage | null>(null);
+  const [autoCaptureStatus, setAutoCaptureStatus] = useState<ScreenerAutoCaptureStatus | null>(null);
+  const [autoCaptureEnabled, setAutoCaptureEnabled] = useState(false);
+  const [autoCapturePollInterval, setAutoCapturePollInterval] = useState(900);
+  const [savingAutoCapture, setSavingAutoCapture] = useState(false);
+  const [autoCaptureSuccess, setAutoCaptureSuccess] = useState<string | null>(null);
   const [snapshotDetail, setSnapshotDetail] = useState<ScreenerSnapshotDetail | null>(null);
   const [loadingSnapshots, setLoadingSnapshots] = useState(false);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
@@ -2806,8 +2823,10 @@ function StockDiscoveryDialog({
     setShowSnapshotHistory(false);
     setSnapshotHistory([]);
     setSnapshotCoverage(null);
+    setAutoCaptureStatus(null);
     setSnapshotDetail(null);
     setSnapshotError(null);
+    setAutoCaptureSuccess(null);
   }, [market, poolType, selectedStrategyId]);
 
   const selectedStrategy = strategies.find(
@@ -2823,12 +2842,17 @@ function StockDiscoveryDialog({
         targetDirection: poolType,
         strategyId: selectedStrategy?.id,
       };
-      const [history, coverage] = await Promise.all([
+      const [history, coverage, config, autoStatus] = await Promise.all([
         getScreenerSnapshots({ ...scope, limit: 20 }),
         getScreenerSnapshotCoverage({ ...scope, days: 365 }),
+        getStockPickerConfig(),
+        getScreenerAutoCaptureStatus(20),
       ]);
       setSnapshotHistory(history.items);
       setSnapshotCoverage(coverage);
+      setAutoCaptureStatus(autoStatus);
+      setAutoCaptureEnabled(config.screener_auto_capture_enabled);
+      setAutoCapturePollInterval(config.screener_auto_capture_poll_interval);
       if (
         snapshotDetail
         && !history.items.some((item) => item.snapshot_id === snapshotDetail.snapshot_id)
@@ -2851,6 +2875,47 @@ function StockDiscoveryDialog({
       setSnapshotError(err instanceof Error ? err.message : '获取扫描快照详情失败');
     } finally {
       setLoadingSnapshots(false);
+    }
+  };
+
+  const saveAutoCaptureConfig = async () => {
+    if (
+      !Number.isInteger(autoCapturePollInterval)
+      || autoCapturePollInterval < 300
+      || autoCapturePollInterval > 3600
+    ) {
+      setSnapshotError('Screener 自动采集轮询间隔必须是 300～3600 秒之间的整数');
+      return;
+    }
+    if (
+      !autoCaptureStatus?.enabled
+      && autoCaptureEnabled
+      && !confirm(
+        '启用后，服务会在真实交易日收盘后复用已有完整 v2 cohort 调用 Longbridge。包含财务、保证金或账户容量的重型模板会跳过。确认启用吗？',
+      )
+    ) {
+      return;
+    }
+    setSavingAutoCapture(true);
+    setSnapshotError(null);
+    setAutoCaptureSuccess(null);
+    try {
+      const updated = await updateStockPickerConfig({
+        screener_auto_capture_enabled: autoCaptureEnabled,
+        screener_auto_capture_poll_interval: autoCapturePollInterval,
+      });
+      setAutoCaptureEnabled(updated.screener_auto_capture_enabled);
+      setAutoCapturePollInterval(updated.screener_auto_capture_poll_interval);
+      setAutoCaptureSuccess(
+        updated.screener_auto_capture_enabled
+          ? 'Screener 收盘后自动采集已启用'
+          : 'Screener 自动采集保持关闭',
+      );
+      setAutoCaptureStatus(await getScreenerAutoCaptureStatus(20));
+    } catch (err) {
+      setSnapshotError(err instanceof Error ? err.message : '保存自动采集配置失败');
+    } finally {
+      setSavingAutoCapture(false);
     }
   };
 
@@ -3388,6 +3453,99 @@ function StockDiscoveryDialog({
         {showSnapshotHistory && (
           <section className="mt-3 border-y border-slate-200 py-3 dark:border-slate-700">
             {snapshotError && <Alert type="error">{snapshotError}</Alert>}
+            {autoCaptureSuccess && (
+              <Alert type="success">{autoCaptureSuccess}</Alert>
+            )}
+            <div className="mb-3 border-b border-slate-200 pb-3 dark:border-slate-700">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                      收盘后自动采集
+                    </p>
+                    <Badge variant={autoCaptureEnabled ? 'success' : 'default'} dot>
+                      {autoCaptureEnabled ? '已启用' : '已关闭'}
+                    </Badge>
+                  </div>
+                  <p className="mt-1 max-w-2xl text-xs text-slate-500">
+                    复用已保存且完整的 v2 配置 cohort；重型补充模板不会自动执行。
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={saveAutoCaptureConfig}
+                  loading={savingAutoCapture}
+                  disabled={!autoCaptureStatus || loadingSnapshots}
+                >
+                  保存
+                </Button>
+              </div>
+              <div className="mt-3 grid gap-3 sm:grid-cols-[minmax(0,1fr)_180px]">
+                <label className="flex cursor-pointer items-start gap-3 border-l-2 border-slate-200 pl-3 dark:border-slate-600">
+                  <input
+                    type="checkbox"
+                    checked={autoCaptureEnabled}
+                    disabled={!autoCaptureStatus || savingAutoCapture}
+                    onChange={(event) => setAutoCaptureEnabled(event.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500"
+                  />
+                  <span className="text-xs text-slate-600 dark:text-slate-300">
+                    启用真实交易日当地 17:00 后自动采集
+                  </span>
+                </label>
+                <Input
+                  label="轮询间隔（秒）"
+                  type="number"
+                  min={300}
+                  max={3600}
+                  step={60}
+                  value={autoCapturePollInterval}
+                  disabled={!autoCaptureStatus || savingAutoCapture}
+                  onChange={(event) => setAutoCapturePollInterval(Number(event.target.value))}
+                />
+              </div>
+              {autoCaptureStatus && (
+                <div className="mt-3 text-xs text-slate-500">
+                  <p>
+                    可采集模板 {autoCaptureStatus.eligible_template_count}/
+                    {autoCaptureStatus.template_count} · 成功
+                    {' '}{autoCaptureStatus.status_counts.succeeded || 0} · 失败
+                    {' '}{autoCaptureStatus.status_counts.failed || 0} · 每日最多
+                    {' '}{autoCaptureStatus.max_daily_attempts} 次
+                  </p>
+                  {autoCaptureStatus.templates.some((template) => !template.eligible) && (
+                    <p className="mt-1 text-amber-600 dark:text-amber-400">
+                      {autoCaptureStatus.templates
+                        .filter((template) => !template.eligible)
+                        .map((template) => (
+                          `${template.strategy_name || `策略 ${template.strategy_id}`}：${
+                            screenerAutoCaptureReasonLabels[
+                              template.ineligible_reason || ''
+                            ] || template.ineligible_reason
+                          }`
+                        ))
+                        .join('；')}
+                    </p>
+                  )}
+                  {autoCaptureStatus.runs.slice(0, 3).map((run) => (
+                    <p
+                      key={run.run_id}
+                      className={`mt-1 break-words ${run.status === 'failed'
+                        ? 'text-red-600 dark:text-red-400'
+                        : 'text-slate-500'}`}
+                    >
+                      {run.capture_date} · {run.market} {run.target_direction} ·
+                      {' '}{run.status === 'succeeded'
+                        ? '成功'
+                        : run.status === 'running'
+                          ? '执行中'
+                          : `失败：${run.error || '未知错误'}`}
+                    </p>
+                  ))}
+                </div>
+              )}
+            </div>
             {snapshotCoverage && (
               <div className="mb-3 border-b border-slate-200 pb-3 dark:border-slate-700">
                 <div className="flex flex-wrap items-center justify-between gap-2">
