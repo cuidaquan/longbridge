@@ -611,6 +611,41 @@ async def get_security_universe_classification(source_snapshot_id: str):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.get("/security-universe-tradeability/coverage")
+async def get_security_universe_tradeability_coverage(
+    market: Optional[Literal["US", "HK", "CN"]] = None,
+):
+    try:
+        return await asyncio.to_thread(
+            get_security_universe_snapshot_service().get_tradeability_coverage,
+            market,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("获取证券目录交易状态覆盖失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/security-universe-tradeability/{source_snapshot_id}")
+async def get_security_universe_tradeability(source_snapshot_id: str):
+    try:
+        snapshot = await asyncio.to_thread(
+            get_security_universe_snapshot_service().get_tradeability,
+            source_snapshot_id,
+        )
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="证券目录交易状态快照不存在")
+        return snapshot
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("获取证券目录交易状态快照失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/security-universe-snapshots/{snapshot_id}")
 async def get_security_universe_snapshot(snapshot_id: str):
     try:

@@ -166,6 +166,7 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_SECURITY_UNIVERSE_SNAPSHOT_TABLE_SQL)
     conn.execute(_SECURITY_UNIVERSE_SNAPSHOT_RUN_TABLE_SQL)
     conn.execute(_SECURITY_UNIVERSE_CLASSIFICATION_SNAPSHOT_TABLE_SQL)
+    conn.execute(_SECURITY_UNIVERSE_TRADEABILITY_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_SCAN_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_AUTO_CAPTURE_RUN_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_SNAPSHOT_TABLE_SQL)
@@ -675,6 +676,34 @@ ON security_universe_classification_snapshots(captured_at DESC);
 CREATE INDEX IF NOT EXISTS idx_security_universe_classification_scope
 ON security_universe_classification_snapshots(
     market, observation_date DESC, classification_version
+);
+"""
+
+_SECURITY_UNIVERSE_TRADEABILITY_SNAPSHOT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS security_universe_tradeability_snapshots (
+    tradeability_snapshot_id TEXT PRIMARY KEY,
+    source_snapshot_id TEXT NOT NULL,
+    classification_snapshot_id TEXT NOT NULL,
+    captured_at TIMESTAMP NOT NULL,
+    observation_date DATE NOT NULL,
+    tradeability_version TEXT NOT NULL,
+    market TEXT NOT NULL,
+    source_snapshot_version TEXT NOT NULL,
+    classification_version TEXT NOT NULL,
+    eligible_count INTEGER NOT NULL,
+    observed_count INTEGER NOT NULL,
+    tradable_count INTEGER NOT NULL,
+    excluded_count INTEGER NOT NULL,
+    ready_for_point_in_time_universe BOOLEAN NOT NULL,
+    payload_hash TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    UNIQUE (classification_snapshot_id, tradeability_version)
+);
+CREATE INDEX IF NOT EXISTS idx_security_universe_tradeability_captured
+ON security_universe_tradeability_snapshots(captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_security_universe_tradeability_scope
+ON security_universe_tradeability_snapshots(
+    market, observation_date DESC, tradeability_version
 );
 """
 

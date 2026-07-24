@@ -13,6 +13,8 @@ import {
   getSecurityUniverseCoverage,
   getSecurityUniverseSnapshot,
   getSecurityUniverseSnapshots,
+  getSecurityUniverseTradeability,
+  getSecurityUniverseTradeabilityCoverage,
   type SecurityMarket,
   type SecurityUniverseClassificationCoverage,
   type SecurityUniverseClassificationDetail,
@@ -23,6 +25,9 @@ import {
   type SecurityUniverseSnapshotComparison,
   type SecurityUniverseSnapshotDetail,
   type SecurityUniverseSnapshotHistory,
+  type SecurityUniverseTradeabilityCoverage,
+  type SecurityUniverseTradeabilityDetail,
+  type SecurityUniverseTradeabilityReadinessReason,
 } from '../api/stockPicker';
 import {
   Alert,
@@ -70,6 +75,16 @@ const INTEGRITY_ERROR_LABELS: Record<string, string> = {
   classification_metadata_count_mismatch: '分类摘要数量不一致',
   classification_readiness_mismatch: '研究候选门禁不一致',
   non_canonical_classification_items: '分类条目未规范化',
+  classification_snapshot_integrity_invalid: '分类快照完整性未通过',
+  classification_snapshot_hash_mismatch: '分类快照哈希不一致',
+  classification_snapshot_reference_mismatch: '分类快照引用不一致',
+  classification_snapshot_metadata_mismatch: '分类快照元数据不一致',
+  tradeability_policy_mismatch: '交易状态策略不一致',
+  tradeability_count_mismatch: '交易状态数量不一致',
+  tradeability_metadata_count_mismatch: '交易状态摘要数量不一致',
+  tradeability_readiness_mismatch: '点时门禁不一致',
+  trade_status_counts_mismatch: '交易状态分布不一致',
+  non_canonical_tradeability_items: '交易状态条目未规范化',
 };
 
 const READINESS_REASON_LABELS: Record<
@@ -90,6 +105,28 @@ const EXCLUSION_REASON_LABELS: Record<string, string> = {
   index_board: '指数',
   sector_board: '行业板块',
   pre_ipo_board: '上市前证券',
+};
+
+const TRADEABILITY_READINESS_REASON_LABELS: Record<
+  SecurityUniverseTradeabilityReadinessReason,
+  string
+> = {
+  incomplete_quote_coverage: '报价状态覆盖不完整',
+  unknown_trade_status: '存在未知交易状态',
+};
+
+const TRADE_STATUS_LABELS: Record<string, string> = {
+  normal: '正常',
+  halted: '停牌',
+  suspend: '暂停交易',
+  delisted: '已退市',
+  expired: '已到期',
+  fuse: '熔断',
+  codemoved: '代码迁移',
+  preparelist: '待上市',
+  splitstockhalts: '拆股停牌',
+  tobeopened: '待开盘',
+  warrantpreparelist: '权证待上市',
 };
 
 const METADATA_FIELD_LABELS: Record<string, string> = {
@@ -122,10 +159,16 @@ export default function SecurityUniverseSnapshotPanel() {
   const [classificationCoverage, setClassificationCoverage] = useState<
     SecurityUniverseClassificationCoverage | null
   >(null);
+  const [tradeabilityCoverage, setTradeabilityCoverage] = useState<
+    SecurityUniverseTradeabilityCoverage | null
+  >(null);
   const [history, setHistory] = useState<SecurityUniverseSnapshotHistory | null>(null);
   const [detail, setDetail] = useState<SecurityUniverseSnapshotDetail | null>(null);
   const [classificationDetail, setClassificationDetail] = useState<
     SecurityUniverseClassificationDetail | null
+  >(null);
+  const [tradeabilityDetail, setTradeabilityDetail] = useState<
+    SecurityUniverseTradeabilityDetail | null
   >(null);
   const [comparison, setComparison] = useState<SecurityUniverseSnapshotComparison | null>(null);
   const [baseSnapshotId, setBaseSnapshotId] = useState('');
@@ -141,16 +184,24 @@ export default function SecurityUniverseSnapshotPanel() {
     setError(null);
     setDetail(null);
     setClassificationDetail(null);
+    setTradeabilityDetail(null);
     setDetailQuery('');
     setComparison(null);
     try {
-      const [coverageResult, classificationCoverageResult, historyResult] = await Promise.all([
+      const [
+        coverageResult,
+        classificationCoverageResult,
+        tradeabilityCoverageResult,
+        historyResult,
+      ] = await Promise.all([
         getSecurityUniverseCoverage(),
         getSecurityUniverseClassificationCoverage(),
+        getSecurityUniverseTradeabilityCoverage(),
         getSecurityUniverseSnapshots({ market, limit: 50 }),
       ]);
       setCoverage(coverageResult);
       setClassificationCoverage(classificationCoverageResult);
+      setTradeabilityCoverage(tradeabilityCoverageResult);
       setHistory(historyResult);
       const latest = historyResult.items[0];
       const previous = historyResult.items[1] || latest;
@@ -159,6 +210,7 @@ export default function SecurityUniverseSnapshotPanel() {
     } catch (loadError) {
       setCoverage(null);
       setClassificationCoverage(null);
+      setTradeabilityCoverage(null);
       setHistory(null);
       setBaseSnapshotId('');
       setTargetSnapshotId('');
@@ -181,15 +233,18 @@ export default function SecurityUniverseSnapshotPanel() {
     setError(null);
     setDetailQuery('');
     try {
-      const [snapshotResult, classificationResult] = await Promise.all([
+      const [snapshotResult, classificationResult, tradeabilityResult] = await Promise.all([
         getSecurityUniverseSnapshot(snapshotId),
         getSecurityUniverseClassification(snapshotId),
+        getSecurityUniverseTradeability(snapshotId),
       ]);
       setDetail(snapshotResult);
       setClassificationDetail(classificationResult);
+      setTradeabilityDetail(tradeabilityResult);
     } catch (loadError) {
       setDetail(null);
       setClassificationDetail(null);
+      setTradeabilityDetail(null);
       setError(
         loadError instanceof Error
           ? loadError.message
@@ -255,6 +310,10 @@ export default function SecurityUniverseSnapshotPanel() {
     (classificationDetail?.payload?.items || []).map((item) => [item.symbol, item]),
   ), [classificationDetail]);
 
+  const tradeabilityBySymbol = useMemo(() => new Map(
+    (tradeabilityDetail?.payload?.items || []).map((item) => [item.symbol, item]),
+  ), [tradeabilityDetail]);
+
   if (loading && !coverage && !history) {
     return <LoadingSpinner size="md" text="加载证券目录审计数据..." />;
   }
@@ -308,6 +367,9 @@ export default function SecurityUniverseSnapshotPanel() {
               const classification = classificationCoverage?.markets.find(
                 (candidate) => candidate.market === item.market,
               );
+              const tradeability = tradeabilityCoverage?.markets.find(
+                (candidate) => candidate.market === item.market,
+              );
               return (
                 <button
                   type="button"
@@ -327,12 +389,16 @@ export default function SecurityUniverseSnapshotPanel() {
                       {item.snapshot_count > 0 ? '已采集' : '无快照'}
                     </Badge>
                   </div>
-                  <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-center sm:grid-cols-4">
                     <AuditMetric label="观测日" value={item.observation_dates} />
                     <AuditMetric label="目录快照" value={item.snapshot_count} />
                     <AuditMetric
                       label="分类快照"
                       value={classification?.classification_snapshot_count ?? 0}
+                    />
+                    <AuditMetric
+                      label="交易状态"
+                      value={tradeability?.tradeability_snapshot_count ?? 0}
                     />
                   </div>
                   <div className="mt-3 space-y-1 text-xs text-slate-500 dark:text-slate-400">
@@ -347,6 +413,22 @@ export default function SecurityUniverseSnapshotPanel() {
                           ? '研究候选门禁通过'
                           : classification?.latest
                             ? '研究候选门禁未通过'
+                            : '-'
+                      }
+                    </p>
+                    <p>
+                      交易状态缺口：{
+                        tradeability?.missing_tradeability_snapshot_count
+                          ?? classification?.classification_snapshot_count
+                          ?? 0
+                      }
+                    </p>
+                    <p>
+                      最近点时门禁：{
+                        tradeability?.latest?.ready_for_point_in_time_universe
+                          ? '通过'
+                          : tradeability?.latest
+                            ? '未通过'
                             : '-'
                       }
                     </p>
@@ -544,6 +626,105 @@ export default function SecurityUniverseSnapshotPanel() {
                     </div>
                   )}
 
+                  {!tradeabilityDetail ? (
+                    <div className="flex items-start gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                      <FactCheckOutlined className="mt-0.5 h-4 w-4 shrink-0" />
+                      <p>此目录快照尚无版本化点时交易状态。</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3 border-t border-slate-200 pt-3 dark:border-slate-700">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <p className="text-sm font-semibold text-slate-900 dark:text-white">
+                            点时交易状态
+                          </p>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            {tradeabilityDetail.tradeability_version}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Badge variant={tradeabilityDetail.integrity_valid ? 'success' : 'danger'}>
+                            {tradeabilityDetail.integrity_valid ? '状态完整' : '状态损坏'}
+                          </Badge>
+                          <Badge
+                            variant={
+                              tradeabilityDetail.ready_for_point_in_time_universe
+                                ? 'success'
+                                : 'danger'
+                            }
+                          >
+                            {tradeabilityDetail.ready_for_point_in_time_universe
+                              ? '点时候选就绪'
+                              : '点时候选未就绪'}
+                          </Badge>
+                        </div>
+                      </div>
+
+                      {tradeabilityDetail.payload && (
+                        <>
+                          <div className="grid grid-cols-2 gap-2 text-center sm:grid-cols-4">
+                            <AuditMetric
+                              label="状态覆盖"
+                              value={`${tradeabilityDetail.observed_count}/${tradeabilityDetail.eligible_count}`}
+                            />
+                            <AuditMetric
+                              label="正常交易"
+                              value={tradeabilityDetail.tradable_count}
+                              tone="success"
+                            />
+                            <AuditMetric
+                              label="已知排除"
+                              value={tradeabilityDetail.excluded_count}
+                              tone="danger"
+                            />
+                            <AuditMetric
+                              label="覆盖缺口"
+                              value={tradeabilityDetail.payload.counts.missing_quote_count}
+                              tone={
+                                tradeabilityDetail.payload.counts.missing_quote_count > 0
+                                  ? 'danger'
+                                  : 'default'
+                              }
+                            />
+                          </div>
+
+                          {tradeabilityDetail.payload.readiness_reasons.length > 0 && (
+                            <Alert type="error" title="点时门禁未通过">
+                              {tradeabilityDetail.payload.readiness_reasons
+                                .map((reason) => (
+                                  TRADEABILITY_READINESS_REASON_LABELS[reason] || reason
+                                ))
+                                .join('；')}
+                            </Alert>
+                          )}
+
+                          {!tradeabilityDetail.integrity_valid && (
+                            <Alert type="error" title="交易状态完整性失败">
+                              {tradeabilityDetail.integrity_errors
+                                .map((reason) => INTEGRITY_ERROR_LABELS[reason] || reason)
+                                .join('；')}
+                            </Alert>
+                          )}
+
+                          <div className="text-xs text-slate-500 dark:text-slate-400">
+                            <p>
+                              状态分布：{
+                                Object.entries(tradeabilityDetail.payload.trade_status_counts)
+                                  .map(([status, count]) => (
+                                    `${TRADE_STATUS_LABELS[status] || status} ${count}`
+                                  ))
+                                  .join(' · ') || '-'
+                              }
+                            </p>
+                            <p className="mt-1">
+                              点时状态不证明流动性、账户权限、券源或未来成交能力。
+                            </p>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+
                   {detail.payload && (
                     <>
                       <Input
@@ -576,10 +757,20 @@ export default function SecurityUniverseSnapshotPanel() {
                                       classification.exclusion_reason || ''
                                     ] || classification.exclusion_reason || '排除'
                                 }`;
+                              const tradeability = tradeabilityBySymbol.get(item.symbol);
+                              const tradeabilityLabel = !classification?.research_eligible
+                                ? '-'
+                                : !tradeability
+                                  ? '状态未采集'
+                                  : tradeability.point_in_time_eligible
+                                    ? '正常交易'
+                                    : TRADE_STATUS_LABELS[tradeability.trade_status || '']
+                                      || tradeability.exclusion_reason
+                                      || '不可用';
                               return (
                                 <div
                                   key={item.symbol}
-                                  className="grid min-w-0 gap-1 px-3 py-2 sm:grid-cols-[120px_minmax(0,1fr)_minmax(120px,0.65fr)]"
+                                  className="grid min-w-0 gap-1 px-3 py-2 sm:grid-cols-[110px_minmax(0,1fr)_minmax(110px,0.65fr)_minmax(90px,0.45fr)]"
                                 >
                                   <span className="font-mono text-xs font-semibold text-slate-800 dark:text-slate-200">
                                     {item.symbol}
@@ -589,6 +780,9 @@ export default function SecurityUniverseSnapshotPanel() {
                                   </span>
                                   <span className="min-w-0 break-words text-[11px] text-slate-500 dark:text-slate-400">
                                     {classificationLabel}
+                                  </span>
+                                  <span className="min-w-0 break-words text-[11px] text-slate-500 dark:text-slate-400">
+                                    {tradeabilityLabel}
                                   </span>
                                 </div>
                               );

@@ -200,6 +200,7 @@ export interface SecurityUniverseCaptureRun {
 export interface SecurityUniverseSnapshotHistory {
   snapshot_version: string;
   classification_version: string;
+  tradeability_version: string;
   source: string;
   items: SecurityUniverseSnapshotSummary[];
   capture_runs: SecurityUniverseCaptureRun[];
@@ -347,6 +348,119 @@ export interface SecurityUniverseClassificationDetail
     ready_for_research_universe: boolean;
     readiness_reasons: SecurityUniverseClassificationReadinessReason[];
     items: SecurityUniverseClassificationItem[];
+  } | null;
+}
+
+export type SecurityUniverseTradeabilityReadinessReason =
+  | 'incomplete_quote_coverage'
+  | 'unknown_trade_status';
+
+export interface SecurityUniverseTradeabilitySummary {
+  tradeability_snapshot_id: string;
+  source_snapshot_id: string;
+  classification_snapshot_id: string;
+  captured_at: string;
+  observation_date: string;
+  tradeability_version: string;
+  market: SecurityMarket;
+  source_snapshot_version: string;
+  classification_version: string;
+  eligible_count: number;
+  observed_count: number;
+  tradable_count: number;
+  excluded_count: number;
+  ready_for_point_in_time_universe: boolean;
+  payload_hash: string;
+}
+
+export interface SecurityUniverseTradeabilityCoverageMarket {
+  market: SecurityMarket;
+  classification_snapshot_count: number;
+  tradeability_snapshot_count: number;
+  missing_tradeability_snapshot_count: number;
+  observation_dates: number;
+  ready_observation_dates: number;
+  latest: SecurityUniverseTradeabilitySummary | null;
+  payload_integrity_checked: false;
+}
+
+export interface SecurityUniverseTradeabilityCoverage {
+  coverage_version: string;
+  tradeability_version: string;
+  classification_version: string;
+  source_snapshot_version: string;
+  source: string;
+  markets: SecurityUniverseTradeabilityCoverageMarket[];
+}
+
+export interface SecurityUniverseTradeabilityItem {
+  symbol: string;
+  status: 'available' | 'no_data';
+  error: string | null;
+  trade_status: string | null;
+  is_tradable: boolean | null;
+  last_done: number | null;
+  volume: number | null;
+  turnover: number | null;
+  data_as_of: string | null;
+  point_in_time_eligible: boolean;
+  exclusion_reason: string | null;
+}
+
+export interface SecurityUniverseTradeabilityDetail
+  extends SecurityUniverseTradeabilitySummary {
+  computed_payload_hash: string | null;
+  integrity_valid: boolean;
+  integrity_errors: string[];
+  payload: {
+    tradeability_version: string;
+    source: string;
+    source_request: {
+      method: 'SDK';
+      operation: 'QuoteContext.quote';
+      batch_size: number;
+      include_depth: false;
+    };
+    source_snapshot: {
+      snapshot_id: string;
+      snapshot_version: string;
+      payload_hash: string;
+    };
+    classification_snapshot: {
+      classification_snapshot_id: string;
+      classification_version: string;
+      payload_hash: string;
+      eligible_count: number;
+    };
+    market: SecurityMarket;
+    captured_at: string;
+    observation_date: string;
+    policy: {
+      policy_version: string;
+      eligible_trade_status: 'normal';
+      known_trade_statuses: string[];
+      requires_complete_quote_coverage: true;
+      requires_known_trade_status: true;
+      captures_depth: false;
+      data_as_of_semantics: string;
+      captured_at_semantics: string;
+      does_not_prove: string[];
+    };
+    counts: {
+      eligible_count: number;
+      observed_count: number;
+      tradable_count: number;
+      excluded_count: number;
+      missing_quote_count: number;
+      unknown_trade_status_count: number;
+      trade_status_counts: Record<string, number>;
+      exclusion_counts: Record<string, number>;
+    };
+    trade_status_counts: Record<string, number>;
+    exclusion_counts: Record<string, number>;
+    ready_for_point_in_time_universe: boolean;
+    readiness_reasons: SecurityUniverseTradeabilityReadinessReason[];
+    items: SecurityUniverseTradeabilityItem[];
   } | null;
 }
 
@@ -1409,6 +1523,36 @@ export async function getSecurityUniverseClassification(
   if (!response.ok) {
     const error = await response.json().catch(() => null);
     throw new Error(error?.detail || '获取证券目录分类详情失败');
+  }
+  return response.json();
+}
+
+export async function getSecurityUniverseTradeabilityCoverage(
+  market?: SecurityMarket,
+): Promise<SecurityUniverseTradeabilityCoverage> {
+  const query = new URLSearchParams();
+  if (market) query.set('market', market);
+  const suffix = query.size > 0 ? `?${query.toString()}` : '';
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/security-universe-tradeability/coverage${suffix}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取证券目录交易状态覆盖失败');
+  }
+  return response.json();
+}
+
+export async function getSecurityUniverseTradeability(
+  sourceSnapshotId: string,
+): Promise<SecurityUniverseTradeabilityDetail | null> {
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/security-universe-tradeability/${encodeURIComponent(sourceSnapshotId)}`,
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取证券目录交易状态详情失败');
   }
   return response.json();
 }

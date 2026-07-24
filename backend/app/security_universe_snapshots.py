@@ -16,6 +16,7 @@ from .external_service_resilience import (
 from .security_catalog import get_security_catalog_service
 from .stock_candidate_data import (
     get_security_static_info,
+    get_security_tradeability,
     is_market_trading_day,
 )
 from .stock_picker_ai_snapshots import sanitize_error
@@ -30,9 +31,15 @@ CLASSIFICATION_SOURCE = "longbridge-security-static-info"
 CLASSIFICATION_COVERAGE_VERSION = (
     "security-universe-classification-coverage-v1"
 )
+TRADEABILITY_VERSION = "security-universe-tradeability-v1"
+TRADEABILITY_SOURCE = "longbridge-security-quote"
+TRADEABILITY_COVERAGE_VERSION = (
+    "security-universe-tradeability-coverage-v1"
+)
 SOURCE_PATH = "/v1/quote/get_security_list"
 SOURCE_CATEGORY = "Overnight"
 STATIC_INFO_BATCH_SIZE = 500
+QUOTE_BATCH_SIZE = 500
 SUPPORTED_MARKETS = ("US", "HK", "CN")
 MARKET_TIMEZONES = {
     "US": "America/New_York",
@@ -85,6 +92,19 @@ MARKET_BOARD_ALLOWLIST = {
         "szgemconnect", "szgemnonconnect",
     },
 }
+KNOWN_TRADE_STATUSES = {
+    "codemoved",
+    "delisted",
+    "expired",
+    "fuse",
+    "halted",
+    "normal",
+    "preparelist",
+    "splitstockhalts",
+    "suspend",
+    "tobeopened",
+    "warrantpreparelist",
+}
 
 
 class SecurityUniverseSnapshotNotFoundError(LookupError):
@@ -107,6 +127,8 @@ class SecurityUniverseSnapshotService:
         trading_day_loader: Callable = is_market_trading_day,
         static_info_loader: Callable = get_security_static_info,
         static_info_batch_size: int = STATIC_INFO_BATCH_SIZE,
+        tradeability_loader: Callable = get_security_tradeability,
+        quote_batch_size: int = QUOTE_BATCH_SIZE,
     ) -> None:
         self.catalog_loader = catalog_loader or self._refresh_catalog
         self.connection_factory = connection_factory
@@ -121,6 +143,10 @@ class SecurityUniverseSnapshotService:
         if int(static_info_batch_size) < 1:
             raise ValueError("static_info_batch_size 必须大于 0")
         self.static_info_batch_size = int(static_info_batch_size)
+        self.tradeability_loader = tradeability_loader
+        if int(quote_batch_size) < 1:
+            raise ValueError("quote_batch_size 必须大于 0")
+        self.quote_batch_size = int(quote_batch_size)
         self._trading_day_cache: Dict[tuple[str, date], bool] = {}
 
     def capture_market(
@@ -144,11 +170,15 @@ class SecurityUniverseSnapshotService:
                     existing["snapshot_id"],
                     persist=True,
                 )
+                tradeability = self._capture_tradeability_if_ready(
+                    existing["snapshot_id"], classification, persist=True
+                )
                 return {
                     **existing,
                     "status": "already_captured",
                     "persisted": False,
                     "classification": classification,
+                    "tradeability": tradeability,
                 }
         raw_items = self.catalog_loader(normalized_market)
         items = self._normalize_items(raw_items, normalized_market)
@@ -193,11 +223,15 @@ class SecurityUniverseSnapshotService:
                     existing["snapshot_id"],
                     persist=True,
                 )
+                tradeability = self._capture_tradeability_if_ready(
+                    existing["snapshot_id"], classification, persist=True
+                )
                 return {
                     **existing,
                     "status": "already_captured",
                     "persisted": False,
                     "classification": classification,
+                    "tradeability": tradeability,
                 }
             snapshot_id = persisted_id
 
@@ -216,13 +250,23 @@ class SecurityUniverseSnapshotService:
         }
         if persist:
             classification = self.capture_classification(snapshot_id)
+            tradeability = self._capture_tradeability_if_ready(
+                snapshot_id, classification, persist=True
+            )
         else:
             classification = self._capture_classification_payload(
                 source_snapshot=result,
                 source_items=items,
                 persist=False,
             )
-        return {**result, "classification": classification}
+            tradeability = self._capture_tradeability_if_ready(
+                result, classification, persist=False
+            )
+        return {
+            **result,
+            "classification": classification,
+            "tradeability": tradeability,
+        }
 
     def capture_due(self, *, persist: bool = True) -> Dict[str, Any]:
         now = self._as_utc(self.clock())
@@ -249,10 +293,29 @@ class SecurityUniverseSnapshotService:
                 if existing
                 else None
             )
-            if existing and existing_classification:
+            existing_tradeability = (
+                self._find_tradeability_summary(
+                    existing_classification["classification_snapshot_id"]
+                )
+                if existing_classification
+                else None
+            )
+            if existing and existing_classification and existing_tradeability:
                 if persist:
                     self._reconcile_existing_run(existing, now)
                 skipped.append({**scope, "reason": "already_captured"})
+                continue
+            if (
+                existing
+                and existing_classification
+                and not existing_classification["ready_for_research_universe"]
+            ):
+                if persist:
+                    self._reconcile_existing_run(existing, now)
+                skipped.append({
+                    **scope,
+                    "reason": "classification_not_ready",
+                })
                 continue
             if existing is None:
                 try:
@@ -290,11 +353,21 @@ class SecurityUniverseSnapshotService:
                         existing["snapshot_id"],
                         persist=persist,
                     )
+                    tradeability = self._capture_tradeability_if_ready(
+                        existing["snapshot_id"],
+                        classification,
+                        persist=persist,
+                    )
                     result = {
                         **existing,
-                        "status": "classification_captured",
+                        "status": (
+                            "classification_captured"
+                            if existing_classification is None
+                            else "tradeability_captured"
+                        ),
                         "persisted": False,
                         "classification": classification,
+                        "tradeability": tradeability,
                     }
                 else:
                     result = self.capture_market(market, persist=persist)
@@ -385,6 +458,7 @@ class SecurityUniverseSnapshotService:
         return {
             "snapshot_version": SNAPSHOT_VERSION,
             "classification_version": CLASSIFICATION_VERSION,
+            "tradeability_version": TRADEABILITY_VERSION,
             "source": SNAPSHOT_SOURCE,
             "items": [self._summary(row) for row in rows],
             "capture_runs": [self._run_summary(row) for row in run_rows],
@@ -861,6 +935,309 @@ class SecurityUniverseSnapshotService:
             "markets": result,
         }
 
+    def capture_tradeability(
+        self,
+        source_snapshot_id: str,
+        *,
+        persist: bool = True,
+    ) -> Dict[str, Any]:
+        normalized_id = source_snapshot_id.strip()
+        if not normalized_id:
+            raise ValueError("source_snapshot_id 不能为空")
+        classification = self.get_classification(normalized_id)
+        if classification is None:
+            raise ValueError("证券目录分类快照不存在")
+        if persist:
+            existing = self._find_tradeability_summary(
+                classification["classification_snapshot_id"]
+            )
+            if existing is not None:
+                return {
+                    **existing,
+                    "status": "already_captured",
+                    "persisted": False,
+                }
+        if not classification["integrity_valid"]:
+            raise ValueError("证券目录分类快照完整性校验失败")
+        if not classification["ready_for_research_universe"]:
+            raise ValueError("证券目录分类研究候选门禁未通过")
+        source_snapshot = self.get_snapshot(normalized_id)
+        if source_snapshot is None:
+            raise SecurityUniverseSnapshotNotFoundError(normalized_id)
+        return self._capture_tradeability_payload(
+            source_snapshot=source_snapshot,
+            classification=classification,
+            persist=persist,
+        )
+
+    def _capture_tradeability_if_ready(
+        self,
+        source_snapshot: Any,
+        classification: Dict[str, Any],
+        *,
+        persist: bool,
+    ) -> Dict[str, Any]:
+        if not classification.get("ready_for_research_universe"):
+            return {
+                "status": "blocked",
+                "persisted": False,
+                "reason": "classification_not_ready",
+            }
+        if isinstance(source_snapshot, str):
+            return self.capture_tradeability(
+                source_snapshot,
+                persist=persist,
+            )
+        return self._capture_tradeability_payload(
+            source_snapshot=source_snapshot,
+            classification=classification,
+            persist=persist,
+        )
+
+    def get_tradeability(
+        self,
+        source_snapshot_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_id = source_snapshot_id.strip()
+        if not normalized_id:
+            raise ValueError("source_snapshot_id 不能为空")
+        with self.connection_factory() as connection:
+            row = connection.execute(
+                """
+                SELECT tradeability_snapshot_id, source_snapshot_id,
+                       classification_snapshot_id, captured_at,
+                       observation_date, tradeability_version, market,
+                       source_snapshot_version, classification_version,
+                       eligible_count, observed_count, tradable_count,
+                       excluded_count, ready_for_point_in_time_universe,
+                       payload_hash, payload
+                FROM security_universe_tradeability_snapshots
+                WHERE source_snapshot_id = ?
+                  AND tradeability_version = ?
+                """,
+                [normalized_id, TRADEABILITY_VERSION],
+            ).fetchone()
+        if row is None:
+            return None
+
+        summary = self._tradeability_summary(row[:15])
+        try:
+            payload = json.loads(row[15])
+        except (json.JSONDecodeError, TypeError):
+            return {
+                **summary,
+                "computed_payload_hash": None,
+                "integrity_valid": False,
+                "integrity_errors": ["invalid_payload_json"],
+                "payload": None,
+            }
+        computed_hash = self._payload_hash(payload)
+        if not isinstance(payload, dict):
+            return {
+                **summary,
+                "computed_payload_hash": computed_hash,
+                "integrity_valid": False,
+                "integrity_errors": ["payload_not_object"],
+                "payload": payload,
+            }
+
+        errors = []
+        if computed_hash != row[14]:
+            errors.append("payload_hash_mismatch")
+        if payload.get("tradeability_version") != row[5]:
+            errors.append("payload_version_mismatch")
+        if payload.get("source") != TRADEABILITY_SOURCE:
+            errors.append("payload_source_mismatch")
+        if payload.get("market") != row[6]:
+            errors.append("payload_market_mismatch")
+        if payload.get("observation_date") != row[4].isoformat():
+            errors.append("payload_date_mismatch")
+        captured_at = row[3].replace(tzinfo=timezone.utc).isoformat()
+        if payload.get("captured_at") != captured_at:
+            errors.append("payload_captured_at_mismatch")
+        if payload.get("source_request") != self._tradeability_request():
+            errors.append("source_request_mismatch")
+        if payload.get("policy") != self._tradeability_policy():
+            errors.append("tradeability_policy_mismatch")
+
+        classification_reference = payload.get("classification_snapshot")
+        if (
+            not isinstance(classification_reference, dict)
+            or classification_reference.get("classification_snapshot_id")
+            != row[2]
+            or classification_reference.get("classification_version")
+            != row[8]
+            or classification_reference.get("eligible_count") != row[9]
+        ):
+            errors.append("classification_snapshot_reference_mismatch")
+        classification = self.get_classification(row[1])
+        if classification is None:
+            errors.append("classification_snapshot_missing")
+        else:
+            if not classification["integrity_valid"]:
+                errors.append("classification_snapshot_integrity_invalid")
+            if (
+                classification["classification_snapshot_id"] != row[2]
+                or classification["classification_version"] != row[8]
+                or classification["source_snapshot_version"] != row[7]
+                or classification["market"] != row[6]
+                or classification["observation_date"]
+                != row[4].isoformat()
+                or classification["eligible_count"] != row[9]
+            ):
+                errors.append("classification_snapshot_metadata_mismatch")
+            if (
+                not isinstance(classification_reference, dict)
+                or classification_reference.get("payload_hash")
+                != classification["payload_hash"]
+            ):
+                errors.append("classification_snapshot_hash_mismatch")
+
+        source_reference = payload.get("source_snapshot")
+        source_snapshot = self.get_snapshot(row[1])
+        if (
+            not isinstance(source_reference, dict)
+            or source_reference.get("snapshot_id") != row[1]
+            or source_reference.get("snapshot_version") != row[7]
+        ):
+            errors.append("source_snapshot_reference_mismatch")
+        if source_snapshot is None:
+            errors.append("source_snapshot_missing")
+        else:
+            if not source_snapshot["integrity_valid"]:
+                errors.append("source_snapshot_integrity_invalid")
+            if (
+                not isinstance(source_reference, dict)
+                or source_reference.get("payload_hash")
+                != source_snapshot["payload_hash"]
+            ):
+                errors.append("source_snapshot_hash_mismatch")
+
+        items = payload.get("items")
+        if (
+            not isinstance(items, list)
+            or len(items) != row[9]
+            or not self._tradeability_items_are_canonical(items)
+        ):
+            errors.append("non_canonical_tradeability_items")
+        else:
+            counts = self._tradeability_counts(items)
+            expected_counts = {
+                "eligible_count": len(items),
+                **counts,
+            }
+            if payload.get("counts") != expected_counts:
+                errors.append("tradeability_count_mismatch")
+            if (
+                row[10] != counts["observed_count"]
+                or row[11] != counts["tradable_count"]
+                or row[12] != counts["excluded_count"]
+            ):
+                errors.append("tradeability_metadata_count_mismatch")
+            ready, reasons = self._tradeability_readiness(counts)
+            if (
+                payload.get("ready_for_point_in_time_universe") != ready
+                or payload.get("readiness_reasons") != reasons
+                or bool(row[13]) != ready
+            ):
+                errors.append("tradeability_readiness_mismatch")
+            if payload.get("trade_status_counts") != counts["trade_status_counts"]:
+                errors.append("trade_status_counts_mismatch")
+            if payload.get("exclusion_counts") != counts["exclusion_counts"]:
+                errors.append("exclusion_counts_mismatch")
+
+        return {
+            **summary,
+            "computed_payload_hash": computed_hash,
+            "integrity_valid": not errors,
+            "integrity_errors": errors,
+            "payload": payload,
+        }
+
+    def get_tradeability_coverage(
+        self,
+        market: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        normalized_market = (
+            self._normalize_market(market) if market else None
+        )
+        scope = "AND market = ?" if normalized_market else ""
+        classification_parameters: List[Any] = [CLASSIFICATION_VERSION]
+        tradeability_parameters: List[Any] = [TRADEABILITY_VERSION]
+        if normalized_market:
+            classification_parameters.append(normalized_market)
+            tradeability_parameters.append(normalized_market)
+        with self.connection_factory() as connection:
+            classification_rows = connection.execute(
+                f"""
+                SELECT classification_snapshot_id, market, observation_date
+                FROM security_universe_classification_snapshots
+                WHERE classification_version = ? {scope}
+                ORDER BY market, observation_date, captured_at
+                """,
+                classification_parameters,
+            ).fetchall()
+            tradeability_rows = connection.execute(
+                f"""
+                SELECT tradeability_snapshot_id, source_snapshot_id,
+                       classification_snapshot_id, captured_at,
+                       observation_date, tradeability_version, market,
+                       source_snapshot_version, classification_version,
+                       eligible_count, observed_count, tradable_count,
+                       excluded_count, ready_for_point_in_time_universe,
+                       payload_hash
+                FROM security_universe_tradeability_snapshots
+                WHERE tradeability_version = ? {scope}
+                ORDER BY market, observation_date, captured_at
+                """,
+                tradeability_parameters,
+            ).fetchall()
+
+        markets = (
+            [normalized_market]
+            if normalized_market
+            else list(SUPPORTED_MARKETS)
+        )
+        result = []
+        for item_market in markets:
+            classifications = [
+                row for row in classification_rows if row[1] == item_market
+            ]
+            snapshots = [
+                self._tradeability_summary(row)
+                for row in tradeability_rows
+                if row[6] == item_market
+            ]
+            captured_classification_ids = {
+                item["classification_snapshot_id"] for item in snapshots
+            }
+            result.append({
+                "market": item_market,
+                "classification_snapshot_count": len(classifications),
+                "tradeability_snapshot_count": len(snapshots),
+                "missing_tradeability_snapshot_count": sum(
+                    1 for row in classifications
+                    if row[0] not in captured_classification_ids
+                ),
+                "observation_dates": len({
+                    item["observation_date"] for item in snapshots
+                }),
+                "ready_observation_dates": len({
+                    item["observation_date"] for item in snapshots
+                    if item["ready_for_point_in_time_universe"]
+                }),
+                "latest": snapshots[-1] if snapshots else None,
+                "payload_integrity_checked": False,
+            })
+        return {
+            "coverage_version": TRADEABILITY_COVERAGE_VERSION,
+            "tradeability_version": TRADEABILITY_VERSION,
+            "classification_version": CLASSIFICATION_VERSION,
+            "source_snapshot_version": SNAPSHOT_VERSION,
+            "source": TRADEABILITY_SOURCE,
+            "markets": result,
+        }
+
     def get_snapshot(self, snapshot_id: str) -> Optional[Dict[str, Any]]:
         normalized_id = snapshot_id.strip()
         if not normalized_id:
@@ -1029,7 +1406,305 @@ class SecurityUniverseSnapshotService:
             **summary,
             "status": "classified",
             "persisted": persist,
+            "payload": payload,
         }
+
+    def _capture_tradeability_payload(
+        self,
+        source_snapshot: Dict[str, Any],
+        classification: Dict[str, Any],
+        *,
+        persist: bool,
+    ) -> Dict[str, Any]:
+        classification_payload = classification.get("payload")
+        if not isinstance(classification_payload, dict):
+            persisted = self.get_classification(source_snapshot["snapshot_id"])
+            classification_payload = (
+                persisted.get("payload") if persisted is not None else None
+            )
+        if not isinstance(classification_payload, dict):
+            raise ValueError("证券目录分类载荷不可用")
+        symbols = [
+            item["symbol"]
+            for item in classification_payload.get("items", [])
+            if item.get("research_eligible") is True
+        ]
+        observations = self._load_tradeability(symbols)
+        items = self._normalize_tradeability_items(symbols, observations)
+        counts = self._tradeability_counts(items)
+        ready, readiness_reasons = self._tradeability_readiness(counts)
+        captured_at = self._as_utc(self.clock())
+        payload = {
+            "tradeability_version": TRADEABILITY_VERSION,
+            "source": TRADEABILITY_SOURCE,
+            "source_request": self._tradeability_request(),
+            "source_snapshot": {
+                "snapshot_id": source_snapshot["snapshot_id"],
+                "snapshot_version": source_snapshot["snapshot_version"],
+                "payload_hash": source_snapshot["payload_hash"],
+            },
+            "classification_snapshot": {
+                "classification_snapshot_id": classification[
+                    "classification_snapshot_id"
+                ],
+                "classification_version": classification[
+                    "classification_version"
+                ],
+                "payload_hash": classification["payload_hash"],
+                "eligible_count": classification["eligible_count"],
+            },
+            "market": source_snapshot["market"],
+            "captured_at": captured_at.isoformat(),
+            "observation_date": source_snapshot["observation_date"],
+            "policy": self._tradeability_policy(),
+            "counts": {
+                "eligible_count": len(items),
+                **counts,
+            },
+            "trade_status_counts": counts["trade_status_counts"],
+            "exclusion_counts": counts["exclusion_counts"],
+            "ready_for_point_in_time_universe": ready,
+            "readiness_reasons": readiness_reasons,
+            "items": items,
+        }
+        payload_hash = self._payload_hash(payload)
+        summary = {
+            "tradeability_snapshot_id": uuid4().hex,
+            "source_snapshot_id": source_snapshot["snapshot_id"],
+            "classification_snapshot_id": classification[
+                "classification_snapshot_id"
+            ],
+            "captured_at": captured_at.isoformat(),
+            "observation_date": source_snapshot["observation_date"],
+            "tradeability_version": TRADEABILITY_VERSION,
+            "market": source_snapshot["market"],
+            "source_snapshot_version": source_snapshot["snapshot_version"],
+            "classification_version": classification[
+                "classification_version"
+            ],
+            "eligible_count": len(items),
+            "observed_count": counts["observed_count"],
+            "tradable_count": counts["tradable_count"],
+            "excluded_count": counts["excluded_count"],
+            "ready_for_point_in_time_universe": ready,
+            "payload_hash": payload_hash,
+        }
+        if persist:
+            snapshot_id, inserted = self._save_tradeability({
+                **summary,
+                "captured_at": captured_at,
+                "payload": payload,
+            })
+            if not inserted:
+                existing = self._find_tradeability_summary(
+                    classification["classification_snapshot_id"]
+                )
+                if existing is None:
+                    raise RuntimeError("证券目录交易状态快照写入状态不一致")
+                return {
+                    **existing,
+                    "status": "already_captured",
+                    "persisted": False,
+                }
+            summary["tradeability_snapshot_id"] = snapshot_id
+        return {
+            **summary,
+            "status": "captured",
+            "persisted": persist,
+            "payload": payload,
+        }
+
+    def _load_tradeability(
+        self,
+        symbols: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        result: Dict[str, Dict[str, Any]] = {}
+        for index in range(0, len(symbols), self.quote_batch_size):
+            batch = symbols[index:index + self.quote_batch_size]
+            loaded = run_external_call(
+                "quote",
+                "security_universe_tradeability",
+                self.tradeability_loader,
+                batch,
+                include_depth=False,
+                retry_if=lambda error: not isinstance(
+                    error,
+                    ExternalServiceTimeoutError,
+                ),
+            )
+            if not isinstance(loaded, dict):
+                raise ValueError("证券交易状态响应必须是对象")
+            for symbol, item in loaded.items():
+                normalized_symbol = str(symbol or "").strip().upper()
+                if normalized_symbol in result:
+                    raise ValueError(
+                        f"证券交易状态响应存在重复 symbol: {normalized_symbol}"
+                    )
+                result[normalized_symbol] = item
+        return result
+
+    @classmethod
+    def _normalize_tradeability_items(
+        cls,
+        symbols: List[str],
+        observations: Dict[str, Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        items = []
+        for symbol in sorted(symbols):
+            raw = observations.get(symbol)
+            if not isinstance(raw, dict) or raw.get("status") != "available":
+                items.append({
+                    "symbol": symbol,
+                    "status": "no_data",
+                    "error": (
+                        str(raw.get("error") or "").strip() or None
+                        if isinstance(raw, dict)
+                        else None
+                    ),
+                    "trade_status": None,
+                    "is_tradable": None,
+                    "last_done": None,
+                    "volume": None,
+                    "turnover": None,
+                    "data_as_of": None,
+                    "point_in_time_eligible": False,
+                    "exclusion_reason": "quote_no_data",
+                })
+                continue
+            trade_status = cls._normalize_board(raw.get("trade_status"))
+            known = trade_status in KNOWN_TRADE_STATUSES
+            is_tradable = trade_status == "normal" if known else False
+            exclusion_reason = None
+            if not known:
+                exclusion_reason = "unknown_trade_status"
+            elif not is_tradable:
+                exclusion_reason = f"trade_status_{trade_status}"
+            items.append({
+                "symbol": symbol,
+                "status": "available",
+                "error": None,
+                "trade_status": trade_status,
+                "is_tradable": is_tradable,
+                "last_done": cls._normalize_optional_number(
+                    raw.get("last_done")
+                ),
+                "volume": cls._normalize_optional_number(raw.get("volume")),
+                "turnover": cls._normalize_optional_number(
+                    raw.get("turnover")
+                ),
+                "data_as_of": str(raw.get("data_as_of") or "").strip() or None,
+                "point_in_time_eligible": is_tradable,
+                "exclusion_reason": exclusion_reason,
+            })
+        return items
+
+    @classmethod
+    def _tradeability_items_are_canonical(cls, items: List[dict]) -> bool:
+        symbols = []
+        observations = {}
+        for item in items:
+            if not isinstance(item, dict):
+                return False
+            symbol = str(item.get("symbol") or "").strip().upper()
+            if not symbol or symbol in observations:
+                return False
+            symbols.append(symbol)
+            observations[symbol] = item
+        try:
+            return cls._normalize_tradeability_items(
+                symbols,
+                observations,
+            ) == items
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _tradeability_counts(items: List[dict]) -> Dict[str, Any]:
+        trade_status_counts: Dict[str, int] = {}
+        exclusion_counts: Dict[str, int] = {}
+        for item in items:
+            trade_status = item.get("trade_status") or "no_data"
+            trade_status_counts[trade_status] = (
+                trade_status_counts.get(trade_status, 0) + 1
+            )
+            reason = item.get("exclusion_reason")
+            if reason:
+                exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
+        return {
+            "observed_count": sum(
+                item.get("status") == "available" for item in items
+            ),
+            "tradable_count": sum(
+                item.get("point_in_time_eligible") is True for item in items
+            ),
+            "excluded_count": sum(
+                item.get("status") == "available"
+                and item.get("trade_status") in KNOWN_TRADE_STATUSES
+                and item.get("point_in_time_eligible") is False
+                for item in items
+            ),
+            "missing_quote_count": sum(
+                item.get("status") != "available" for item in items
+            ),
+            "unknown_trade_status_count": sum(
+                item.get("status") == "available"
+                and item.get("trade_status") not in KNOWN_TRADE_STATUSES
+                for item in items
+            ),
+            "trade_status_counts": dict(sorted(trade_status_counts.items())),
+            "exclusion_counts": dict(sorted(exclusion_counts.items())),
+        }
+
+    @staticmethod
+    def _tradeability_readiness(
+        counts: Dict[str, Any],
+    ) -> tuple[bool, List[str]]:
+        reasons = []
+        if counts["missing_quote_count"]:
+            reasons.append("incomplete_quote_coverage")
+        if counts["unknown_trade_status_count"]:
+            reasons.append("unknown_trade_status")
+        return not reasons, reasons
+
+    def _tradeability_request(self) -> Dict[str, Any]:
+        return {
+            "method": "SDK",
+            "operation": "QuoteContext.quote",
+            "batch_size": self.quote_batch_size,
+            "include_depth": False,
+        }
+
+    @staticmethod
+    def _tradeability_policy() -> Dict[str, Any]:
+        return {
+            "policy_version": TRADEABILITY_VERSION,
+            "eligible_trade_status": "normal",
+            "known_trade_statuses": sorted(KNOWN_TRADE_STATUSES),
+            "requires_complete_quote_coverage": True,
+            "requires_known_trade_status": True,
+            "captures_depth": False,
+            "data_as_of_semantics": "upstream_quote_timestamp",
+            "captured_at_semantics": "request_observation_time",
+            "does_not_prove": [
+                "ordinary_stock_or_etf_type",
+                "liquidity",
+                "account_permission",
+                "borrow_availability",
+                "future_execution",
+            ],
+        }
+
+    @staticmethod
+    def _normalize_optional_number(value: Any) -> Optional[float]:
+        if value is None or value == "":
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if number != number or number in (float("inf"), float("-inf")):
+            return None
+        return number
 
     def _load_static_info(self, symbols: List[str]) -> List[dict]:
         items = []
@@ -1507,6 +2182,64 @@ class SecurityUniverseSnapshotService:
             raise RuntimeError("证券目录分类快照写入失败")
         return existing[0], False
 
+    def _save_tradeability(
+        self,
+        snapshot: Dict[str, Any],
+    ) -> tuple[str, bool]:
+        payload_text = self._canonical_json(snapshot["payload"])
+        with self.connection_factory() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO security_universe_tradeability_snapshots (
+                    tradeability_snapshot_id, source_snapshot_id,
+                    classification_snapshot_id, captured_at,
+                    observation_date, tradeability_version, market,
+                    source_snapshot_version, classification_version,
+                    eligible_count, observed_count, tradable_count,
+                    excluded_count, ready_for_point_in_time_universe,
+                    payload_hash, payload
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (classification_snapshot_id, tradeability_version)
+                DO NOTHING
+                RETURNING tradeability_snapshot_id
+                """,
+                [
+                    snapshot["tradeability_snapshot_id"],
+                    snapshot["source_snapshot_id"],
+                    snapshot["classification_snapshot_id"],
+                    snapshot["captured_at"].replace(tzinfo=None),
+                    snapshot["observation_date"],
+                    TRADEABILITY_VERSION,
+                    snapshot["market"],
+                    snapshot["source_snapshot_version"],
+                    snapshot["classification_version"],
+                    snapshot["eligible_count"],
+                    snapshot["observed_count"],
+                    snapshot["tradable_count"],
+                    snapshot["excluded_count"],
+                    snapshot["ready_for_point_in_time_universe"],
+                    snapshot["payload_hash"],
+                    payload_text,
+                ],
+            ).fetchone()
+            if row is not None:
+                return row[0], True
+            existing = connection.execute(
+                """
+                SELECT tradeability_snapshot_id
+                FROM security_universe_tradeability_snapshots
+                WHERE classification_snapshot_id = ?
+                  AND tradeability_version = ?
+                """,
+                [
+                    snapshot["classification_snapshot_id"],
+                    TRADEABILITY_VERSION,
+                ],
+            ).fetchone()
+        if existing is None:
+            raise RuntimeError("证券目录交易状态快照写入失败")
+        return existing[0], False
+
     def _find_classification_summary(
         self,
         source_snapshot_id: str,
@@ -1532,6 +2265,28 @@ class SecurityUniverseSnapshotService:
             if row is not None
             else None
         )
+
+    def _find_tradeability_summary(
+        self,
+        classification_snapshot_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self.connection_factory() as connection:
+            row = connection.execute(
+                """
+                SELECT tradeability_snapshot_id, source_snapshot_id,
+                       classification_snapshot_id, captured_at,
+                       observation_date, tradeability_version, market,
+                       source_snapshot_version, classification_version,
+                       eligible_count, observed_count, tradable_count,
+                       excluded_count, ready_for_point_in_time_universe,
+                       payload_hash
+                FROM security_universe_tradeability_snapshots
+                WHERE classification_snapshot_id = ?
+                  AND tradeability_version = ?
+                """,
+                [classification_snapshot_id, TRADEABILITY_VERSION],
+            ).fetchone()
+        return self._tradeability_summary(row) if row is not None else None
 
     def _find_existing_summary(
         self,
@@ -1694,6 +2449,28 @@ class SecurityUniverseSnapshotService:
             "eligible_count": row[10],
             "ready_for_research_universe": bool(row[11]),
             "payload_hash": row[12],
+        }
+
+    @staticmethod
+    def _tradeability_summary(row: tuple) -> Dict[str, Any]:
+        return {
+            "tradeability_snapshot_id": row[0],
+            "source_snapshot_id": row[1],
+            "classification_snapshot_id": row[2],
+            "captured_at": row[3].replace(
+                tzinfo=timezone.utc
+            ).isoformat(),
+            "observation_date": row[4].isoformat(),
+            "tradeability_version": row[5],
+            "market": row[6],
+            "source_snapshot_version": row[7],
+            "classification_version": row[8],
+            "eligible_count": row[9],
+            "observed_count": row[10],
+            "tradable_count": row[11],
+            "excluded_count": row[12],
+            "ready_for_point_in_time_universe": bool(row[13]),
+            "payload_hash": row[14],
         }
 
     @staticmethod

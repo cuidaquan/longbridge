@@ -14,6 +14,8 @@ from app.routers.stock_picker import (
     compare_security_universe_snapshots,
     get_security_universe_classification,
     get_security_universe_classification_coverage,
+    get_security_universe_tradeability,
+    get_security_universe_tradeability_coverage,
     get_security_universe_snapshot,
     get_security_universe_snapshot_coverage,
     get_security_universe_snapshots,
@@ -28,6 +30,9 @@ from app.security_universe_snapshots import (
     SNAPSHOT_COVERAGE_VERSION,
     SNAPSHOT_SOURCE,
     SNAPSHOT_VERSION,
+    TRADEABILITY_COVERAGE_VERSION,
+    TRADEABILITY_SOURCE,
+    TRADEABILITY_VERSION,
     SecurityUniverseSnapshotNotFoundError,
     SecurityUniverseSnapshotService,
 )
@@ -87,6 +92,24 @@ def _static_items(symbols):
     ]
 
 
+def _tradeability_items(symbols, include_depth=False):
+    if include_depth:
+        raise AssertionError("目录交易状态快照不得请求盘口深度")
+    return {
+        symbol: {
+            "status": "available",
+            "error": None,
+            "trade_status": "normal",
+            "is_tradable": True,
+            "last_done": 100.0,
+            "volume": 1000.0,
+            "turnover": 100000.0,
+            "data_as_of": "2026-07-24T11:59:59+00:00",
+        }
+        for symbol in symbols
+    }
+
+
 class SecurityUniverseSnapshotTests(unittest.TestCase):
     def setUp(self) -> None:
         self.connection = duckdb.connect(":memory:")
@@ -127,6 +150,11 @@ class SecurityUniverseSnapshotTests(unittest.TestCase):
                 "static_info_batch_size",
                 500,
             ),
+            tradeability_loader=kwargs.get(
+                "tradeability_loader",
+                _tradeability_items,
+            ),
+            quote_batch_size=kwargs.get("quote_batch_size", 500),
         )
 
     @staticmethod
@@ -184,10 +212,42 @@ class SecurityUniverseSnapshotTests(unittest.TestCase):
                 "payload",
             },
         )
+        tradeability_columns = {
+            row[1]
+            for row in self.connection.execute(
+                "PRAGMA table_info("
+                "'security_universe_tradeability_snapshots')"
+            ).fetchall()
+        }
+        self.assertEqual(
+            tradeability_columns,
+            {
+                "tradeability_snapshot_id",
+                "source_snapshot_id",
+                "classification_snapshot_id",
+                "captured_at",
+                "observation_date",
+                "tradeability_version",
+                "market",
+                "source_snapshot_version",
+                "classification_version",
+                "eligible_count",
+                "observed_count",
+                "tradable_count",
+                "excluded_count",
+                "ready_for_point_in_time_universe",
+                "payload_hash",
+                "payload",
+            },
+        )
 
     def test_capture_is_canonical_integrity_checked_and_idempotent(self) -> None:
         loader = MagicMock(side_effect=lambda market: _items(market))
-        service = self._service(catalog_loader=loader)
+        quote_loader = MagicMock(side_effect=_tradeability_items)
+        service = self._service(
+            catalog_loader=loader,
+            tradeability_loader=quote_loader,
+        )
 
         first = service.capture_market("us")
         second = service.capture_market("US")
@@ -202,6 +262,10 @@ class SecurityUniverseSnapshotTests(unittest.TestCase):
         self.assertFalse(second["persisted"])
         self.assertEqual(first["snapshot_id"], second["snapshot_id"])
         loader.assert_called_once_with("US")
+        quote_loader.assert_called_once_with(
+            ["AAA.US", "BBB.US"],
+            include_depth=False,
+        )
         self.assertEqual(detail["snapshot_version"], SNAPSHOT_VERSION)
         self.assertEqual(detail["source"], SNAPSHOT_SOURCE)
         self.assertTrue(detail["integrity_valid"])
@@ -276,6 +340,11 @@ class SecurityUniverseSnapshotTests(unittest.TestCase):
                     "classification_snapshot_id": "classification-1",
                     "status": "already_classified",
                     "persisted": False,
+                },
+                "tradeability": {
+                    "status": "blocked",
+                    "persisted": False,
+                    "reason": "classification_not_ready",
                 },
             },
         )
@@ -610,6 +679,306 @@ class SecurityUniverseSnapshotTests(unittest.TestCase):
                 "persisted": False,
             },
         )
+
+    def test_tradeability_queries_only_research_candidates_in_batches(self) -> None:
+        source_items = [
+            {
+                "symbol": f"{index:04d}.US",
+                "name": str(index),
+                "name_en": "",
+                "name_hk": "",
+                "market": "US",
+            }
+            for index in range(1002)
+        ]
+        quote_batches = []
+
+        def static_loader(symbols):
+            return [
+                {
+                    "symbol": symbol,
+                    "board": "USPink" if symbol == "1001.US" else "USMain",
+                }
+                for symbol in symbols
+            ]
+
+        def quote_loader(symbols, include_depth=False):
+            self.assertFalse(include_depth)
+            quote_batches.append(list(symbols))
+            return _tradeability_items(symbols, include_depth=include_depth)
+
+        service = self._service(
+            catalog_loader=lambda market: source_items,
+            static_info_loader=static_loader,
+            tradeability_loader=quote_loader,
+            quote_batch_size=500,
+        )
+        with patch(
+            "app.security_universe_snapshots.run_external_call",
+            side_effect=self._call_directly,
+        ):
+            capture = service.capture_market("US")
+
+        detail = service.get_tradeability(capture["snapshot_id"])
+        self.assertEqual([len(batch) for batch in quote_batches], [500, 500, 1])
+        self.assertNotIn("1001.US", {item for batch in quote_batches for item in batch})
+        self.assertTrue(detail["integrity_valid"])
+        self.assertTrue(detail["ready_for_point_in_time_universe"])
+        self.assertEqual(detail["eligible_count"], 1001)
+        self.assertEqual(detail["tradable_count"], 1001)
+        self.assertEqual(
+            detail["payload"]["source_request"],
+            {
+                "method": "SDK",
+                "operation": "QuoteContext.quote",
+                "batch_size": 500,
+                "include_depth": False,
+            },
+        )
+        self.assertEqual(
+            detail["payload"]["policy"]["data_as_of_semantics"],
+            "upstream_quote_timestamp",
+        )
+        self.assertNotEqual(
+            detail["payload"]["items"][0]["data_as_of"],
+            detail["captured_at"],
+        )
+
+    def test_tradeability_known_exclusions_and_fail_closed_gaps(self) -> None:
+        symbols = ("NORMAL", "HALTED", "SUSPEND", "UNKNOWN", "MISSING")
+        source_items = [
+            {
+                "symbol": f"{symbol}.US",
+                "name": symbol,
+                "name_en": "",
+                "name_hk": "",
+                "market": "US",
+            }
+            for symbol in symbols
+        ]
+
+        def quote_loader(requested, include_depth=False):
+            self.assertFalse(include_depth)
+            statuses = {
+                "NORMAL.US": "Normal",
+                "HALTED.US": "Halted",
+                "SUSPEND.US": "Suspend",
+                "UNKNOWN.US": "UnexpectedStatus",
+            }
+            return {
+                symbol: {
+                    "status": "available",
+                    "trade_status": status,
+                    "data_as_of": "2020-01-01T00:00:00Z",
+                }
+                for symbol, status in statuses.items()
+            }
+
+        service = self._service(
+            catalog_loader=lambda market: source_items,
+            tradeability_loader=quote_loader,
+        )
+        with patch(
+            "app.security_universe_snapshots.run_external_call",
+            side_effect=self._call_directly,
+        ):
+            capture = service.capture_market("US")
+        detail = service.get_tradeability(capture["snapshot_id"])
+
+        self.assertTrue(detail["integrity_valid"])
+        self.assertFalse(detail["ready_for_point_in_time_universe"])
+        self.assertEqual(detail["observed_count"], 4)
+        self.assertEqual(detail["tradable_count"], 1)
+        self.assertEqual(detail["excluded_count"], 2)
+        self.assertEqual(
+            detail["payload"]["readiness_reasons"],
+            ["incomplete_quote_coverage", "unknown_trade_status"],
+        )
+        by_symbol = {
+            item["symbol"]: item for item in detail["payload"]["items"]
+        }
+        self.assertEqual(
+            by_symbol["HALTED.US"]["exclusion_reason"],
+            "trade_status_halted",
+        )
+        self.assertEqual(
+            by_symbol["MISSING.US"]["exclusion_reason"],
+            "quote_no_data",
+        )
+        self.assertFalse(by_symbol["UNKNOWN.US"]["point_in_time_eligible"])
+
+    def test_tradeability_refuses_unready_or_tampered_classification(self) -> None:
+        quote_loader = MagicMock()
+        service = self._service(
+            static_info_loader=lambda symbols: [],
+            tradeability_loader=quote_loader,
+        )
+        capture = service.capture_market("US")
+        self.assertEqual(capture["tradeability"]["status"], "blocked")
+        quote_loader.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "研究候选门禁未通过"):
+            service.capture_tradeability(capture["snapshot_id"])
+
+        healthy = self._service().capture_market("HK")
+        self.connection.execute(
+            "DELETE FROM security_universe_tradeability_snapshots "
+            "WHERE source_snapshot_id = ?",
+            [healthy["snapshot_id"]],
+        )
+        self.connection.execute(
+            "UPDATE security_universe_classification_snapshots "
+            "SET payload_hash = 'tampered' WHERE source_snapshot_id = ?",
+            [healthy["snapshot_id"]],
+        )
+        with self.assertRaisesRegex(ValueError, "完整性校验失败"):
+            self._service().capture_tradeability(healthy["snapshot_id"])
+
+    def test_tradeability_integrity_and_coverage(self) -> None:
+        first = self._service(
+            clock=lambda: datetime(2026, 7, 23, 12, tzinfo=timezone.utc),
+        ).capture_market("HK")
+        latest = self._service().capture_market("HK")
+        self.connection.execute(
+            "DELETE FROM security_universe_tradeability_snapshots "
+            "WHERE source_snapshot_id = ?",
+            [first["snapshot_id"]],
+        )
+        service = self._service()
+        coverage = service.get_tradeability_coverage("HK")
+        item = coverage["markets"][0]
+        self.assertEqual(
+            coverage["coverage_version"],
+            TRADEABILITY_COVERAGE_VERSION,
+        )
+        self.assertEqual(coverage["source"], TRADEABILITY_SOURCE)
+        self.assertEqual(item["classification_snapshot_count"], 2)
+        self.assertEqual(item["tradeability_snapshot_count"], 1)
+        self.assertEqual(item["missing_tradeability_snapshot_count"], 1)
+        self.assertEqual(
+            item["latest"]["source_snapshot_id"], latest["snapshot_id"]
+        )
+
+        original = service.get_tradeability(latest["snapshot_id"])
+        self.connection.execute(
+            "UPDATE security_universe_tradeability_snapshots "
+            "SET tradable_count = 0 WHERE source_snapshot_id = ?",
+            [latest["snapshot_id"]],
+        )
+        metadata_tampered = service.get_tradeability(latest["snapshot_id"])
+        self.assertIn(
+            "tradeability_metadata_count_mismatch",
+            metadata_tampered["integrity_errors"],
+        )
+        self.connection.execute(
+            "UPDATE security_universe_tradeability_snapshots "
+            "SET tradable_count = 2, payload = ? WHERE source_snapshot_id = ?",
+            [json.dumps(original["payload"]), latest["snapshot_id"]],
+        )
+        self.connection.execute(
+            "UPDATE security_universe_classification_snapshots "
+            "SET payload_hash = 'tampered' WHERE source_snapshot_id = ?",
+            [latest["snapshot_id"]],
+        )
+        reference_tampered = service.get_tradeability(latest["snapshot_id"])
+        self.assertIn(
+            "classification_snapshot_integrity_invalid",
+            reference_tampered["integrity_errors"],
+        )
+        self.assertIn(
+            "classification_snapshot_hash_mismatch",
+            reference_tampered["integrity_errors"],
+        )
+
+    def test_concurrent_tradeability_insert_returns_persisted_metadata(
+        self,
+    ) -> None:
+        service = self._service()
+        capture = service.capture_market("US")
+        detail = service.get_tradeability(capture["snapshot_id"])
+        existing = {
+            key: detail[key]
+            for key in (
+                "tradeability_snapshot_id",
+                "source_snapshot_id",
+                "classification_snapshot_id",
+                "captured_at",
+                "observation_date",
+                "tradeability_version",
+                "market",
+                "source_snapshot_version",
+                "classification_version",
+                "eligible_count",
+                "observed_count",
+                "tradable_count",
+                "excluded_count",
+                "ready_for_point_in_time_universe",
+                "payload_hash",
+            )
+        }
+        self.connection.execute(
+            "DELETE FROM security_universe_tradeability_snapshots "
+            "WHERE source_snapshot_id = ?",
+            [capture["snapshot_id"]],
+        )
+        with patch.object(
+            service,
+            "_find_tradeability_summary",
+            side_effect=[None, existing],
+        ), patch.object(
+            service,
+            "_save_tradeability",
+            return_value=(existing["tradeability_snapshot_id"], False),
+        ):
+            result = service.capture_tradeability(capture["snapshot_id"])
+
+        self.assertEqual(
+            result,
+            {
+                **existing,
+                "status": "already_captured",
+                "persisted": False,
+            },
+        )
+
+    def test_failed_tradeability_retries_only_tradeability(self) -> None:
+        catalog_loader = MagicMock(side_effect=lambda market: _items(market))
+        static_loader = MagicMock(side_effect=_static_items)
+        attempts = 0
+
+        def quote_loader(symbols, include_depth=False):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("quote failed")
+            return _tradeability_items(symbols, include_depth=include_depth)
+
+        service = self._service(
+            catalog_loader=catalog_loader,
+            static_info_loader=static_loader,
+            tradeability_loader=quote_loader,
+        )
+        with patch(
+            "app.security_universe_snapshots.run_external_call",
+            side_effect=self._call_directly,
+        ):
+            first = service.capture_due()
+            second = service.capture_due()
+
+        self.assertEqual(first["captured"], [])
+        self.assertIn("quote failed", first["errors"][0]["error"])
+        self.assertEqual(second["captured"][0]["status"], "tradeability_captured")
+        self.assertEqual(catalog_loader.call_count, 1)
+        self.assertEqual(static_loader.call_count, 1)
+        self.assertEqual(attempts, 2)
+        counts = self.connection.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM security_universe_snapshots),
+                (SELECT COUNT(*) FROM security_universe_classification_snapshots),
+                (SELECT COUNT(*) FROM security_universe_tradeability_snapshots)
+            """
+        ).fetchone()
+        self.assertEqual(counts, (1, 1, 1))
 
     def test_rejects_incomplete_duplicate_and_cross_market_payloads(self) -> None:
         with self.assertRaisesRegex(ValueError, "最低完整性门槛"):
@@ -1129,6 +1498,17 @@ class SecurityUniverseSnapshotHttpTests(unittest.TestCase):
             },
             None,
         ]
+        service.get_tradeability_coverage.return_value = {
+            "coverage_version": TRADEABILITY_COVERAGE_VERSION,
+            "markets": [{"market": "US", "tradeability_snapshot_count": 1}],
+        }
+        service.get_tradeability.side_effect = [
+            {
+                "source_snapshot_id": "snapshot-1",
+                "integrity_valid": True,
+            },
+            None,
+        ]
         service.compare_snapshots.return_value = {
             "comparison_version": SNAPSHOT_COMPARISON_VERSION,
             "ready": True,
@@ -1148,6 +1528,9 @@ class SecurityUniverseSnapshotHttpTests(unittest.TestCase):
             classification_coverage = asyncio.run(
                 get_security_universe_classification_coverage("US")
             )
+            tradeability_coverage = asyncio.run(
+                get_security_universe_tradeability_coverage("US")
+            )
             comparison = asyncio.run(
                 compare_security_universe_snapshots(
                     "snapshot-0",
@@ -1161,12 +1544,17 @@ class SecurityUniverseSnapshotHttpTests(unittest.TestCase):
             classification = asyncio.run(
                 get_security_universe_classification("snapshot-1")
             )
+            tradeability = asyncio.run(
+                get_security_universe_tradeability("snapshot-1")
+            )
             with self.assertRaises(HTTPException) as raised:
                 asyncio.run(get_security_universe_snapshot("missing"))
             with self.assertRaises(HTTPException) as classification_raised:
                 asyncio.run(
                     get_security_universe_classification("missing")
                 )
+            with self.assertRaises(HTTPException) as tradeability_raised:
+                asyncio.run(get_security_universe_tradeability("missing"))
 
         paths = [route.path for route in router.routes]
         self.assertIn(
@@ -1191,6 +1579,15 @@ class SecurityUniverseSnapshotHttpTests(unittest.TestCase):
         )
         self.assertIn(
             "/api/stock-picker/security-universe-classifications/"
+            "{source_snapshot_id}",
+            paths,
+        )
+        self.assertIn(
+            "/api/stock-picker/security-universe-tradeability/coverage",
+            paths,
+        )
+        self.assertIn(
+            "/api/stock-picker/security-universe-tradeability/"
             "{source_snapshot_id}",
             paths,
         )
@@ -1227,14 +1624,23 @@ class SecurityUniverseSnapshotHttpTests(unittest.TestCase):
             ],
             1,
         )
+        self.assertEqual(
+            tradeability_coverage["markets"][0][
+                "tradeability_snapshot_count"
+            ],
+            1,
+        )
         self.assertEqual(comparison["added_count"], 1)
         self.assertTrue(detail["integrity_valid"])
         self.assertTrue(classification["integrity_valid"])
+        self.assertTrue(tradeability["integrity_valid"])
         self.assertEqual(raised.exception.status_code, 404)
         self.assertEqual(classification_raised.exception.status_code, 404)
+        self.assertEqual(tradeability_raised.exception.status_code, 404)
         service.get_history.assert_called_once_with("US", 5)
         service.get_coverage.assert_called_once_with("US")
         service.get_classification_coverage.assert_called_once_with("US")
+        service.get_tradeability_coverage.assert_called_once_with("US")
         service.compare_snapshots.assert_called_once_with(
             "snapshot-0",
             "snapshot-1",
