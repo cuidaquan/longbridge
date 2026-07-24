@@ -151,6 +151,7 @@ class ScreenerSearchRequest(BaseModel):
     strategy_id: int = Field(gt=0)
     page: int = Field(default=0, ge=0, le=10000)
     size: int = Field(default=20, ge=1, le=100)
+    scan_pages: int = Field(default=1, ge=1, le=5)
     include_indexes: bool = True
     filters: Optional[ScreenerIndexFilters] = None
     target_direction: Literal["LONG", "SHORT"] = "LONG"
@@ -478,6 +479,7 @@ async def search_screener_candidates(request: ScreenerSearchRequest):
             strategy_id=request.strategy_id,
             page=request.page,
             size=request.size,
+            scan_pages=request.scan_pages,
             filters=(
                 request.filters.model_dump(exclude_none=True)
                 if request.filters

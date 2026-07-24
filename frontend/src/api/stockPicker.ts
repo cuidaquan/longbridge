@@ -178,6 +178,7 @@ export interface ScreenerStrategiesResponse {
 
 export interface ScreenerCandidate {
   rank: number;
+  source_page: number;
   symbol: string;
   name: string;
   market: ScreenerMarket;
@@ -310,6 +311,18 @@ export interface ScreenerSearchResponse {
   size: number;
   total: number;
   has_more: boolean;
+  scan: {
+    mode: 'single_page' | 'bounded';
+    requested_pages: number;
+    pages_scanned: number;
+    first_page: number;
+    last_page: number;
+    next_page: number | null;
+    candidates_scanned: number;
+    candidates_returned: number;
+    duplicates_removed: number;
+    stopped_reason: 'page_limit' | 'source_exhausted';
+  };
   enrichment: {
     status: 'available' | 'fallback' | 'disabled';
     error?: string;
@@ -317,7 +330,7 @@ export interface ScreenerSearchResponse {
   relative_strength: {
     benchmark_symbol: string;
     target_direction: 'LONG' | 'SHORT';
-    industry_basis: 'current_page_industry_median';
+    industry_basis: 'current_page_industry_median' | 'source_page_industry_median';
   };
   short_risk: {
     status: 'available' | 'fallback' | 'disabled' | 'not_applicable';
@@ -827,6 +840,7 @@ export async function searchScreenerCandidates(params: {
   strategyId: number;
   page?: number;
   size?: number;
+  scanPages?: number;
   includeIndexes?: boolean;
   filters?: ScreenerIndexFilters;
   targetDirection?: 'LONG' | 'SHORT';
@@ -848,6 +862,7 @@ export async function searchScreenerCandidates(params: {
       strategy_id: params.strategyId,
       page: params.page ?? 0,
       size: params.size ?? 20,
+      scan_pages: params.scanPages ?? 1,
       include_indexes: params.includeIndexes ?? true,
       filters: params.filters,
       target_direction: params.targetDirection ?? 'LONG',

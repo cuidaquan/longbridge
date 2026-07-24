@@ -2643,6 +2643,7 @@ function StockDiscoveryDialog({
   const [includeFundamentalDetails, setIncludeFundamentalDetails] = useState(false);
   const [includeMarginDetails, setIncludeMarginDetails] = useState(false);
   const [includeShortCapacity, setIncludeShortCapacity] = useState(false);
+  const [scanPages, setScanPages] = useState(1);
   const [filterInputs, setFilterInputs] = useState({
     min_turnover: '',
     min_market_value: '',
@@ -2725,6 +2726,7 @@ function StockDiscoveryDialog({
         strategyId: selectedStrategy.id,
         page,
         size: 20,
+        scanPages,
         filters,
         targetDirection: poolType,
         includeTradeability: true,
@@ -3003,6 +3005,43 @@ function StockDiscoveryDialog({
           <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
             <input
               type="checkbox"
+              checked={scanPages > 1}
+              onChange={(event) => {
+                setScanPages(event.target.checked ? 3 : 1);
+                setResult(null);
+                setSelectedSymbols(new Set());
+              }}
+              className="mt-0.5 h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500"
+            />
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm text-slate-700 dark:text-slate-300">
+                跨页扫描
+              </span>
+              <span className="block text-xs text-slate-500">
+                按上游顺序逐页过滤，单次最多处理 100 只
+              </span>
+            </span>
+            {scanPages > 1 && (
+              <select
+                aria-label="跨页扫描页数"
+                value={scanPages}
+                onClick={(event) => event.stopPropagation()}
+                onChange={(event) => {
+                  setScanPages(Number(event.target.value));
+                  setResult(null);
+                  setSelectedSymbols(new Set());
+                }}
+                className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200"
+              >
+                <option value={2}>2 页</option>
+                <option value={3}>3 页</option>
+                <option value={5}>5 页</option>
+              </select>
+            )}
+          </label>
+          <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+            <input
+              type="checkbox"
               checked={includeFundamentalDetails}
               onChange={(event) => {
                 setIncludeFundamentalDetails(event.target.checked);
@@ -3158,11 +3197,14 @@ function StockDiscoveryDialog({
             <div className="mb-2 flex items-center justify-between gap-3">
               <div>
                 <p className="text-sm text-slate-600 dark:text-slate-400">
-                  第 {result.page + 1} 页，共 {result.total} 个候选；已选择 {selectedCount} 个
+                  {result.scan.mode === 'single_page'
+                    ? `第 ${result.page + 1} 页`
+                    : `扫描第 ${result.scan.first_page + 1}–${result.scan.last_page + 1} 页`}
+                  ，共 {result.total} 个上游候选；已选择 {selectedCount} 个
                 </p>
                 <p className="text-xs text-slate-500">
                   市场基准 {result.relative_strength.benchmark_symbol}；
-                  行业 RS 为本页同行中位数差
+                  行业 RS 为{result.scan.pages_scanned === 1 ? '本页' : '各来源页'}同行中位数差
                 </p>
                 <p className="text-xs text-slate-500">
                   已排除非正常交易标的；点差与盘口仅在设置对应阈值时请求，
@@ -3170,8 +3212,16 @@ function StockDiscoveryDialog({
                 </p>
                 {result.filters.excluded > 0 && (
                   <p className="text-xs text-amber-600 dark:text-amber-400">
-                    本页按候选约束过滤 {result.filters.excluded} 只，
+                    {result.scan.mode === 'single_page' ? '本页' : '扫描范围'}按候选约束过滤 {result.filters.excluded} 只，
                     保留 {result.filters.after}/{result.filters.before} 只
+                  </p>
+                )}
+                {result.scan.mode === 'bounded' && (
+                  <p className="text-xs text-slate-500">
+                    实际扫描 {result.scan.candidates_scanned} 只，返回 {result.scan.candidates_returned} 只；
+                    {result.scan.stopped_reason === 'source_exhausted'
+                      ? '已到达上游末页'
+                      : '已达到本次页数上限'}
                   </p>
                 )}
               </div>
@@ -3193,7 +3243,7 @@ function StockDiscoveryDialog({
                   result.items.length > 0
                   && selectedCount === result.items.length
                     ? '取消全选'
-                    : '全选本页'
+                    : result.scan.mode === 'single_page' ? '全选本页' : '全选结果'
                 }
               </button>
             </div>
@@ -3434,7 +3484,7 @@ function StockDiscoveryDialog({
                   type="button"
                   size="sm"
                   variant="secondary"
-                  onClick={() => runSearch(result.page - 1)}
+                  onClick={() => runSearch(Math.max(0, result.page - result.scan.requested_pages))}
                   disabled={searching || result.page === 0}
                 >
                   上一页
@@ -3443,8 +3493,12 @@ function StockDiscoveryDialog({
                   type="button"
                   size="sm"
                   variant="secondary"
-                  onClick={() => runSearch(result.page + 1)}
-                  disabled={searching || !result.has_more}
+                  onClick={() => {
+                    if (result.scan.next_page != null) {
+                      runSearch(result.scan.next_page);
+                    }
+                  }}
+                  disabled={searching || result.scan.next_page == null}
                 >
                   下一页
                 </Button>

@@ -85,6 +85,8 @@ MARGIN_FILTER_KEYS = {
 SHORT_CAPACITY_FILTER_KEYS = {
     "min_short_selling_quantity",
 }
+MAX_SCAN_PAGES = 5
+MAX_SCAN_CANDIDATES = 100
 
 
 def _retry_candidate_batch(error: BaseException) -> bool:
@@ -231,6 +233,68 @@ class StockScreenerService:
         }
 
     def search(
+        self,
+        market: str,
+        strategy_id: int,
+        page: int = 0,
+        size: int = 20,
+        filters: Optional[Dict[str, Any]] = None,
+        include_indexes: bool = True,
+        target_direction: str = "LONG",
+        benchmark_symbol: Optional[str] = None,
+        include_short_risk: bool = True,
+        include_tradeability: bool = True,
+        require_normal_trade_status: bool = True,
+        include_fundamentals: bool = False,
+        include_margin_requirements: bool = False,
+        include_short_capacity: bool = False,
+        fundamental_event_window_days: int = 30,
+        include_corporate_actions: bool = False,
+        scan_pages: int = 1,
+    ) -> Dict[str, Any]:
+        if page < 0:
+            raise ValueError("page 不能小于 0")
+        if not 1 <= size <= 100:
+            raise ValueError("size 必须在 1～100 之间")
+        if isinstance(scan_pages, bool) or not isinstance(scan_pages, int):
+            raise ValueError("scan_pages 必须是整数")
+        if not 1 <= scan_pages <= MAX_SCAN_PAGES:
+            raise ValueError(f"scan_pages 必须在 1～{MAX_SCAN_PAGES} 之间")
+        if page + scan_pages - 1 > 10000:
+            raise ValueError("跨页扫描结束页不能大于 10000")
+        if size * scan_pages > MAX_SCAN_CANDIDATES:
+            raise ValueError(
+                "size 与 scan_pages 的乘积不能超过 "
+                f"{MAX_SCAN_CANDIDATES}"
+            )
+
+        page_results: List[Dict[str, Any]] = []
+        for current_page in range(page, page + scan_pages):
+            page_result = self._search_single_page(
+                market=market,
+                strategy_id=strategy_id,
+                page=current_page,
+                size=size,
+                filters=filters,
+                include_indexes=include_indexes,
+                target_direction=target_direction,
+                benchmark_symbol=benchmark_symbol,
+                include_short_risk=include_short_risk,
+                include_tradeability=include_tradeability,
+                require_normal_trade_status=require_normal_trade_status,
+                include_fundamentals=include_fundamentals,
+                include_margin_requirements=include_margin_requirements,
+                include_short_capacity=include_short_capacity,
+                fundamental_event_window_days=fundamental_event_window_days,
+                include_corporate_actions=include_corporate_actions,
+            )
+            page_results.append(page_result)
+            if not page_result["has_more"]:
+                break
+
+        return self._combine_page_results(page_results, scan_pages)
+
+    def _search_single_page(
         self,
         market: str,
         strategy_id: int,
@@ -798,6 +862,105 @@ class StockScreenerService:
             "items": candidates,
         }
 
+    @staticmethod
+    def _combine_page_results(
+        page_results: List[Dict[str, Any]],
+        requested_pages: int,
+    ) -> Dict[str, Any]:
+        first_result = page_results[0]
+        last_result = page_results[-1]
+        combined = dict(first_result)
+
+        items: List[Dict[str, Any]] = []
+        seen_symbols = set()
+        duplicates_removed = 0
+        exclusion_reasons: Dict[str, int] = {}
+        before_count = 0
+        excluded_count = 0
+
+        for page_result in page_results:
+            page_number = int(page_result["page"])
+            page_filters = page_result["filters"]
+            before_count += int(page_filters["before"])
+            excluded_count += int(page_filters["excluded"])
+            for reason, count in page_filters["reasons"].items():
+                exclusion_reasons[reason] = (
+                    exclusion_reasons.get(reason, 0) + int(count)
+                )
+            for candidate in page_result["items"]:
+                symbol = candidate["symbol"]
+                if symbol in seen_symbols:
+                    duplicates_removed += 1
+                    continue
+                seen_symbols.add(symbol)
+                item = dict(candidate)
+                item["source_page"] = page_number
+                items.append(item)
+
+        if duplicates_removed:
+            exclusion_reasons["duplicate_symbol"] = duplicates_removed
+        excluded_count += duplicates_removed
+
+        for status_key in (
+            "enrichment",
+            "short_risk",
+            "tradeability",
+            "fundamentals",
+            "margin_requirements",
+            "short_capacity",
+        ):
+            combined[status_key] = StockScreenerService._combine_status(
+                [page_result[status_key] for page_result in page_results]
+            )
+
+        pages_scanned = len(page_results)
+        has_more = bool(last_result["has_more"])
+        combined["has_more"] = has_more
+        combined["items"] = items
+        combined["filters"] = {
+            "applied": first_result["filters"]["applied"],
+            "before": before_count,
+            "after": len(items),
+            "excluded": excluded_count,
+            "reasons": exclusion_reasons,
+        }
+        combined["relative_strength"] = {
+            **first_result["relative_strength"],
+            "industry_basis": (
+                "current_page_industry_median"
+                if pages_scanned == 1
+                else "source_page_industry_median"
+            ),
+        }
+        combined["scan"] = {
+            "mode": "single_page" if requested_pages == 1 else "bounded",
+            "requested_pages": requested_pages,
+            "pages_scanned": pages_scanned,
+            "first_page": int(first_result["page"]),
+            "last_page": int(last_result["page"]),
+            "next_page": int(last_result["page"]) + 1 if has_more else None,
+            "candidates_scanned": before_count,
+            "candidates_returned": len(items),
+            "duplicates_removed": duplicates_removed,
+            "stopped_reason": "page_limit" if has_more else "source_exhausted",
+        }
+        return combined
+
+    @staticmethod
+    def _combine_status(statuses: List[Dict[str, Any]]) -> Dict[str, Any]:
+        combined = dict(statuses[0])
+        fallback = next(
+            (status for status in statuses if status.get("status") == "fallback"),
+            None,
+        )
+        if fallback is not None:
+            combined["status"] = "fallback"
+            combined["error"] = fallback.get("error")
+        elif any(status.get("status") == "available" for status in statuses):
+            combined["status"] = "available"
+            combined["error"] = None
+        return combined
+
     def _normalize_filters(self, filters: Dict[str, Any]) -> Dict[str, float]:
         supported = {
             "min_turnover": (0, None),
@@ -1184,6 +1347,8 @@ class StockScreenerService:
         candidates: List[Dict[str, Any]] = []
         seen_symbols = set()
         for record in records:
+            if len(candidates) >= size:
+                break
             symbol = self._candidate_symbol(record, default_market)
             if not symbol:
                 continue

@@ -178,6 +178,10 @@ class StockScreenerServiceTest(unittest.TestCase):
         )
         self.assertEqual(result["items"][0]["indicators"]["pettm"], "31.4")
         self.assertEqual(result["items"][1]["indicators"]["pbmrq"], 10.2)
+        self.assertEqual(result["items"][0]["source_page"], 1)
+        self.assertEqual(result["scan"]["mode"], "single_page")
+        self.assertEqual(result["scan"]["pages_scanned"], 1)
+        self.assertIsNone(result["scan"]["next_page"])
 
     def test_search_supports_nested_payload_and_explicit_has_more(self) -> None:
         context = MagicMock()
@@ -203,6 +207,190 @@ class StockScreenerServiceTest(unittest.TestCase):
         self.assertEqual(result["items"][0]["name"], "腾讯控股")
         self.assertEqual(result["items"][0]["indicators"]["marketcap"], "3.8T")
         self.assertTrue(result["has_more"])
+
+    def test_bounded_scan_preserves_order_deduplicates_and_stops_at_end(self) -> None:
+        context = MagicMock()
+
+        def search_page(_market, _strategy_id, _conditions, _show, page, _size):
+            pages = {
+                0: {
+                    "total": 6,
+                    "has_more": True,
+                    "items": [
+                        {"symbol": "AAA.US", "name": "AAA"},
+                        {"symbol": "BBB.US", "name": "BBB"},
+                    ],
+                },
+                1: {
+                    "total": 6,
+                    "has_more": True,
+                    "items": [
+                        {"symbol": "BBB.US", "name": "BBB duplicate"},
+                        {"symbol": "CCC.US", "name": "CCC"},
+                    ],
+                },
+                2: {
+                    "total": 6,
+                    "has_more": False,
+                    "items": [{"symbol": "DDD.US", "name": "DDD"}],
+                },
+            }
+            return _Response(pages[page])
+
+        context.screener_search.side_effect = search_page
+        fundamental_loader = MagicMock()
+        margin_loader = MagicMock()
+        short_capacity_loader = MagicMock()
+        service = _ServiceWithContext(
+            context,
+            fundamental_loader=fundamental_loader,
+            margin_loader=margin_loader,
+            short_capacity_loader=short_capacity_loader,
+        )
+
+        result = service.search(
+            "US",
+            101,
+            size=20,
+            scan_pages=5,
+            include_indexes=False,
+            include_tradeability=False,
+            require_normal_trade_status=False,
+        )
+
+        self.assertEqual(
+            [item["symbol"] for item in result["items"]],
+            ["AAA.US", "BBB.US", "CCC.US", "DDD.US"],
+        )
+        self.assertEqual(
+            [item["source_page"] for item in result["items"]],
+            [0, 0, 1, 2],
+        )
+        self.assertEqual(result["filters"]["before"], 5)
+        self.assertEqual(result["filters"]["after"], 4)
+        self.assertEqual(result["filters"]["excluded"], 1)
+        self.assertEqual(result["filters"]["reasons"], {"duplicate_symbol": 1})
+        self.assertEqual(result["relative_strength"]["industry_basis"], "source_page_industry_median")
+        self.assertEqual(result["scan"], {
+            "mode": "bounded",
+            "requested_pages": 5,
+            "pages_scanned": 3,
+            "first_page": 0,
+            "last_page": 2,
+            "next_page": None,
+            "candidates_scanned": 5,
+            "candidates_returned": 4,
+            "duplicates_removed": 1,
+            "stopped_reason": "source_exhausted",
+        })
+        self.assertEqual(context.screener_search.call_count, 3)
+        fundamental_loader.assert_not_called()
+        margin_loader.assert_not_called()
+        short_capacity_loader.assert_not_called()
+
+    def test_bounded_scan_aggregates_filters_and_exposes_next_page(self) -> None:
+        context = MagicMock()
+
+        def search_page(_market, _strategy_id, _conditions, _show, page, _size):
+            return _Response({
+                "total": 8,
+                "has_more": True,
+                "items": [
+                    {"symbol": f"FAIL{page}.US", "name": "Fail"},
+                    {"symbol": f"PASS{page}.US", "name": "Pass"},
+                ],
+            })
+
+        def load_indexes(symbols):
+            result = {"SPY.US": {}}
+            for symbol in symbols:
+                if symbol != "SPY.US":
+                    result[symbol] = {
+                        "turnover": 100 if symbol.startswith("PASS") else 1,
+                    }
+            return result
+
+        context.screener_search.side_effect = search_page
+        service = _ServiceWithContext(context, index_loader=load_indexes)
+
+        result = service.search(
+            "US",
+            101,
+            size=2,
+            scan_pages=2,
+            filters={"min_turnover": 50},
+            include_tradeability=False,
+            require_normal_trade_status=False,
+        )
+
+        self.assertEqual(
+            [item["symbol"] for item in result["items"]],
+            ["PASS0.US", "PASS1.US"],
+        )
+        self.assertEqual(result["filters"]["before"], 4)
+        self.assertEqual(result["filters"]["after"], 2)
+        self.assertEqual(result["filters"]["excluded"], 2)
+        self.assertEqual(result["filters"]["reasons"], {"below_min_turnover": 2})
+        self.assertEqual(result["scan"]["next_page"], 2)
+        self.assertEqual(result["scan"]["stopped_reason"], "page_limit")
+        self.assertTrue(result["has_more"])
+
+    def test_scan_caps_an_overfilled_upstream_page_to_requested_size(self) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "total": 3,
+            "has_more": False,
+            "items": [
+                {"symbol": "AAA.US", "name": "AAA"},
+                {"symbol": "BBB.US", "name": "BBB"},
+                {"symbol": "CCC.US", "name": "CCC"},
+            ],
+        })
+        service = _ServiceWithContext(context)
+
+        result = service.search(
+            "US",
+            101,
+            size=2,
+            include_indexes=False,
+            include_tradeability=False,
+            require_normal_trade_status=False,
+        )
+
+        self.assertEqual(
+            [item["symbol"] for item in result["items"]],
+            ["AAA.US", "BBB.US"],
+        )
+        self.assertEqual(result["scan"]["candidates_scanned"], 2)
+
+    def test_bounded_scan_fails_closed_when_a_later_page_fails(self) -> None:
+        context = MagicMock()
+        context.screener_search.side_effect = [
+            _Response({
+                "total": 4,
+                "has_more": True,
+                "items": [{"symbol": "AAA.US", "name": "AAA"}],
+            }),
+            RuntimeError("second page unavailable"),
+        ]
+        service = _ServiceWithContext(context)
+
+        with self.assertRaisesRegex(LongbridgeAPIError, "主动选股失败"):
+            service.search(
+                "US",
+                101,
+                size=20,
+                scan_pages=2,
+                include_indexes=False,
+                include_tradeability=False,
+                require_normal_trade_status=False,
+            )
+
+        self.assertEqual(context.screener_search.call_count, 3)
+        self.assertEqual(
+            [call.args[4] for call in context.screener_search.call_args_list],
+            [0, 1, 1],
+        )
 
     def test_search_normalizes_real_sdk_counter_ids(self) -> None:
         context = MagicMock()
@@ -262,6 +450,12 @@ class StockScreenerServiceTest(unittest.TestCase):
             service.search("US", 0)
         with self.assertRaisesRegex(ValueError, "1～100"):
             service.search("US", 1, size=101)
+        with self.assertRaisesRegex(ValueError, "1～5"):
+            service.search("US", 1, scan_pages=6)
+        with self.assertRaisesRegex(ValueError, "结束页不能大于 10000"):
+            service.search("US", 1, page=9999, scan_pages=3)
+        with self.assertRaisesRegex(ValueError, "乘积不能超过 100"):
+            service.search("US", 1, size=100, scan_pages=2)
         with self.assertRaisesRegex(ValueError, "有限数字"):
             service.search("US", 1, filters={"min_turnover": float("nan")})
         with self.assertRaisesRegex(
@@ -1068,6 +1262,18 @@ class StockScreenerRouteTest(unittest.TestCase):
             "size": 20,
             "total": 1,
             "has_more": False,
+            "scan": {
+                "mode": "bounded",
+                "requested_pages": 3,
+                "pages_scanned": 1,
+                "first_page": 0,
+                "last_page": 0,
+                "next_page": None,
+                "candidates_scanned": 1,
+                "candidates_returned": 1,
+                "duplicates_removed": 0,
+                "stopped_reason": "source_exhausted",
+            },
             "enrichment": {"status": "available", "error": None},
             "relative_strength": {
                 "benchmark_symbol": "SPY.US",
@@ -1084,6 +1290,7 @@ class StockScreenerRouteTest(unittest.TestCase):
             },
             "items": [{
                 "rank": 1,
+                "source_page": 0,
                 "symbol": "AAPL.US",
                 "name": "Apple",
                 "market": "US",
@@ -1123,6 +1330,7 @@ class StockScreenerRouteTest(unittest.TestCase):
                         "strategy_id": 101,
                         "page": 0,
                         "size": 20,
+                        "scan_pages": 3,
                         "filters": {
                             "min_turnover": 1000000,
                             "max_spread_bps": 50,
@@ -1142,6 +1350,14 @@ class StockScreenerRouteTest(unittest.TestCase):
                     "/api/stock-picker/screener/search",
                     json={"market": "US", "strategy_id": 0},
                 )
+                invalid_scan = client.post(
+                    "/api/stock-picker/screener/search",
+                    json={
+                        "market": "US",
+                        "strategy_id": 101,
+                        "scan_pages": 6,
+                    },
+                )
             finally:
                 client.close()
 
@@ -1149,13 +1365,16 @@ class StockScreenerRouteTest(unittest.TestCase):
         self.assertEqual(strategies.json()["items"][0]["id"], 101)
         self.assertEqual(search.status_code, 200)
         self.assertEqual(search.json()["items"][0]["symbol"], "AAPL.US")
+        self.assertEqual(search.json()["scan"]["requested_pages"], 3)
         self.assertEqual(invalid.status_code, 422)
+        self.assertEqual(invalid_scan.status_code, 422)
         screener.list_strategies.assert_called_once_with("US", False)
         screener.search.assert_called_once_with(
             market="US",
             strategy_id=101,
             page=0,
             size=20,
+            scan_pages=3,
             filters={
                 "min_turnover": 1000000.0,
                 "max_spread_bps": 50.0,
