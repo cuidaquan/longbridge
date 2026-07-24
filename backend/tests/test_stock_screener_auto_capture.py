@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import json
 import unittest
 from unittest.mock import MagicMock, patch
@@ -16,7 +17,10 @@ from app.stock_screener_auto_capture import (
     StockScreenerAutoCaptureService,
 )
 from app.stock_screener import RELATIVE_STRENGTH_VERSION
-from app.stock_screener_snapshots import StockScreenerSnapshotService
+from app.stock_screener_snapshots import (
+    LEGACY_RELATIVE_STRENGTH_VERSION,
+    StockScreenerSnapshotService,
+)
 
 
 class _ConnectionContext:
@@ -163,6 +167,58 @@ class StockScreenerAutoCaptureServiceTest(unittest.TestCase):
             **kwargs,
         )
 
+    def _mark_snapshot_legacy(self, snapshot_id: str) -> None:
+        stored = self.connection.execute(
+            """
+            SELECT payload
+            FROM stock_screener_scan_snapshots
+            WHERE snapshot_id = ?
+            """,
+            [snapshot_id],
+        ).fetchone()[0]
+        payload = json.loads(stored)
+        payload["capture"]["relative_strength_version"] = (
+            LEGACY_RELATIVE_STRENGTH_VERSION
+        )
+        payload["metric_basis"].pop("version", None)
+        payload["metric_basis"]["industry_basis"] = (
+            "scan_range_industry_median"
+        )
+        payload["metric_basis"].pop("industry_membership_source", None)
+        payload["metric_basis"].pop("minimum_industry_peers", None)
+        payload["metric_basis"].pop(
+            "historical_industry_membership",
+            None,
+        )
+        payload["capture"].pop("payload_hash")
+        payload_hash = sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        payload["capture"]["payload_hash"] = payload_hash
+        self.connection.execute(
+            """
+            UPDATE stock_screener_scan_snapshots
+            SET payload_hash = ?, payload = ?
+            WHERE snapshot_id = ?
+            """,
+            [
+                payload_hash,
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                snapshot_id,
+            ],
+        )
+
     def test_due_capture_replays_lightweight_template_and_is_idempotent(self) -> None:
         self.snapshot_service.capture(_payload())
         searcher = MagicMock(return_value={
@@ -189,6 +245,88 @@ class StockScreenerAutoCaptureServiceTest(unittest.TestCase):
         self.assertNotIn("require_normal_trade_status", arguments["filters"])
         self.assertEqual(status["status_counts"], {"succeeded": 1})
         self.assertEqual(status["runs"][0]["snapshot_id"], "auto-snapshot")
+
+    def test_legacy_template_claims_run_under_current_policy(self) -> None:
+        captured = self.snapshot_service.capture(_payload())
+        self._mark_snapshot_legacy(captured["snapshot_id"])
+        legacy_policy_hash = self.snapshot_service.get_coverage(
+            current_time=self.run_time,
+        )["groups"][0]["policy_hash"]
+        template = self.snapshot_service.get_auto_capture_templates()[0]
+        searcher = MagicMock(return_value={
+            "snapshot": {
+                "status": "captured",
+                "snapshot_id": "migrated-snapshot",
+            },
+        })
+
+        result = self._service(searcher=searcher).capture_due()
+
+        self.assertNotEqual(template["policy_hash"], legacy_policy_hash)
+        self.assertEqual(
+            result["captured"][0]["policy_hash"],
+            template["policy_hash"],
+        )
+        stored_run = self.connection.execute(
+            """
+            SELECT policy_hash, source_snapshot_id
+            FROM stock_screener_auto_capture_runs
+            """
+        ).fetchone()
+        self.assertEqual(stored_run[0], template["policy_hash"])
+        self.assertEqual(stored_run[1], captured["snapshot_id"])
+
+    def test_legacy_migration_replays_once_per_day_under_current_policy(
+        self,
+    ) -> None:
+        legacy = self.snapshot_service.capture(_payload())
+        self._mark_snapshot_legacy(legacy["snapshot_id"])
+        legacy_policy_hash = self.snapshot_service.get_coverage(
+            current_time=self.run_time,
+        )["groups"][0]["policy_hash"]
+        current_time = [self.run_time]
+        self.snapshot_service.clock = lambda: current_time[0]
+
+        def search(**kwargs) -> dict:
+            return {"snapshot": self.snapshot_service.capture(_payload())}
+
+        searcher = MagicMock(side_effect=search)
+        service = self._service(
+            searcher=searcher,
+            clock=lambda: current_time[0],
+        )
+
+        first = service.capture_due()
+        current_time[0] += timedelta(days=1)
+        second = service.capture_due()
+
+        templates = self.snapshot_service.get_auto_capture_templates()
+        coverage = self.snapshot_service.get_coverage(
+            current_time=current_time[0],
+        )
+        current_policy_hash = next(
+            group["policy_hash"]
+            for group in coverage["groups"]
+            if group["policy_hash"] != legacy_policy_hash
+        )
+        runs = service.get_status()["runs"]
+
+        self.assertEqual(searcher.call_count, 2)
+        self.assertEqual(len(first["captured"]), 1)
+        self.assertEqual(len(second["captured"]), 1)
+        self.assertEqual(len(coverage["groups"]), 2)
+        self.assertEqual(len(templates), 1)
+        self.assertEqual(templates[0]["policy_hash"], current_policy_hash)
+        self.assertEqual(
+            {run["policy_hash"] for run in runs},
+            {current_policy_hash},
+        )
+        current_group = next(
+            group
+            for group in coverage["groups"]
+            if group["policy_hash"] == current_policy_hash
+        )
+        self.assertEqual(current_group["raw_snapshot_count"], 2)
 
     def test_pre_close_and_heavy_templates_do_not_call_external_services(self) -> None:
         self.snapshot_service.capture(_payload(heavy=True))

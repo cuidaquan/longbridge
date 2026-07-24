@@ -58,6 +58,32 @@ def _canonical_json(value: Any) -> str:
     )
 
 
+def _policy_hash(
+    snapshot_version: str,
+    request: Dict[str, Any],
+    *,
+    filter_version: Optional[str],
+    relative_strength_version: Optional[str],
+) -> str:
+    strategy = request.get("strategy")
+    if not isinstance(strategy, dict):
+        strategy = {}
+    policy = {
+        key: value
+        for key, value in request.items()
+        if key not in {"market", "target_direction", "strategy"}
+    }
+    policy["strategy_source"] = strategy.get("source")
+    policy["filter_version"] = filter_version
+    policy["relative_strength_version"] = relative_strength_version
+    return sha256(
+        _canonical_json({
+            "snapshot_version": snapshot_version,
+            "policy": policy,
+        }).encode("utf-8")
+    ).hexdigest()
+
+
 class StockScreenerSnapshotService:
     def __init__(
         self,
@@ -259,7 +285,7 @@ class StockScreenerSnapshotService:
         return {**self._summary(row[:17]), "payload": json.loads(row[17])}
 
     def get_auto_capture_templates(self) -> List[Dict[str, Any]]:
-        """Return the latest intact v2 request for each saved cohort."""
+        """Return one intact request for each current replay policy."""
         with self.connection_factory() as connection:
             rows = connection.execute(
                 """
@@ -287,16 +313,22 @@ class StockScreenerSnapshotService:
             coverage = self._coverage_row(row)
             if not coverage["integrity_valid"]:
                 continue
+            payload = json.loads(row[9])
+            replay_policy_hash = _policy_hash(
+                SNAPSHOT_VERSION,
+                payload["request"],
+                filter_version=FILTER_VERSION,
+                relative_strength_version=RELATIVE_STRENGTH_VERSION,
+            )
             key = (
                 coverage["market"],
                 coverage["target_direction"],
                 coverage["strategy_id"],
-                coverage["policy_hash"],
+                replay_policy_hash,
             )
             if key in seen:
                 continue
             seen.add(key)
-            payload = json.loads(row[9])
             templates.append({
                 "source_snapshot_id": coverage["snapshot_id"],
                 "captured_at": _utc_iso(coverage["captured_at"]),
@@ -306,7 +338,7 @@ class StockScreenerSnapshotService:
                 "strategy_id": coverage["strategy_id"],
                 "strategy_name": coverage["strategy_name"],
                 "strategy_source": coverage["strategy_source"],
-                "policy_hash": coverage["policy_hash"],
+                "policy_hash": replay_policy_hash,
                 "request": payload["request"],
             })
         return templates
@@ -521,22 +553,14 @@ class StockScreenerSnapshotService:
             if not isinstance(strategy, dict):
                 integrity_reasons.append("invalid_strategy")
                 strategy = {}
-            policy = {
-                key: value
-                for key, value in request.items()
-                if key not in {"market", "target_direction", "strategy"}
-            }
-            policy["strategy_source"] = strategy.get("source")
-            policy["filter_version"] = capture.get("filter_version")
-            policy["relative_strength_version"] = capture.get(
-                "relative_strength_version"
+            policy_hash = _policy_hash(
+                row[2],
+                request,
+                filter_version=capture.get("filter_version"),
+                relative_strength_version=capture.get(
+                    "relative_strength_version"
+                ),
             )
-            policy_hash = sha256(
-                _canonical_json({
-                    "snapshot_version": row[2],
-                    "policy": policy,
-                }).encode("utf-8")
-            ).hexdigest()
             selected_from_universe = []
             for item in universe:
                 if not isinstance(item, dict):
