@@ -11,14 +11,19 @@ from fastapi import HTTPException
 
 from app.db import _run_migrations
 from app.routers.stock_picker import (
+    compare_security_universe_snapshots,
     get_security_universe_snapshot,
+    get_security_universe_snapshot_coverage,
     get_security_universe_snapshots,
     router,
 )
 from app.security_universe_snapshots import (
     CAPTURE_CLAIM_LEASE_MINUTES,
+    SNAPSHOT_COMPARISON_VERSION,
+    SNAPSHOT_COVERAGE_VERSION,
     SNAPSHOT_SOURCE,
     SNAPSHOT_VERSION,
+    SecurityUniverseSnapshotNotFoundError,
     SecurityUniverseSnapshotService,
 )
 
@@ -293,6 +298,178 @@ class SecurityUniverseSnapshotTests(unittest.TestCase):
             service.get_snapshot(" ")
         self.assertIsNone(service.get_snapshot("missing"))
 
+    def test_coverage_reports_saved_dates_and_filters_run_market(self) -> None:
+        empty = self._service().get_coverage()
+        self.assertEqual(
+            [item["market"] for item in empty["markets"]],
+            ["US", "HK", "CN"],
+        )
+        self.assertTrue(all(
+            item["snapshot_count"] == 0 for item in empty["markets"]
+        ))
+
+        first = self._service(
+            clock=lambda: datetime(
+                2026, 7, 22, 12, tzinfo=timezone.utc
+            ),
+        ).capture_market("HK")
+        latest = self._service(
+            clock=lambda: datetime(
+                2026, 7, 24, 12, tzinfo=timezone.utc
+            ),
+        ).capture_market("HK")
+        service = self._service()
+        now = datetime(2026, 7, 24, 12, tzinfo=timezone.utc)
+        service._claim_capture("US", date(2026, 7, 24), now)
+        service._claim_capture("HK", date(2026, 7, 24), now)
+
+        coverage = service.get_coverage("HK")
+        item = coverage["markets"][0]
+        us_history = service.get_history("US")
+
+        self.assertEqual(
+            coverage["coverage_version"],
+            SNAPSHOT_COVERAGE_VERSION,
+        )
+        self.assertEqual(item["snapshot_count"], 2)
+        self.assertEqual(item["observation_dates"], 2)
+        self.assertEqual(item["first_observation_date"], "2026-07-22")
+        self.assertEqual(item["latest_observation_date"], "2026-07-24")
+        self.assertEqual(item["calendar_span_days"], 3)
+        self.assertEqual(item["comparable_transitions"], 1)
+        self.assertEqual(item["latest_interval_calendar_days"], 2)
+        self.assertEqual(item["maximum_interval_calendar_days"], 2)
+        self.assertEqual(item["latest_snapshot_id"], latest["snapshot_id"])
+        self.assertEqual(item["latest_security_count"], 2)
+        self.assertFalse(item["payload_integrity_checked"])
+        self.assertNotEqual(first["snapshot_id"], latest["snapshot_id"])
+        self.assertEqual(
+            {run["market"] for run in us_history["capture_runs"]},
+            {"US"},
+        )
+        with self.assertRaisesRegex(ValueError, "US、HK 或 CN"):
+            service.get_coverage("SG")
+
+    def test_comparison_reports_changes_counts_and_bounded_details(self) -> None:
+        base = self._service(
+            clock=lambda: datetime(
+                2026, 7, 23, 12, tzinfo=timezone.utc
+            ),
+        ).capture_market("HK")
+        target_items = [
+            {
+                "symbol": "AAA.HK",
+                "name": "Alpha renamed",
+                "name_en": "Alpha Holdings",
+                "name_hk": "",
+                "market": "HK",
+            },
+            {
+                "symbol": "CCC.HK",
+                "name": "Gamma",
+                "name_en": "Gamma Inc.",
+                "name_hk": "",
+                "market": "HK",
+            },
+            {
+                "symbol": "DDD.HK",
+                "name": "Delta",
+                "name_en": "Delta Inc.",
+                "name_hk": "",
+                "market": "HK",
+            },
+        ]
+        service = self._service(
+            catalog_loader=lambda market: target_items,
+            clock=lambda: datetime(
+                2026, 7, 24, 12, tzinfo=timezone.utc
+            ),
+        )
+        target = service.capture_market("HK")
+
+        result = service.compare_snapshots(
+            base["snapshot_id"],
+            target["snapshot_id"],
+            detail_limit=1,
+        )
+        unchanged = service.compare_snapshots(
+            target["snapshot_id"],
+            target["snapshot_id"],
+        )
+
+        self.assertEqual(
+            result["comparison_version"],
+            SNAPSHOT_COMPARISON_VERSION,
+        )
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["reasons"], [])
+        self.assertEqual(result["added_count"], 2)
+        self.assertEqual(result["removed_count"], 1)
+        self.assertEqual(result["metadata_changed_count"], 1)
+        self.assertEqual(result["added"][0]["symbol"], "CCC.HK")
+        self.assertEqual(result["removed"][0]["symbol"], "BBB.HK")
+        self.assertEqual(
+            result["metadata_changed"][0]["changes"]["name"],
+            {"before": "Alpha", "after": "Alpha renamed"},
+        )
+        self.assertTrue(result["added_truncated"])
+        self.assertFalse(result["removed_truncated"])
+        self.assertFalse(result["metadata_changed_truncated"])
+        self.assertTrue(result["base"]["integrity_valid"])
+        self.assertTrue(result["target"]["integrity_valid"])
+        self.assertTrue(unchanged["ready"])
+        self.assertEqual(unchanged["added_count"], 0)
+        self.assertEqual(unchanged["removed_count"], 0)
+        self.assertEqual(unchanged["metadata_changed_count"], 0)
+
+    def test_comparison_fails_closed_for_invalid_or_cross_market_data(self) -> None:
+        base = self._service(
+            clock=lambda: datetime(
+                2026, 7, 23, 12, tzinfo=timezone.utc
+            ),
+        ).capture_market("HK")
+        service = self._service()
+        target = service.capture_market("HK")
+        us = service.capture_market("US")
+
+        cross_market = service.compare_snapshots(
+            target["snapshot_id"],
+            us["snapshot_id"],
+        )
+        self.connection.execute(
+            """
+            UPDATE security_universe_snapshots
+            SET payload = ?
+            WHERE snapshot_id = ?
+            """,
+            ["{broken", base["snapshot_id"]],
+        )
+        invalid = service.compare_snapshots(
+            base["snapshot_id"],
+            target["snapshot_id"],
+        )
+
+        self.assertFalse(cross_market["ready"])
+        self.assertEqual(cross_market["reasons"], ["market_mismatch"])
+        self.assertIsNone(cross_market["added_count"])
+        self.assertFalse(invalid["ready"])
+        self.assertEqual(
+            invalid["reasons"],
+            ["base_snapshot_integrity_invalid"],
+        )
+        self.assertIsNone(invalid["removed_count"])
+        with self.assertRaisesRegex(ValueError, "1～1000"):
+            service.compare_snapshots(
+                target["snapshot_id"],
+                target["snapshot_id"],
+                detail_limit=0,
+            )
+        with self.assertRaises(SecurityUniverseSnapshotNotFoundError):
+            service.compare_snapshots(
+                "missing",
+                target["snapshot_id"],
+            )
+
     def test_due_capture_applies_local_close_and_daily_idempotency(self) -> None:
         loader = MagicMock(side_effect=lambda market: _items(market))
         calendar = MagicMock(return_value=True)
@@ -480,6 +657,15 @@ class SecurityUniverseSnapshotHttpTests(unittest.TestCase):
             {"snapshot_id": "snapshot-1", "integrity_valid": True},
             None,
         ]
+        service.get_coverage.return_value = {
+            "coverage_version": SNAPSHOT_COVERAGE_VERSION,
+            "markets": [{"market": "US", "snapshot_count": 1}],
+        }
+        service.compare_snapshots.return_value = {
+            "comparison_version": SNAPSHOT_COMPARISON_VERSION,
+            "ready": True,
+            "added_count": 1,
+        }
         with patch(
             "app.routers.stock_picker."
             "get_security_universe_snapshot_service",
@@ -488,25 +674,85 @@ class SecurityUniverseSnapshotHttpTests(unittest.TestCase):
             history = asyncio.run(
                 get_security_universe_snapshots("US", 5)
             )
+            coverage = asyncio.run(
+                get_security_universe_snapshot_coverage("US")
+            )
+            comparison = asyncio.run(
+                compare_security_universe_snapshots(
+                    "snapshot-0",
+                    "snapshot-1",
+                    25,
+                )
+            )
             detail = asyncio.run(
                 get_security_universe_snapshot("snapshot-1")
             )
             with self.assertRaises(HTTPException) as raised:
                 asyncio.run(get_security_universe_snapshot("missing"))
 
-        paths = {route.path for route in router.routes}
+        paths = [route.path for route in router.routes]
         self.assertIn(
             "/api/stock-picker/security-universe-snapshots",
+            paths,
+        )
+        self.assertIn(
+            "/api/stock-picker/security-universe-snapshots/coverage",
+            paths,
+        )
+        self.assertIn(
+            "/api/stock-picker/security-universe-snapshots/compare",
             paths,
         )
         self.assertIn(
             "/api/stock-picker/security-universe-snapshots/{snapshot_id}",
             paths,
         )
+        self.assertLess(
+            paths.index(
+                "/api/stock-picker/security-universe-snapshots/coverage"
+            ),
+            paths.index(
+                "/api/stock-picker/security-universe-snapshots/{snapshot_id}"
+            ),
+        )
+        self.assertLess(
+            paths.index(
+                "/api/stock-picker/security-universe-snapshots/compare"
+            ),
+            paths.index(
+                "/api/stock-picker/security-universe-snapshots/{snapshot_id}"
+            ),
+        )
         self.assertEqual(history["items"][0]["snapshot_id"], "snapshot-1")
+        self.assertEqual(coverage["markets"][0]["snapshot_count"], 1)
+        self.assertEqual(comparison["added_count"], 1)
         self.assertTrue(detail["integrity_valid"])
         self.assertEqual(raised.exception.status_code, 404)
         service.get_history.assert_called_once_with("US", 5)
+        service.get_coverage.assert_called_once_with("US")
+        service.compare_snapshots.assert_called_once_with(
+            "snapshot-0",
+            "snapshot-1",
+            25,
+        )
+
+    def test_comparison_endpoint_maps_missing_snapshot_to_404(self) -> None:
+        service = MagicMock()
+        service.compare_snapshots.side_effect = (
+            SecurityUniverseSnapshotNotFoundError("missing")
+        )
+        with patch(
+            "app.routers.stock_picker."
+            "get_security_universe_snapshot_service",
+            return_value=service,
+        ), self.assertRaises(HTTPException) as raised:
+            asyncio.run(compare_security_universe_snapshots(
+                "missing",
+                "snapshot-1",
+                100,
+            ))
+
+        self.assertEqual(raised.exception.status_code, 404)
 
 
 if __name__ == "__main__":

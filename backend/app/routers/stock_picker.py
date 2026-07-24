@@ -17,6 +17,7 @@ from ..models import SecuritySearchResponse
 from ..runtime import get_runtime_metadata
 from ..security_catalog import get_security_catalog_service
 from ..security_universe_snapshots import (
+    SecurityUniverseSnapshotNotFoundError,
     get_security_universe_snapshot_service,
 )
 from ..stock_picker_backtest import get_stock_picker_backtest_service
@@ -533,6 +534,44 @@ async def get_security_universe_snapshots(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("获取证券目录快照历史失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/security-universe-snapshots/coverage")
+async def get_security_universe_snapshot_coverage(
+    market: Optional[Literal["US", "HK", "CN"]] = None,
+):
+    try:
+        return await asyncio.to_thread(
+            get_security_universe_snapshot_service().get_coverage,
+            market,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("获取证券目录快照覆盖失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/security-universe-snapshots/compare")
+async def compare_security_universe_snapshots(
+    base_snapshot_id: str = Query(min_length=1, max_length=64),
+    target_snapshot_id: str = Query(min_length=1, max_length=64),
+    detail_limit: int = Query(default=100, ge=1, le=1000),
+):
+    try:
+        return await asyncio.to_thread(
+            get_security_universe_snapshot_service().compare_snapshots,
+            base_snapshot_id,
+            target_snapshot_id,
+            detail_limit,
+        )
+    except SecurityUniverseSnapshotNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("比较证券目录快照失败: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

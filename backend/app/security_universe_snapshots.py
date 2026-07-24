@@ -20,6 +20,8 @@ from .stock_picker_ai_snapshots import sanitize_error
 
 SNAPSHOT_VERSION = "security-universe-snapshot-v1"
 SNAPSHOT_SOURCE = "longbridge-official-security-list"
+SNAPSHOT_COVERAGE_VERSION = "security-universe-coverage-v1"
+SNAPSHOT_COMPARISON_VERSION = "security-universe-comparison-v1"
 SOURCE_PATH = "/v1/quote/get_security_list"
 SOURCE_CATEGORY = "Overnight"
 SUPPORTED_MARKETS = ("US", "HK", "CN")
@@ -36,6 +38,13 @@ MINIMUM_SECURITY_COUNTS = {
 AUTO_CAPTURE_MARKETS = ("US", "HK")
 AUTO_CAPTURE_LOCAL_HOUR = 17
 CAPTURE_CLAIM_LEASE_MINUTES = 30
+COMPARISON_METADATA_FIELDS = ("name", "name_en", "name_hk")
+
+
+class SecurityUniverseSnapshotNotFoundError(LookupError):
+    def __init__(self, snapshot_id: str) -> None:
+        super().__init__(f"证券目录快照不存在: {snapshot_id}")
+        self.snapshot_id = snapshot_id
 
 
 class SecurityUniverseSnapshotService:
@@ -253,6 +262,12 @@ class SecurityUniverseSnapshotService:
             if normalized_market
             else [int(limit)]
         )
+        run_where = "WHERE market = ?" if normalized_market else ""
+        run_parameters: List[Any] = (
+            [normalized_market, int(limit)]
+            if normalized_market
+            else [int(limit)]
+        )
         with self.connection_factory() as connection:
             rows = connection.execute(
                 f"""
@@ -267,15 +282,16 @@ class SecurityUniverseSnapshotService:
                 parameters,
             ).fetchall()
             run_rows = connection.execute(
-                """
+                f"""
                 SELECT market, observation_date, status, claim_id,
                        started_at, completed_at, snapshot_id,
                        security_count, error
                 FROM security_universe_snapshot_runs
+                {run_where}
                 ORDER BY started_at DESC, market
                 LIMIT ?
                 """,
-                [int(limit)],
+                run_parameters,
             ).fetchall()
         return {
             "snapshot_version": SNAPSHOT_VERSION,
@@ -283,6 +299,194 @@ class SecurityUniverseSnapshotService:
             "items": [self._summary(row) for row in rows],
             "capture_runs": [self._run_summary(row) for row in run_rows],
         }
+
+    def get_coverage(
+        self,
+        market: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        normalized_market = (
+            self._normalize_market(market) if market else None
+        )
+        where = "AND market = ?" if normalized_market else ""
+        parameters: List[Any] = [SNAPSHOT_VERSION]
+        if normalized_market:
+            parameters.append(normalized_market)
+        with self.connection_factory() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT snapshot_id, captured_at, observation_date,
+                       snapshot_version, market, source, source_query,
+                       security_count, payload_hash
+                FROM security_universe_snapshots
+                WHERE snapshot_version = ?
+                {where}
+                ORDER BY market, observation_date, captured_at
+                """,
+                parameters,
+            ).fetchall()
+
+        markets = (
+            [normalized_market]
+            if normalized_market
+            else list(SUPPORTED_MARKETS)
+        )
+        grouped: Dict[str, List[Dict[str, Any]]] = {
+            item_market: [] for item_market in markets
+        }
+        for row in rows:
+            summary = self._summary(row)
+            grouped[summary["market"]].append(summary)
+
+        coverage = []
+        for item_market in markets:
+            snapshots = grouped[item_market]
+            observation_dates = [
+                date.fromisoformat(item["observation_date"])
+                for item in snapshots
+            ]
+            intervals = [
+                (current - previous).days
+                for previous, current in zip(
+                    observation_dates,
+                    observation_dates[1:],
+                )
+            ]
+            latest = snapshots[-1] if snapshots else None
+            first_date = observation_dates[0] if observation_dates else None
+            latest_date = observation_dates[-1] if observation_dates else None
+            coverage.append({
+                "market": item_market,
+                "snapshot_count": len(snapshots),
+                "observation_dates": len(set(observation_dates)),
+                "first_observation_date": (
+                    first_date.isoformat() if first_date else None
+                ),
+                "latest_observation_date": (
+                    latest_date.isoformat() if latest_date else None
+                ),
+                "calendar_span_days": (
+                    (latest_date - first_date).days + 1
+                    if first_date and latest_date
+                    else 0
+                ),
+                "comparable_transitions": max(0, len(snapshots) - 1),
+                "latest_interval_calendar_days": (
+                    intervals[-1] if intervals else None
+                ),
+                "maximum_interval_calendar_days": (
+                    max(intervals) if intervals else None
+                ),
+                "latest_snapshot_id": (
+                    latest["snapshot_id"] if latest else None
+                ),
+                "latest_security_count": (
+                    latest["security_count"] if latest else 0
+                ),
+                "latest_payload_hash": (
+                    latest["payload_hash"] if latest else None
+                ),
+                "payload_integrity_checked": False,
+            })
+        return {
+            "coverage_version": SNAPSHOT_COVERAGE_VERSION,
+            "snapshot_version": SNAPSHOT_VERSION,
+            "source": SNAPSHOT_SOURCE,
+            "markets": coverage,
+        }
+
+    def compare_snapshots(
+        self,
+        base_snapshot_id: str,
+        target_snapshot_id: str,
+        detail_limit: int = 100,
+    ) -> Dict[str, Any]:
+        if not 1 <= int(detail_limit) <= 1000:
+            raise ValueError("detail_limit 必须在 1～1000 之间")
+        base = self.get_snapshot(base_snapshot_id)
+        if base is None:
+            raise SecurityUniverseSnapshotNotFoundError(
+                base_snapshot_id.strip()
+            )
+        target = (
+            base
+            if target_snapshot_id.strip() == base_snapshot_id.strip()
+            else self.get_snapshot(target_snapshot_id)
+        )
+        if target is None:
+            raise SecurityUniverseSnapshotNotFoundError(
+                target_snapshot_id.strip()
+            )
+
+        reasons = []
+        if not base["integrity_valid"]:
+            reasons.append("base_snapshot_integrity_invalid")
+        if not target["integrity_valid"]:
+            reasons.append("target_snapshot_integrity_invalid")
+        if base["market"] != target["market"]:
+            reasons.append("market_mismatch")
+        if base["snapshot_version"] != target["snapshot_version"]:
+            reasons.append("snapshot_version_mismatch")
+
+        result = {
+            "comparison_version": SNAPSHOT_COMPARISON_VERSION,
+            "ready": not reasons,
+            "reasons": reasons,
+            "base": self._comparison_snapshot_summary(base),
+            "target": self._comparison_snapshot_summary(target),
+            "detail_limit": int(detail_limit),
+            "added_count": None,
+            "removed_count": None,
+            "metadata_changed_count": None,
+            "added": [],
+            "removed": [],
+            "metadata_changed": [],
+            "added_truncated": False,
+            "removed_truncated": False,
+            "metadata_changed_truncated": False,
+        }
+        if reasons:
+            return result
+
+        base_items = {
+            item["symbol"]: item for item in base["payload"]["items"]
+        }
+        target_items = {
+            item["symbol"]: item for item in target["payload"]["items"]
+        }
+        added_symbols = sorted(target_items.keys() - base_items.keys())
+        removed_symbols = sorted(base_items.keys() - target_items.keys())
+        common_symbols = sorted(base_items.keys() & target_items.keys())
+        metadata_changed = []
+        for symbol in common_symbols:
+            before = base_items[symbol]
+            after = target_items[symbol]
+            changes = {
+                field: {
+                    "before": before[field],
+                    "after": after[field],
+                }
+                for field in COMPARISON_METADATA_FIELDS
+                if before[field] != after[field]
+            }
+            if changes:
+                metadata_changed.append({
+                    "symbol": symbol,
+                    "changes": changes,
+                })
+
+        limit = int(detail_limit)
+        result.update({
+            "added_count": len(added_symbols),
+            "removed_count": len(removed_symbols),
+            "metadata_changed_count": len(metadata_changed),
+            "added": [target_items[symbol] for symbol in added_symbols[:limit]],
+            "removed": [base_items[symbol] for symbol in removed_symbols[:limit]],
+            "metadata_changed": metadata_changed[:limit],
+            "added_truncated": len(added_symbols) > limit,
+            "removed_truncated": len(removed_symbols) > limit,
+            "metadata_changed_truncated": len(metadata_changed) > limit,
+        })
+        return result
 
     def get_snapshot(self, snapshot_id: str) -> Optional[Dict[str, Any]]:
         normalized_id = snapshot_id.strip()
@@ -685,6 +889,26 @@ class SecurityUniverseSnapshotService:
             "snapshot_id": row[6],
             "security_count": row[7],
             "error": row[8],
+        }
+
+    @staticmethod
+    def _comparison_snapshot_summary(
+        snapshot: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            key: snapshot[key]
+            for key in (
+                "snapshot_id",
+                "captured_at",
+                "observation_date",
+                "snapshot_version",
+                "market",
+                "security_count",
+                "payload_hash",
+                "computed_payload_hash",
+                "integrity_valid",
+                "integrity_errors",
+            )
         }
 
     @staticmethod
