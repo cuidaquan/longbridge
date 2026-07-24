@@ -275,6 +275,16 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
         ]
         self.assertEqual(us_payload["status"], "error")
         self.assertIn("account estimate unavailable", us_payload["error"])
+        self.assertEqual(
+            us_payload["failure_category"],
+            "unknown_error",
+        )
+        self.assertEqual(
+            us_short["channel_status"]["short_capacity"][
+                "failure_category"
+            ],
+            "unknown_error",
+        )
         self.assertEqual(us_payload["availability"], "unknown")
         self.assertIsNone(us_payload["borrow_fee_rate"])
         self.assertEqual(us_payload["recall_risk"], "unknown")
@@ -640,6 +650,7 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
                     "short_capacity": {
                         "status": "error",
                         "error": "estimate unavailable",
+                        "failure_category": "timeout",
                         "short_selling_max_qty": None,
                         "availability": "unknown",
                     },
@@ -662,7 +673,7 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
             capacity_incomplete["factors"]["short_capacity"][
                 "missing_reasons"
             ],
-            {f"error:estimate unavailable": len(rows)},
+            {"failure:timeout": len(rows)},
         )
         self.assertFalse(
             capacity_incomplete["ready_for_return_evaluation"]

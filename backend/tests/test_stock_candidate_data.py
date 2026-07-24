@@ -6,7 +6,14 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
+import httpx
+
 from app.exceptions import LongbridgeAPIError
+from app.external_service_resilience import (
+    ExternalServiceBusyError,
+    ExternalServiceCircuitOpenError,
+    ExternalServiceTimeoutError,
+)
 from app import stock_candidate_data
 
 
@@ -15,6 +22,101 @@ def _namespace(**values):
 
 
 class StockCandidateDataTests(unittest.TestCase):
+    def test_short_capacity_failure_classification_uses_exception_metadata(
+        self,
+    ) -> None:
+        from longbridge.openapi import ErrorKind, OpenApiException
+
+        cases = (
+            (
+                ValueError("请先在基础配置中保存完整的 Longbridge 凭据"),
+                "credentials_missing",
+            ),
+            (
+                stock_candidate_data.LongbridgeDependencyMissing("missing"),
+                "dependency_missing",
+            ),
+            (
+                OpenApiException(
+                    ErrorKind.OAuth,
+                    401003,
+                    "trace-auth",
+                    "expired",
+                ),
+                "authentication_failed",
+            ),
+            (
+                OpenApiException(
+                    ErrorKind.Http,
+                    429,
+                    "trace-rate",
+                    "too many requests",
+                ),
+                "rate_limited",
+            ),
+            (
+                ExternalServiceTimeoutError("trade timeout"),
+                "timeout",
+            ),
+            (
+                httpx.ConnectError("connection refused"),
+                "network_error",
+            ),
+            (
+                ExternalServiceBusyError("trade busy"),
+                "service_busy",
+            ),
+            (
+                ExternalServiceCircuitOpenError("trade circuit open"),
+                "circuit_open",
+            ),
+            (
+                OpenApiException(
+                    ErrorKind.OpenApi,
+                    403001,
+                    "trace-reject",
+                    "request rejected",
+                ),
+                "upstream_rejected",
+            ),
+            (RuntimeError("permission or risk control"), "unknown_error"),
+        )
+
+        for error, expected in cases:
+            with self.subTest(expected=expected):
+                diagnostic = (
+                    stock_candidate_data.classify_short_capacity_failure(
+                        error
+                    )
+                )
+                self.assertEqual(
+                    diagnostic["failure_category"],
+                    expected,
+                )
+
+        secret_error = RuntimeError(
+            "token=secret https://private.example/path"
+        )
+        diagnostic = stock_candidate_data.classify_short_capacity_failure(
+            secret_error
+        )
+        self.assertNotIn("secret", diagnostic["error"])
+        self.assertNotIn("private.example", diagnostic["error"])
+
+    def test_short_capacity_failure_classification_follows_wrapped_cause(
+        self,
+    ) -> None:
+        try:
+            raise ExternalServiceTimeoutError("inner timeout")
+        except ExternalServiceTimeoutError as cause:
+            wrapped = LongbridgeAPIError("outer failure")
+            wrapped.__cause__ = cause
+
+        diagnostic = stock_candidate_data.classify_short_capacity_failure(
+            wrapped
+        )
+        self.assertEqual(diagnostic["failure_category"], "timeout")
+
     def test_market_trading_day_includes_full_and_half_sessions(self) -> None:
         quote_context = MagicMock()
         quote_context.trading_days.side_effect = [
@@ -193,6 +295,7 @@ class StockCandidateDataTests(unittest.TestCase):
         failed = result["ERROR.US"]
         self.assertEqual(failed["status"], "error")
         self.assertEqual(failed["availability"], "unknown")
+        self.assertEqual(failed["failure_category"], "unknown_error")
         self.assertIn("permission or risk control", failed["error"])
 
         unsupported = result["700.HK"]
@@ -228,6 +331,10 @@ class StockCandidateDataTests(unittest.TestCase):
             ])
 
         self.assertEqual(result["AAA.US"]["status"], "no_data")
+        self.assertEqual(
+            result["AAA.US"]["failure_category"],
+            "response_no_data",
+        )
         self.assertIsNone(result["AAA.US"]["cash_max_qty"])
         self.assertIsNone(result["AAA.US"]["short_selling_max_qty"])
         self.assertEqual(result["AAA.US"]["availability"], "unknown")

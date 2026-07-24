@@ -4,6 +4,19 @@
 
 import { API_BASE } from './client';
 
+export type ShortCapacityFailureCategory =
+  | 'credentials_missing'
+  | 'dependency_missing'
+  | 'authentication_failed'
+  | 'rate_limited'
+  | 'timeout'
+  | 'network_error'
+  | 'service_busy'
+  | 'circuit_open'
+  | 'upstream_rejected'
+  | 'response_no_data'
+  | 'unknown_error';
+
 export interface Stock {
   id: number;
   pool_type: string;
@@ -261,6 +274,7 @@ export interface ScreenerCandidate {
     status: 'available' | 'no_data' | 'error' | 'fallback' | 'disabled'
       | 'unsupported' | 'not_applicable';
     error?: string | null;
+    failure_category?: ShortCapacityFailureCategory | null;
     cash_max_qty?: number | null;
     margin_max_qty?: number | null;
     short_selling_max_qty?: number | null;
@@ -357,6 +371,8 @@ export interface ScreenerSearchResponse {
     status: 'available' | 'fallback' | 'disabled' | 'unsupported'
       | 'not_applicable';
     error?: string | null;
+    failure_category?: ShortCapacityFailureCategory | null;
+    failure_categories: Partial<Record<ShortCapacityFailureCategory, number>>;
     supported_market: 'US';
     account_specific: true;
     borrow_fee_rate?: number | null;

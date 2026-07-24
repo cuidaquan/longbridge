@@ -15,6 +15,7 @@ from .longbridge_compat import close_longbridge_context
 from .repositories import load_credentials
 from .services import get_security_calc_indexes, get_short_risk_metrics
 from .stock_candidate_data import (
+    classify_short_capacity_failure,
     get_fundamental_profiles,
     get_margin_requirements,
     get_security_tradeability,
@@ -754,6 +755,8 @@ class StockScreenerService:
                 else "disabled"
             ),
             "error": None,
+            "failure_category": None,
+            "failure_categories": {},
             "supported_market": "US",
             "account_specific": True,
             "borrow_fee_rate": None,
@@ -773,23 +776,27 @@ class StockScreenerService:
                     retry_if=_retry_candidate_batch,
                 )
             except Exception as exc:
+                diagnostic = classify_short_capacity_failure(exc)
                 if hard_short_capacity_filters:
                     raise LongbridgeAPIError(
-                        f"无法应用账户卖空数量过滤: {exc}"
+                        "无法应用账户卖空数量过滤 "
+                        f"[{diagnostic['failure_category']}]: "
+                        f"{diagnostic['error']}"
                     ) from exc
                 logger.warning(
                     "Longbridge short-selling capacity unavailable: %s",
-                    exc,
+                    diagnostic["error"],
                 )
                 short_capacity_status["status"] = "fallback"
-                short_capacity_status["error"] = str(exc)
+                short_capacity_status.update(diagnostic)
             else:
                 for candidate in candidates:
-                    candidate["short_capacity"] = short_capacity.get(
+                    capacity_item = dict(short_capacity.get(
                         candidate["symbol"],
                         {
                             "status": "no_data",
                             "error": None,
+                            "failure_category": "response_no_data",
                             "cash_max_qty": None,
                             "margin_max_qty": None,
                             "short_selling_max_qty": None,
@@ -797,12 +804,25 @@ class StockScreenerService:
                             "borrow_fee_rate": None,
                             "recall_risk": "unknown",
                         },
-                    )
+                    ))
+                    if capacity_item.get("failure_category") is None:
+                        if capacity_item.get("status") == "no_data":
+                            capacity_item[
+                                "failure_category"
+                            ] = "response_no_data"
+                        elif capacity_item.get("status") == "error":
+                            capacity_item[
+                                "failure_category"
+                            ] = "unknown_error"
+                    candidate["short_capacity"] = capacity_item
                 short_capacity_status["status"] = "available"
         for candidate in candidates:
             candidate.setdefault("short_capacity", {
                 "status": short_capacity_status["status"],
                 "error": short_capacity_status["error"],
+                "failure_category": short_capacity_status[
+                    "failure_category"
+                ],
                 "cash_max_qty": None,
                 "margin_max_qty": None,
                 "short_selling_max_qty": None,
@@ -810,6 +830,9 @@ class StockScreenerService:
                 "borrow_fee_rate": None,
                 "recall_risk": "unknown",
             })
+        short_capacity_status["failure_categories"] = (
+            self._failure_category_counts(candidates)
+        )
 
         before_filter_count = len(candidates)
         if apply_filters:
@@ -985,10 +1008,37 @@ class StockScreenerService:
         if fallback is not None:
             combined["status"] = "fallback"
             combined["error"] = fallback.get("error")
+            if "failure_category" in fallback:
+                combined["failure_category"] = fallback.get(
+                    "failure_category"
+                )
         elif any(status.get("status") == "available" for status in statuses):
             combined["status"] = "available"
             combined["error"] = None
+        if any("failure_categories" in status for status in statuses):
+            failure_categories: Dict[str, int] = {}
+            for status in statuses:
+                for category, count in (
+                    status.get("failure_categories") or {}
+                ).items():
+                    failure_categories[category] = (
+                        failure_categories.get(category, 0) + int(count)
+                    )
+            combined["failure_categories"] = failure_categories
         return combined
+
+    @staticmethod
+    def _failure_category_counts(
+        candidates: List[Dict[str, Any]],
+    ) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for candidate in candidates:
+            category = (candidate.get("short_capacity") or {}).get(
+                "failure_category"
+            )
+            if category:
+                counts[category] = counts.get(category, 0) + 1
+        return counts
 
     def _normalize_filters(self, filters: Dict[str, Any]) -> Dict[str, float]:
         supported = {

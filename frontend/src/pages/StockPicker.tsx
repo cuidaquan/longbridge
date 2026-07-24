@@ -72,6 +72,7 @@ import {
   type StockPickerConfig,
   type StockPickerFactorCoverage,
   type StockPickerAnalysisJob,
+  type ShortCapacityFailureCategory,
   StockPickerAnalysisJobNotFoundError,
 } from '../api/stockPicker';
 import { API_BASE } from '../api/client';
@@ -1155,6 +1156,44 @@ const SNAPSHOT_FACTOR_LABELS: Record<string, string> = {
   short_capacity: '账户预估卖空能力',
 };
 
+const SHORT_CAPACITY_FAILURE_LABELS: Record<
+  ShortCapacityFailureCategory,
+  string
+> = {
+  credentials_missing: 'Longbridge 凭据未配置',
+  dependency_missing: 'Longbridge SDK 不可用',
+  authentication_failed: 'Longbridge 鉴权失败',
+  rate_limited: 'Longbridge 接口限流',
+  timeout: '查询超时',
+  network_error: '网络连接失败',
+  service_busy: '本地查询并发已满',
+  circuit_open: '交易接口熔断中',
+  upstream_rejected: 'Longbridge 拒绝请求',
+  response_no_data: 'Longbridge 未返回有效数量',
+  unknown_error: '未分类技术错误',
+};
+
+function formatShortCapacityFailure(
+  category: ShortCapacityFailureCategory | null | undefined,
+): string {
+  return category
+    ? SHORT_CAPACITY_FAILURE_LABELS[category] || category
+    : '原因未知';
+}
+
+function formatSnapshotMissingReason(reason: string): string {
+  if (reason.startsWith('failure:')) {
+    return formatShortCapacityFailure(
+      reason.slice('failure:'.length) as ShortCapacityFailureCategory,
+    );
+  }
+  if (reason === 'missing_required_values') return '缺少必要字段';
+  if (reason.startsWith('status:')) {
+    return `状态 ${reason.slice('status:'.length)}`;
+  }
+  return reason;
+}
+
 function StockPickerSnapshotDialog({ onClose }: { onClose: () => void }) {
   const [config, setConfig] = useState<StockPickerConfig | null>(null);
   const [coverage, setCoverage] = useState<StockPickerFactorCoverage | null>(null);
@@ -1429,25 +1468,51 @@ function StockPickerSnapshotDialog({ onClose }: { onClose: () => void }) {
                           <p>采集阶段：{phaseSummary || '-'}</p>
                         </div>
                         <div className="mt-3 grid gap-1.5 sm:grid-cols-2">
-                          {factorEntries.map(([name, factor]) => (
-                            <div
-                              key={name}
-                              className="flex items-center justify-between gap-2 rounded bg-slate-50 px-2 py-1.5 text-xs dark:bg-slate-900/50"
-                            >
-                              <span className="min-w-0 truncate text-slate-600 dark:text-slate-300">
-                                {SNAPSHOT_FACTOR_LABELS[name] || name}
-                              </span>
-                              <span
-                                className={
-                                  factor.coverage_ready
-                                    ? 'shrink-0 text-emerald-600 dark:text-emerald-400'
-                                    : 'shrink-0 text-amber-600 dark:text-amber-400'
-                                }
+                          {factorEntries.map(([name, factor]) => {
+                            const missingReasonEntries = name === 'short_capacity'
+                              ? Object.entries(factor.missing_reasons)
+                                .sort((left, right) => right[1] - left[1])
+                              : [];
+                            const visibleMissingReasons = missingReasonEntries
+                              .slice(0, 3)
+                              .map(([reason, count]) => (
+                                `${formatSnapshotMissingReason(reason)} ${count}`
+                              ))
+                              .join('；');
+                            return (
+                              <div
+                                key={name}
+                                className="rounded bg-slate-50 px-2 py-1.5 text-xs dark:bg-slate-900/50"
                               >
-                                {formatPercent(factor.coverage)}
-                              </span>
-                            </div>
-                          ))}
+                                <div className="flex items-center justify-between gap-2">
+                                  <span className="min-w-0 truncate text-slate-600 dark:text-slate-300">
+                                    {SNAPSHOT_FACTOR_LABELS[name] || name}
+                                  </span>
+                                  <span
+                                    className={
+                                      factor.coverage_ready
+                                        ? 'shrink-0 text-emerald-600 dark:text-emerald-400'
+                                        : 'shrink-0 text-amber-600 dark:text-amber-400'
+                                    }
+                                  >
+                                    {formatPercent(factor.coverage)}
+                                  </span>
+                                </div>
+                                {visibleMissingReasons && (
+                                  <p
+                                    className="mt-1 break-words text-[11px] text-slate-400 dark:text-slate-500"
+                                    title={missingReasonEntries
+                                      .map(([reason, count]) => (
+                                        `${formatSnapshotMissingReason(reason)} ${count}`
+                                      ))
+                                      .join('；')}
+                                  >
+                                    缺失：{visibleMissingReasons}
+                                  </p>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     );
@@ -2803,6 +2868,16 @@ function StockDiscoveryDialog({
   const formatRatio = (value: number | null | undefined) => (
     value == null ? '-' : `${(value * 100).toFixed(1)}%`
   );
+  const shortCapacityFailureSummary = result
+    ? Object.entries(result.short_capacity.failure_categories || {})
+      .filter((entry): entry is [ShortCapacityFailureCategory, number] => (
+        typeof entry[1] === 'number' && entry[1] > 0
+      ))
+      .map(([category, count]) => (
+        `${formatShortCapacityFailure(category)} ${count} 只`
+      ))
+      .join('；')
+    : '';
   const filterDefinitions: Array<
     [keyof typeof filterInputs, string, string]
   > = [
@@ -3274,7 +3349,19 @@ function StockDiscoveryDialog({
             {result.short_capacity.status === 'fallback' && (
               <div className="mb-2">
                 <Alert type="warning">
-                  账户预估可卖空数量暂不可用；无法判断账户权限、风险控制或临时服务错误。
+                  账户预估可卖空数量暂不可用：
+                  {formatShortCapacityFailure(
+                    result.short_capacity.failure_category,
+                  )}。该技术分类不代表券源状态或账户交易权限。
+                </Alert>
+              </div>
+            )}
+            {result.short_capacity.status === 'available'
+              && shortCapacityFailureSummary && (
+              <div className="mb-2">
+                <Alert type="warning">
+                  部分账户预估数量缺失：{shortCapacityFailureSummary}。
+                  这些技术分类不代表券源状态或账户交易权限。
                 </Alert>
               </div>
             )}
@@ -3468,6 +3555,13 @@ function StockDiscoveryDialog({
                                         )} 股`
                                   }
                                 </span>
+                                {candidate.short_capacity.failure_category && (
+                                  <span className="text-amber-600 dark:text-amber-400">
+                                    查询状态：{formatShortCapacityFailure(
+                                      candidate.short_capacity.failure_category,
+                                    )}
+                                  </span>
+                                )}
                                 <span>融券费率/召回风险 未知</span>
                               </>
                             )}

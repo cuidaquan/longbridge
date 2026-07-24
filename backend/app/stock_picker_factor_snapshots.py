@@ -19,6 +19,7 @@ from .services import (
     get_short_risk_metrics,
 )
 from .stock_candidate_data import (
+    classify_short_capacity_failure,
     get_fundamental_profiles,
     get_margin_requirements,
     get_security_tradeability,
@@ -336,6 +337,9 @@ class StockPickerFactorSnapshotService:
                                 "error": channel_status[
                                     "short_capacity"
                                 ]["error"],
+                                "failure_category": channel_status[
+                                    "short_capacity"
+                                ].get("failure_category"),
                                 "cash_max_qty": None,
                                 "margin_max_qty": None,
                                 "short_selling_max_qty": None,
@@ -351,6 +355,7 @@ class StockPickerFactorSnapshotService:
                                 "short_capacity"
                             ]["status"],
                             "error": None,
+                            "failure_category": None,
                             "cash_max_qty": None,
                             "margin_max_qty": None,
                             "short_selling_max_qty": None,
@@ -990,6 +995,10 @@ class StockPickerFactorSnapshotService:
                 "status": "error",
                 "error": str(exc),
             }
+            if status_key == "short_capacity":
+                status[status_key].update(
+                    classify_short_capacity_failure(exc)
+                )
             return {}
         status[status_key] = {
             "status": "available",
@@ -1092,6 +1101,9 @@ class StockPickerFactorSnapshotService:
     ) -> str:
         section, _ = FACTOR_REQUIREMENTS[factor]
         values = payload.get(section) or {}
+        failure_category = values.get("failure_category")
+        if failure_category:
+            return f"failure:{failure_category}"
         error = values.get("error")
         if not error:
             errors = values.get("errors")

@@ -6,9 +6,17 @@ from datetime import date, datetime, timedelta
 import math
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
+import httpx
+
 from .exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
+from .external_service_resilience import (
+    ExternalServiceBusyError,
+    ExternalServiceCircuitOpenError,
+    ExternalServiceTimeoutError,
+)
 from .longbridge_compat import close_longbridge_context
 from .repositories import _safe_float, load_credentials
+from .stock_picker_ai_snapshots import sanitize_error
 
 
 _REQUIRED_CREDENTIALS = (
@@ -16,6 +24,22 @@ _REQUIRED_CREDENTIALS = (
     "LONGPORT_APP_SECRET",
     "LONGPORT_ACCESS_TOKEN",
 )
+
+SHORT_CAPACITY_FAILURE_CATEGORIES = frozenset({
+    "credentials_missing",
+    "dependency_missing",
+    "authentication_failed",
+    "rate_limited",
+    "timeout",
+    "network_error",
+    "service_busy",
+    "circuit_open",
+    "upstream_rejected",
+    "response_no_data",
+    "unknown_error",
+})
+_AUTHENTICATION_ERROR_CODES = {401, 401001, 401002, 401003}
+_RATE_LIMIT_ERROR_CODES = {429, 429000, 429001}
 
 
 def _symbols(values: Iterable[str]) -> List[str]:
@@ -34,6 +58,87 @@ def _credentials() -> Dict[str, str]:
     ):
         raise ValueError("请先在基础配置中保存完整的 Longbridge 凭据")
     return credentials
+
+
+def classify_short_capacity_failure(error: BaseException) -> Dict[str, str]:
+    """Classify only technical failures proven by the exception chain."""
+    chain = list(_exception_chain(error))
+    texts = [str(item).lower() for item in chain]
+
+    if any(isinstance(item, LongbridgeDependencyMissing) for item in chain):
+        category = "dependency_missing"
+    elif any(
+        isinstance(item, ValueError)
+        and "longbridge" in text
+        and "凭据" in text
+        for item, text in zip(chain, texts)
+    ):
+        category = "credentials_missing"
+    elif any(isinstance(item, ExternalServiceTimeoutError) for item in chain):
+        category = "timeout"
+    elif any(isinstance(item, httpx.TimeoutException) for item in chain):
+        category = "timeout"
+    elif any(isinstance(item, ExternalServiceBusyError) for item in chain):
+        category = "service_busy"
+    elif any(
+        isinstance(item, ExternalServiceCircuitOpenError)
+        for item in chain
+    ):
+        category = "circuit_open"
+    elif any(_is_authentication_error(item) for item in chain):
+        category = "authentication_failed"
+    elif any(_is_rate_limit_error(item) for item in chain):
+        category = "rate_limited"
+    elif any(
+        isinstance(item, (httpx.NetworkError, ConnectionError))
+        or _exception_kind(item) == "http"
+        for item in chain
+    ):
+        category = "network_error"
+    elif any(_exception_kind(item) == "openapi" for item in chain):
+        category = "upstream_rejected"
+    else:
+        category = "unknown_error"
+
+    return {
+        "failure_category": category,
+        "error": sanitize_error(error),
+    }
+
+
+def _exception_chain(error: BaseException) -> Iterator[BaseException]:
+    current: Optional[BaseException] = error
+    seen = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _exception_code(error: BaseException) -> Optional[int]:
+    try:
+        return int(getattr(error, "code", None))
+    except (TypeError, ValueError):
+        return None
+
+
+def _exception_kind(error: BaseException) -> str:
+    kind = str(getattr(error, "kind", "") or "").lower()
+    return kind.rsplit(".", 1)[-1]
+
+
+def _is_authentication_error(error: BaseException) -> bool:
+    return (
+        _exception_kind(error) == "oauth"
+        or _exception_code(error) in _AUTHENTICATION_ERROR_CODES
+    )
+
+
+def _is_rate_limit_error(error: BaseException) -> bool:
+    code = _exception_code(error)
+    return code in _RATE_LIMIT_ERROR_CODES or (
+        code is not None and code // 1000 == 429
+    )
 
 
 @contextmanager
@@ -278,6 +383,7 @@ def get_short_selling_capacity(
         symbol: {
             "status": "unsupported",
             "error": None,
+            "failure_category": None,
             "cash_max_qty": None,
             "margin_max_qty": None,
             "short_selling_max_qty": None,
@@ -327,6 +433,11 @@ def get_short_selling_capacity(
                             else "no_data"
                         ),
                         "error": None,
+                        "failure_category": (
+                            None
+                            if margin_max_qty is not None
+                            else "response_no_data"
+                        ),
                         "cash_max_qty": cash_max_qty,
                         "margin_max_qty": margin_max_qty,
                         "short_selling_max_qty": margin_max_qty,
@@ -349,9 +460,10 @@ def get_short_selling_capacity(
                         ),
                     }
                 except Exception as exc:
+                    diagnostic = classify_short_capacity_failure(exc)
                     results[symbol] = {
                         "status": "error",
-                        "error": str(exc),
+                        **diagnostic,
                         "cash_max_qty": None,
                         "margin_max_qty": None,
                         "short_selling_max_qty": None,

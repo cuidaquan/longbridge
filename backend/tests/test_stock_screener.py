@@ -1220,6 +1220,10 @@ class StockScreenerServiceTest(unittest.TestCase):
             500,
         )
         self.assertEqual(result["short_capacity"]["status"], "available")
+        self.assertEqual(
+            result["short_capacity"]["failure_categories"],
+            {"unknown_error": 1},
+        )
         self.assertTrue(result["short_capacity"]["account_specific"])
         self.assertIsNone(result["short_capacity"]["borrow_fee_rate"])
         self.assertEqual(result["short_capacity"]["recall_risk"], "unknown")
@@ -1259,8 +1263,22 @@ class StockScreenerServiceTest(unittest.TestCase):
         )
         self.assertEqual(degraded["short_capacity"]["status"], "fallback")
         self.assertEqual(
+            degraded["short_capacity"]["failure_category"],
+            "unknown_error",
+        )
+        self.assertEqual(
+            degraded["short_capacity"]["failure_categories"],
+            {"unknown_error": 1},
+        )
+        self.assertEqual(
             degraded["items"][0]["short_capacity"]["status"],
             "fallback",
+        )
+        self.assertEqual(
+            degraded["items"][0]["short_capacity"][
+                "failure_category"
+            ],
+            "unknown_error",
         )
 
         reset_stock_picker_reliability_metrics()
@@ -1317,6 +1335,34 @@ class StockScreenerServiceTest(unittest.TestCase):
         self.assertEqual(
             unsupported["items"][0]["short_capacity"]["status"],
             "unsupported",
+        )
+
+    def test_short_capacity_failure_counts_are_combined_across_pages(
+        self,
+    ) -> None:
+        combined = StockScreenerService._combine_status([
+            {
+                "status": "available",
+                "error": None,
+                "failure_category": None,
+                "failure_categories": {
+                    "response_no_data": 2,
+                    "timeout": 1,
+                },
+            },
+            {
+                "status": "fallback",
+                "error": "trade timeout",
+                "failure_category": "timeout",
+                "failure_categories": {"timeout": 3},
+            },
+        ])
+
+        self.assertEqual(combined["status"], "fallback")
+        self.assertEqual(combined["failure_category"], "timeout")
+        self.assertEqual(
+            combined["failure_categories"],
+            {"response_no_data": 2, "timeout": 4},
         )
 
     def test_fundamental_and_margin_failures_only_degrade_without_filters(
