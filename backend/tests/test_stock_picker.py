@@ -480,6 +480,11 @@ class StockPickerJobIsolationTest(unittest.TestCase):
         self.assertNotEqual(first["job_id"], second["job_id"])
         self.assertEqual(first["status"], "queued")
         self.assertEqual(second["status"], "queued")
+        self.assertEqual(
+            first["runtime_id"],
+            stock_picker_router.analysis_jobs[first["job_id"]]["runtime_id"],
+        )
+        self.assertIn("+00:00", first["created_at"])
         self.assertEqual(len(first_background.tasks), 1)
         self.assertEqual(len(second_background.tasks), 1)
         self.assertEqual(
@@ -562,6 +567,46 @@ class StockPickerJobIsolationTest(unittest.TestCase):
             asyncio.run(stock_picker_router.get_analysis_progress("missing"))
 
         self.assertEqual(context.exception.status_code, 404)
+        self.assertEqual(
+            context.exception.detail["code"],
+            "analysis_job_not_found",
+        )
+        self.assertEqual(
+            len(context.exception.detail["runtime_id"]),
+            32,
+        )
+
+    def test_job_status_snapshot_supports_reconnect(self) -> None:
+        job_id = stock_picker_router._create_analysis_job("LONG", True)
+        job = stock_picker_router.analysis_jobs[job_id]
+        job.update({
+            "status": "running",
+            "current": "AAA.US",
+            "total": 3,
+            "completed": 1,
+        })
+        stock_picker_router._append_job_log(job, "working")
+
+        snapshot = stock_picker_router.get_analysis_job(job_id)
+
+        self.assertEqual(snapshot["job_id"], job_id)
+        self.assertEqual(snapshot["runtime_id"], job["runtime_id"])
+        self.assertEqual(snapshot["status"], "running")
+        self.assertEqual(snapshot["current"], "AAA.US")
+        self.assertEqual(snapshot["completed"], 1)
+        self.assertEqual(snapshot["logs"][0]["message"], "working")
+        self.assertIn("+00:00", snapshot["created_at"])
+        self.assertIn("+00:00", snapshot["updated_at"])
+
+    def test_job_status_rejects_missing_job_with_current_runtime(self) -> None:
+        with self.assertRaises(HTTPException) as context:
+            stock_picker_router.get_analysis_job("missing")
+
+        detail = context.exception.detail
+        self.assertEqual(context.exception.status_code, 404)
+        self.assertEqual(detail["code"], "analysis_job_not_found")
+        self.assertEqual(len(detail["runtime_id"]), 32)
+        self.assertIn("+00:00", detail["runtime_started_at"])
 
     def test_job_registry_rejects_more_than_active_limit(self) -> None:
         for _ in range(stock_picker_router.MAX_ANALYSIS_JOBS):
@@ -602,6 +647,12 @@ class StockPickerJobIsolationTest(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 202)
                 job_id = response.json()["job_id"]
+                status = client.get(
+                    f"/api/stock-picker/analysis/jobs/{job_id}",
+                )
+                missing = client.get(
+                    "/api/stock-picker/analysis/jobs/missing",
+                )
                 progress = client.get(
                     f"/api/stock-picker/analysis/progress/{job_id}",
                 )
@@ -609,7 +660,21 @@ class StockPickerJobIsolationTest(unittest.TestCase):
                 client.close()
 
         self.assertEqual(progress.status_code, 200)
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(
+            status.json()["runtime_id"],
+            response.json()["runtime_id"],
+        )
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(
+            missing.json()["detail"]["code"],
+            "analysis_job_not_found",
+        )
         self.assertIn(f'"job_id": "{job_id}"', progress.text)
+        self.assertIn(
+            '"runtime_id": "{}"'.format(response.json()["runtime_id"]),
+            progress.text,
+        )
         self.assertIn('"status": "completed"', progress.text)
         self.assertIn('"success": 1', progress.text)
 

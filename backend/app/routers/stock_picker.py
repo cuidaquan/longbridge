@@ -14,6 +14,7 @@ from uuid import uuid4
 from ..stock_picker import get_stock_picker_service
 from ..exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
 from ..models import SecuritySearchResponse
+from ..runtime import get_runtime_metadata
 from ..security_catalog import get_security_catalog_service
 from ..stock_picker_backtest import get_stock_picker_backtest_service
 from ..stock_picker_ai_evaluation import (
@@ -316,8 +317,10 @@ def _create_analysis_job(pool_type: Optional[str], force_refresh: bool) -> str:
         )
     job_id = uuid4().hex
     now = _utc_now()
+    runtime = get_runtime_metadata()
     analysis_jobs[job_id] = {
         'job_id': job_id,
+        'runtime_id': runtime['runtime_id'],
         'pool_type': pool_type,
         'force_refresh': force_refresh,
         'current': None,
@@ -331,6 +334,33 @@ def _create_analysis_job(pool_type: Optional[str], force_refresh: bool) -> str:
         'updated_at': now,
     }
     return job_id
+
+
+def _serialize_analysis_job(job: dict) -> dict:
+    return {
+        'job_id': job['job_id'],
+        'runtime_id': job['runtime_id'],
+        'pool_type': job['pool_type'],
+        'force_refresh': job['force_refresh'],
+        'current': job['current'],
+        'total': job['total'],
+        'completed': job['completed'],
+        'status': job['status'],
+        'logs': job['logs'][-10:],
+        'result': job['result'],
+        'error': job['error'],
+        'created_at': job['created_at'].isoformat(),
+        'updated_at': job['updated_at'].isoformat(),
+    }
+
+
+def _analysis_job_not_found_detail() -> dict[str, str]:
+    runtime = get_runtime_metadata()
+    return {
+        "code": "analysis_job_not_found",
+        "message": "分析任务不存在或已过期",
+        **runtime,
+    }
 
 
 def _append_job_log(job: dict, message: str) -> None:
@@ -899,9 +929,24 @@ async def analyze_pools(
     return {
         "success": True,
         "job_id": job_id,
+        "runtime_id": analysis_jobs[job_id]["runtime_id"],
+        "created_at": analysis_jobs[job_id]["created_at"].isoformat(),
         "status": "queued",
         "message": "分析任务已创建",
     }
+
+
+@router.get("/analysis/jobs/{job_id}")
+def get_analysis_job(job_id: str):
+    """Return a reconnectable JSON snapshot of one in-memory job."""
+    _prune_analysis_jobs()
+    job = analysis_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail=_analysis_job_not_found_detail(),
+        )
+    return _serialize_analysis_job(job)
 
 
 @router.get("/analysis/progress/{job_id}")
@@ -911,7 +956,10 @@ async def get_analysis_progress(job_id: str):
     """
     _prune_analysis_jobs()
     if job_id not in analysis_jobs:
-        raise HTTPException(status_code=404, detail="分析任务不存在或已过期")
+        raise HTTPException(
+            status_code=404,
+            detail=_analysis_job_not_found_detail(),
+        )
 
     async def event_generator() -> AsyncGenerator[str, None]:
         """生成SSE事件"""
@@ -923,6 +971,7 @@ async def get_analysis_progress(job_id: str):
                         "data: "
                         + json.dumps({
                             'job_id': job_id,
+                            'runtime_id': get_runtime_metadata()['runtime_id'],
                             'status': 'error',
                             'error': '分析任务已过期',
                             'logs': [],
@@ -930,16 +979,7 @@ async def get_analysis_progress(job_id: str):
                         + "\n\n"
                     )
                     break
-                progress_data = {
-                    'job_id': job_id,
-                    'current': job['current'],
-                    'total': job['total'],
-                    'completed': job['completed'],
-                    'status': job['status'],
-                    'logs': job['logs'][-10:],
-                    'result': job['result'],
-                    'error': job['error'],
-                }
+                progress_data = _serialize_analysis_job(job)
                 
                 yield f"data: {json.dumps(progress_data, ensure_ascii=False)}\n\n"
                 

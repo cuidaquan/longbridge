@@ -108,7 +108,7 @@ export default function Sidebar({
         >
           {item.icon}
         </span>
-        {!collapsed && <span>{item.label}</span>}
+        {!collapsed && <span className="hidden md:inline">{item.label}</span>}
       </button>
     );
 
@@ -128,7 +128,7 @@ export default function Sidebar({
         fixed left-0 top-0 h-screen bg-slate-900 dark:bg-slate-950
         flex flex-col border-r border-slate-800
         transition-all duration-300 ease-in-out z-30
-        ${collapsed ? "w-16" : "w-60"}
+        ${collapsed ? "w-16" : "w-16 md:w-60"}
       `}
     >
       {/* Logo */}
@@ -137,7 +137,7 @@ export default function Sidebar({
           <span className="text-white font-bold text-sm">LB</span>
         </div>
         {!collapsed && (
-          <div className="ml-3 overflow-hidden">
+          <div className="ml-3 hidden overflow-hidden md:block">
             <h1 className="text-lg font-semibold text-white leading-tight">
               Longbridge
             </h1>
@@ -151,7 +151,7 @@ export default function Sidebar({
         {navGroups.map((group) => (
           <div key={group.title}>
             {!collapsed && (
-              <h3 className="px-3 mb-2 text-xs font-medium text-slate-500 uppercase tracking-wider">
+              <h3 className="mb-2 hidden px-3 text-xs font-medium uppercase tracking-wider text-slate-500 md:block">
                 {group.title}
               </h3>
             )}
@@ -180,7 +180,11 @@ export default function Sidebar({
             <span className="text-xl text-slate-500">
               {darkMode ? <DarkMode /> : <LightMode />}
             </span>
-            {!collapsed && <span>{darkMode ? "深色模式" : "浅色模式"}</span>}
+            {!collapsed && (
+              <span className="hidden md:inline">
+                {darkMode ? "深色模式" : "浅色模式"}
+              </span>
+            )}
           </button>
         </Tooltip>
 
@@ -193,7 +197,7 @@ export default function Sidebar({
         >
           <button
             onClick={onToggleCollapsed}
-            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium
+            className="hidden w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium md:flex
               text-slate-400 hover:text-slate-200 hover:bg-slate-700/30 transition-all duration-200"
           >
             <span className="text-xl text-slate-500">

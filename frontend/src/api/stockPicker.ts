@@ -613,6 +613,52 @@ export interface StockPickerConfig {
   updated_at?: string;
 }
 
+export type StockPickerAnalysisJobStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'error';
+
+export interface StockPickerAnalysisJob {
+  job_id: string;
+  runtime_id: string;
+  pool_type: 'LONG' | 'SHORT' | null;
+  force_refresh: boolean;
+  current: string | null;
+  total: number;
+  completed: number;
+  status: StockPickerAnalysisJobStatus;
+  logs: Array<{
+    time: string;
+    message: string;
+  }>;
+  result: {
+    total: number;
+    success: number;
+    skipped: number;
+    failed: number;
+  } | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export class StockPickerAnalysisJobNotFoundError extends Error {
+  runtimeId: string | null;
+  runtimeStartedAt: string | null;
+
+  constructor(
+    message: string,
+    runtimeId: string | null,
+    runtimeStartedAt: string | null,
+  ) {
+    super(message);
+    this.name = 'StockPickerAnalysisJobNotFoundError';
+    this.runtimeId = runtimeId;
+    this.runtimeStartedAt = runtimeStartedAt;
+  }
+}
+
 export interface StockPickerFactorCoverageMetric {
   available_count: number;
   total_count: number;
@@ -1082,6 +1128,8 @@ export async function analyzeStocks(data?: {
 }): Promise<{
   success: boolean;
   job_id: string;
+  runtime_id: string;
+  created_at: string;
   status: 'queued';
   message: string;
 }> {
@@ -1096,6 +1144,29 @@ export async function analyzeStocks(data?: {
     throw new Error(error.detail || '分析失败');
   }
   
+  return response.json();
+}
+
+export async function getStockPickerAnalysisJob(
+  jobId: string,
+): Promise<StockPickerAnalysisJob> {
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/analysis/jobs/${encodeURIComponent(jobId)}`,
+  );
+  if (response.status === 404) {
+    const payload = await response.json().catch(() => null);
+    const detail = payload?.detail;
+    throw new StockPickerAnalysisJobNotFoundError(
+      detail?.message || '分析任务不存在或已过期',
+      typeof detail?.runtime_id === 'string' ? detail.runtime_id : null,
+      typeof detail?.runtime_started_at === 'string'
+        ? detail.runtime_started_at
+        : null,
+    );
+  }
+  if (!response.ok) {
+    throw new Error('获取分析任务状态失败');
+  }
   return response.json();
 }
 

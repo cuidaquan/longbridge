@@ -14,14 +14,14 @@ export function PageHeader({
   actions,
 }: PageHeaderProps) {
   return (
-    <div className="flex items-center justify-between mb-6">
-      <div className="flex items-center gap-3">
+    <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex min-w-0 items-center gap-3">
         {icon && (
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center text-white shadow-lg shadow-cyan-500/20">
+          <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-cyan-500 to-blue-600 text-white shadow-lg shadow-cyan-500/20">
             {icon}
           </div>
         )}
-        <div>
+        <div className="min-w-0">
           <h1 className="text-2xl font-bold text-slate-900 dark:text-white">
             {title}
           </h1>
@@ -32,7 +32,7 @@ export function PageHeader({
           )}
         </div>
       </div>
-      {actions && <div className="flex items-center gap-3">{actions}</div>}
+      {actions && <div className="min-w-0 sm:flex-shrink-0">{actions}</div>}
     </div>
   );
 }
@@ -47,8 +47,8 @@ export function Card({ children, className = "", padding = "md" }: CardProps) {
   const paddingClass = {
     none: "",
     sm: "p-4",
-    md: "p-6",
-    lg: "p-8",
+    md: "p-4 md:p-6",
+    lg: "p-5 md:p-8",
   }[padding];
 
   return (
@@ -141,7 +141,7 @@ export function Button({
   return (
     <button
       className={`
-        inline-flex items-center justify-center gap-2 font-medium rounded-lg
+        inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium rounded-lg
         transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed
         ${variantClasses[variant]} ${sizeClasses[size]} ${className}
       `}

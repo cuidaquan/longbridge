@@ -68,10 +68,10 @@ export default function Layout({ children }: LayoutProps) {
       <main
         className={`
           min-h-screen transition-all duration-300 ease-in-out
-          ${sidebarCollapsed ? "ml-16" : "ml-60"}
+          ${sidebarCollapsed ? "ml-16" : "ml-16 md:ml-60"}
         `}
       >
-        <div className="p-6 animate-fade-in">{children(activeTab)}</div>
+        <div className="p-3 md:p-6 animate-fade-in">{children(activeTab)}</div>
       </main>
     </div>
   );

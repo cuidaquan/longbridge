@@ -1,7 +1,7 @@
 /**
  * 智能选股页面 - 现代化重构版
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   FilterList,
   TrendingUp,
@@ -41,6 +41,7 @@ import {
   toggleStock,
   clearPool,
   analyzeStocks,
+  getStockPickerAnalysisJob,
   searchSecurities,
   getScreenerStrategies,
   searchScreenerCandidates,
@@ -70,8 +71,16 @@ import {
   type StockPickerAIIncrementEvaluationHistoryItem,
   type StockPickerConfig,
   type StockPickerFactorCoverage,
+  type StockPickerAnalysisJob,
+  StockPickerAnalysisJobNotFoundError,
 } from '../api/stockPicker';
 import { API_BASE } from '../api/client';
+import {
+  clearActiveStockPickerTask,
+  loadActiveStockPickerTask,
+  saveActiveStockPickerTask,
+  type ActiveStockPickerTask,
+} from '../lib/stockPickerTaskRecovery';
 
 export default function StockPicker() {
   const [pools, setPools] = useState<PoolsResponse>({ long_pool: [], short_pool: [] });
@@ -92,8 +101,21 @@ export default function StockPicker() {
     current: '',
     total: 0,
     completed: 0,
-    status: 'idle' as 'idle' | 'queued' | 'running' | 'completed' | 'error',
+    status: 'idle' as
+      | 'idle'
+      | 'queued'
+      | 'running'
+      | 'completed'
+      | 'error'
+      | 'recovering',
   });
+  const analysisEventSourceRef = useRef<EventSource | null>(null);
+  const analysisReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const activeAnalysisTaskRef = useRef<ActiveStockPickerTask | null>(null);
+  const analysisRecoveryPendingRef = useRef(false);
+  const mountedRef = useRef(true);
 
   const loadPools = async () => {
     try {
@@ -116,12 +138,188 @@ export default function StockPicker() {
     }
   };
 
+  function closeAnalysisProgressConnection() {
+    analysisEventSourceRef.current?.close();
+    analysisEventSourceRef.current = null;
+    if (analysisReconnectTimerRef.current) {
+      clearTimeout(analysisReconnectTimerRef.current);
+      analysisReconnectTimerRef.current = null;
+    }
+  }
+
+  function clearTrackedAnalysisTask() {
+    closeAnalysisProgressConnection();
+    activeAnalysisTaskRef.current = null;
+    clearActiveStockPickerTask();
+  }
+
+  function finishMissingAnalysisTask(
+    task: ActiveStockPickerTask,
+    currentRuntimeId: string | null,
+  ) {
+    clearTrackedAnalysisTask();
+    setAnalyzing(false);
+    setSuccess(null);
+    setAnalysisProgress((current) => ({
+      ...current,
+      current: '',
+      status: 'error',
+    }));
+    setError(
+      currentRuntimeId && currentRuntimeId !== task.runtime_id
+        ? '后端服务已重启，原分析任务已终止；已重新加载持久化结果，请重新发起分析'
+        : '分析任务不存在或已过期；已重新加载持久化结果，请重新发起分析',
+    );
+    void loadAnalysis();
+  }
+
+  function applyAnalysisJobSnapshot(job: StockPickerAnalysisJob): boolean {
+    if (activeAnalysisTaskRef.current?.job_id !== job.job_id) return true;
+    setAnalysisProgress({
+      current: job.current || '',
+      total: job.total || 0,
+      completed: job.completed || 0,
+      status: job.status,
+    });
+    setAnalysisLogs(job.logs.map((log) => log.message));
+
+    if (job.status === 'completed') {
+      clearTrackedAnalysisTask();
+      setAnalyzing(false);
+      setSuccess(
+        job.result
+          ? `分析完成：成功 ${job.result.success}，跳过 ${job.result.skipped}，失败 ${job.result.failed}`
+          : '分析完成',
+      );
+      void loadAnalysis();
+      return true;
+    }
+    if (job.status === 'error') {
+      clearTrackedAnalysisTask();
+      setAnalyzing(false);
+      setSuccess(null);
+      setError(job.error || '分析任务失败');
+      void loadAnalysis();
+      return true;
+    }
+    return false;
+  }
+
+  function scheduleAnalysisRecovery(
+    task: ActiveStockPickerTask,
+    delay = 2000,
+  ) {
+    if (analysisReconnectTimerRef.current) {
+      clearTimeout(analysisReconnectTimerRef.current);
+    }
+    analysisReconnectTimerRef.current = setTimeout(() => {
+      analysisReconnectTimerRef.current = null;
+      void recoverAnalysisTask(task, false);
+    }, delay);
+  }
+
+  async function recoverAnalysisTask(
+    task: ActiveStockPickerTask,
+    restoredFromPageLoad: boolean,
+  ) {
+    if (
+      analysisRecoveryPendingRef.current
+      || activeAnalysisTaskRef.current?.job_id !== task.job_id
+    ) {
+      return;
+    }
+    analysisRecoveryPendingRef.current = true;
+    try {
+      const job = await getStockPickerAnalysisJob(task.job_id);
+      if (
+        !mountedRef.current
+        || activeAnalysisTaskRef.current?.job_id !== task.job_id
+      ) {
+        return;
+      }
+      if (job.runtime_id !== task.runtime_id) {
+        finishMissingAnalysisTask(task, job.runtime_id);
+        return;
+      }
+      if (applyAnalysisJobSnapshot(job)) return;
+      setError(null);
+      if (restoredFromPageLoad) {
+        setSuccess('已恢复进行中的分析任务');
+        connectAnalysisProgress(task);
+      } else {
+        analysisReconnectTimerRef.current = setTimeout(() => {
+          analysisReconnectTimerRef.current = null;
+          connectAnalysisProgress(task);
+        }, 1000);
+      }
+    } catch (err) {
+      if (
+        !mountedRef.current
+        || activeAnalysisTaskRef.current?.job_id !== task.job_id
+      ) {
+        return;
+      }
+      if (err instanceof StockPickerAnalysisJobNotFoundError) {
+        finishMissingAnalysisTask(task, err.runtimeId);
+        return;
+      }
+      setAnalysisProgress((current) => ({
+        ...current,
+        status: 'recovering',
+      }));
+      setSuccess(null);
+      setError('后端暂时不可达，正在等待恢复分析任务');
+      scheduleAnalysisRecovery(task);
+    } finally {
+      analysisRecoveryPendingRef.current = false;
+    }
+  }
+
+  function connectAnalysisProgress(task: ActiveStockPickerTask) {
+    if (
+      !mountedRef.current
+      || activeAnalysisTaskRef.current?.job_id !== task.job_id
+    ) {
+      return;
+    }
+    closeAnalysisProgressConnection();
+    const eventSource = new EventSource(
+      `${API_BASE}/api/stock-picker/analysis/progress/${encodeURIComponent(task.job_id)}`,
+    );
+    analysisEventSourceRef.current = eventSource;
+    eventSource.onmessage = (event) => {
+      try {
+        const job = JSON.parse(event.data) as StockPickerAnalysisJob;
+        if (job.runtime_id !== task.runtime_id) {
+          finishMissingAnalysisTask(task, job.runtime_id);
+          return;
+        }
+        applyAnalysisJobSnapshot(job);
+      } catch (err) {
+        console.error('解析进度数据失败:', err);
+      }
+    };
+    eventSource.onerror = () => {
+      if (analysisEventSourceRef.current === eventSource) {
+        analysisEventSourceRef.current = null;
+      }
+      eventSource.close();
+      setAnalysisProgress((current) => ({
+        ...current,
+        status: 'recovering',
+      }));
+      void recoverAnalysisTask(task, false);
+    };
+  }
+
   const handleAnalyze = async (
     poolType?: 'LONG' | 'SHORT',
     forceRefresh = false,
   ) => {
+    clearTrackedAnalysisTask();
     setAnalyzing(true);
     setError(null);
+    setSuccess(null);
     setAnalysisLogs([]);
     setShowLogs(true);
     setAnalysisProgress({ current: '', total: 0, completed: 0, status: 'queued' });
@@ -131,48 +329,17 @@ export default function StockPicker() {
         pool_type: poolType,
         force_refresh: forceRefresh,
       });
+      const task = {
+        job_id: result.job_id,
+        runtime_id: result.runtime_id,
+        created_at: result.created_at,
+      };
+      activeAnalysisTaskRef.current = task;
+      saveActiveStockPickerTask(task);
       setSuccess(result.message);
-
-      const eventSource = new EventSource(
-        `${API_BASE}/api/stock-picker/analysis/progress/${result.job_id}`,
-      );
-      eventSource.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
-          setAnalysisProgress({
-            current: data.current || '',
-            total: data.total || 0,
-            completed: data.completed || 0,
-            status: data.status || 'queued',
-          });
-          if (data.logs && data.logs.length > 0) {
-            setAnalysisLogs(data.logs.map((log: { message: string }) => log.message));
-          }
-          if (data.status === 'completed') {
-            eventSource.close();
-            const summary = data.result;
-            setSuccess(
-              summary
-                ? `分析完成：成功 ${summary.success}，跳过 ${summary.skipped}，失败 ${summary.failed}`
-                : '分析完成',
-            );
-            setAnalyzing(false);
-            loadAnalysis();
-          } else if (data.status === 'error') {
-            eventSource.close();
-            setError(data.error || '分析任务失败');
-            setAnalyzing(false);
-          }
-        } catch (e) {
-          console.error('解析进度数据失败:', e);
-        }
-      };
-      eventSource.onerror = () => {
-        eventSource.close();
-        setError('分析进度连接已断开');
-        setAnalyzing(false);
-      };
+      connectAnalysisProgress(task);
     } catch (err) {
+      clearTrackedAnalysisTask();
       setError(err instanceof Error ? err.message : '分析失败');
       setAnalyzing(false);
     }
@@ -218,8 +385,26 @@ export default function StockPicker() {
   };
 
   useEffect(() => {
-    loadPools();
-    loadAnalysis();
+    mountedRef.current = true;
+    void loadPools();
+    void loadAnalysis();
+    const storedTask = loadActiveStockPickerTask();
+    if (storedTask) {
+      activeAnalysisTaskRef.current = storedTask;
+      setAnalyzing(true);
+      setShowLogs(true);
+      setAnalysisProgress({
+        current: '',
+        total: 0,
+        completed: 0,
+        status: 'recovering',
+      });
+      void recoverAnalysisTask(storedTask, true);
+    }
+    return () => {
+      mountedRef.current = false;
+      closeAnalysisProgressConnection();
+    };
   }, []);
 
   if (loading) {
@@ -233,7 +418,7 @@ export default function StockPicker() {
         description="AI驱动的多维度量化评分系统"
         icon={<FilterList />}
         actions={
-          <div className="flex flex-wrap justify-end gap-2">
+          <div className="flex flex-wrap gap-2 sm:justify-end">
             <Button
               variant="secondary"
               onClick={() => setShowSnapshotDialog(true)}
@@ -295,7 +480,7 @@ export default function StockPicker() {
 
       {/* 统计卡片 */}
       {analysis && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <StatCard
             label="做多股票"
             value={analysis.stats.long_count}
@@ -376,6 +561,10 @@ export default function StockPicker() {
                     ? `正在分析: ${analysisProgress.current}`
                     : analysisProgress.status === 'completed'
                       ? '分析完成'
+                      : analysisProgress.status === 'recovering'
+                        ? '后端连接中断，正在恢复任务...'
+                        : analysisProgress.status === 'error'
+                          ? '分析任务已终止'
                       : '准备中...'}
                 </span>
                 <span className="font-medium text-slate-900 dark:text-white">
@@ -537,7 +726,7 @@ function StockPoolCard({
         }
       />
 
-      <div className="flex gap-2 mb-4">
+      <div className="mb-4 flex flex-wrap gap-2">
         <Button size="sm" variant="secondary" onClick={onAdd} icon={<Add className="w-4 h-4" />}>
           添加
         </Button>

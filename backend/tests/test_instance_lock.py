@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from app.config import Settings
 from app.instance_lock import InstanceLockError, SingleInstanceLock
 from app import main
+from app.runtime import get_runtime_metadata
 
 
 _CHILD_LOCK_SCRIPT = """
@@ -147,6 +148,14 @@ class SingleInstanceLifecycleTest(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Settings(deployment_mode="multi_instance")
 
+    def test_runtime_metadata_is_stable_within_process(self) -> None:
+        first = get_runtime_metadata()
+        second = get_runtime_metadata()
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first["runtime_id"]), 32)
+        self.assertIn("+00:00", first["runtime_started_at"])
+
     def test_fastapi_lifecycle_and_health_report_instance_lock(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -184,14 +193,22 @@ class SingleInstanceLifecycleTest(unittest.TestCase):
                 self._run_async(main.on_shutdown())
                 self.assertFalse(instance_lock.acquired)
 
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["deployment_mode"], "single_instance")
+        self.assertTrue(response["instance_lock_acquired"])
+        self.assertEqual(response["database_id"], instance_lock.database_id)
         self.assertEqual(
-            response,
-            {
-                "status": "ok",
-                "deployment_mode": "single_instance",
-                "instance_lock_acquired": True,
-                "database_id": instance_lock.database_id,
-            },
+            response["runtime_id"],
+            get_runtime_metadata()["runtime_id"],
+        )
+        self.assertEqual(
+            response["transient_state_reset_on_restart"],
+            [
+                "analysis_jobs",
+                "stock_picker_cache",
+                "circuit_breakers",
+                "rate_limits",
+            ],
         )
         close_connection.assert_called_once_with()
         monitor.stop_monitoring.assert_awaited_once_with()

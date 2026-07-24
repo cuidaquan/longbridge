@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from .config import get_settings
 from .db import close_connection
 from .instance_lock import SingleInstanceLock
+from .runtime import get_runtime_metadata
 from .routers import portfolio as portfolio_router
 from .routers import quotes as quotes_router
 from .routers import settings as settings_router
@@ -434,11 +435,19 @@ async def on_shutdown() -> None:
 
 @app.get("/health")
 def health() -> dict[str, object]:
+    runtime = get_runtime_metadata()
     return {
         "status": "ok",
         "deployment_mode": settings.deployment_mode,
         "instance_lock_acquired": instance_lock.acquired,
         "database_id": instance_lock.database_id,
+        **runtime,
+        "transient_state_reset_on_restart": [
+            "analysis_jobs",
+            "stock_picker_cache",
+            "circuit_breakers",
+            "rate_limits",
+        ],
     }
 
 
