@@ -10,6 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import get_settings
+from .db import close_connection
+from .instance_lock import SingleInstanceLock
 from .routers import portfolio as portfolio_router
 from .routers import quotes as quotes_router
 from .routers import settings as settings_router
@@ -35,6 +37,7 @@ from .stock_picker_reliability import (
 app = FastAPI(title="Longbridge Quant Backend", version="0.1.0")
 
 settings = get_settings()
+instance_lock = SingleInstanceLock(settings.duckdb_path)
 
 app.add_middleware(
     CORSMiddleware,
@@ -341,65 +344,102 @@ async def _persist_stock_picker_reliability() -> None:
 @app.on_event("startup")
 async def on_startup() -> None:
     logger.info("startup: entering handler")
-    loop = asyncio.get_running_loop()
-    quote_stream_manager.attach_loop(loop)
-    logger.info("startup: loop attached %s", loop)
-    async def start_quote_stream_after_health_ready() -> None:
-        await asyncio.sleep(3)
-        quote_stream_manager.ensure_started()
-        logger.info("startup: quote stream started")
-
-    _start_background_task(start_quote_stream_after_health_ready())
-    logger.info("startup: quote stream scheduled")
-
-    # Initialize position monitor
-    monitor = get_position_monitor()
-    _start_background_task(monitor.start_monitoring())
-    logger.info("startup: position monitor started")
-    
-    # Auto-sync position historical data
-    _start_background_task(_auto_sync_position_data())
-    logger.info("startup: auto-sync task scheduled")
-
-    _start_background_task(_auto_refresh_stock_picker())
-    logger.info("startup: stock-picker auto-refresh scheduled")
-
-    _start_background_task(
-        _auto_capture_stock_picker_factor_snapshots()
+    instance_lock.acquire()
+    logger.info(
+        "startup: acquired single-instance lock for database %s",
+        instance_lock.database_id,
     )
-    logger.info("startup: stock-picker factor snapshots scheduled")
+    try:
+        loop = asyncio.get_running_loop()
+        quote_stream_manager.attach_loop(loop)
+        logger.info("startup: loop attached %s", loop)
 
-    _start_background_task(_persist_stock_picker_reliability())
-    logger.info("startup: stock-picker reliability persistence scheduled")
-    
-    # Initialize AI Trading Engine (if enabled)
-    ai_engine = get_ai_trading_engine()
-    # Note: 引擎会根据配置决定是否启动
-    # 用户需要通过 API 或配置文件启用
-    logger.info("startup: AI trading engine initialized")
+        async def start_quote_stream_after_health_ready() -> None:
+            await asyncio.sleep(3)
+            quote_stream_manager.ensure_started()
+            logger.info("startup: quote stream started")
+
+        _start_background_task(start_quote_stream_after_health_ready())
+        logger.info("startup: quote stream scheduled")
+
+        # Initialize position monitor
+        monitor = get_position_monitor()
+        _start_background_task(monitor.start_monitoring())
+        logger.info("startup: position monitor started")
+
+        # Auto-sync position historical data
+        _start_background_task(_auto_sync_position_data())
+        logger.info("startup: auto-sync task scheduled")
+
+        _start_background_task(_auto_refresh_stock_picker())
+        logger.info("startup: stock-picker auto-refresh scheduled")
+
+        _start_background_task(
+            _auto_capture_stock_picker_factor_snapshots()
+        )
+        logger.info("startup: stock-picker factor snapshots scheduled")
+
+        _start_background_task(_persist_stock_picker_reliability())
+        logger.info(
+            "startup: stock-picker reliability persistence scheduled"
+        )
+
+        # Initialize AI Trading Engine (if enabled)
+        get_ai_trading_engine()
+        # Note: 引擎会根据配置决定是否启动
+        # 用户需要通过 API 或配置文件启用
+        logger.info("startup: AI trading engine initialized")
+    except BaseException:
+        for task in list(_background_tasks):
+            task.cancel()
+        if _background_tasks:
+            await asyncio.gather(
+                *list(_background_tasks),
+                return_exceptions=True,
+            )
+        try:
+            close_connection()
+        finally:
+            instance_lock.release()
+        raise
 
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    monitor = get_position_monitor()
-    await monitor.stop_monitoring()
-    for task in list(_background_tasks):
-        task.cancel()
-    if _background_tasks:
-        await asyncio.gather(*list(_background_tasks), return_exceptions=True)
+    try:
+        monitor = get_position_monitor()
+        await monitor.stop_monitoring()
+        for task in list(_background_tasks):
+            task.cancel()
+        if _background_tasks:
+            await asyncio.gather(
+                *list(_background_tasks),
+                return_exceptions=True,
+            )
 
-    await quote_stream_manager.stop()
-    
-    # Stop AI trading engine
-    ai_engine = get_ai_trading_engine()
-    await ai_engine.stop()
-    logger.info("shutdown: AI trading engine stopped")
+        await quote_stream_manager.stop()
+
+        # Stop AI trading engine
+        ai_engine = get_ai_trading_engine()
+        await ai_engine.stop()
+        logger.info("shutdown: AI trading engine stopped")
+    finally:
+        try:
+            close_connection()
+        finally:
+            instance_lock.release()
+            logger.info("shutdown: released single-instance lock")
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, object]:
+    return {
+        "status": "ok",
+        "deployment_mode": settings.deployment_mode,
+        "instance_lock_acquired": instance_lock.acquired,
+        "database_id": instance_lock.database_id,
+    }
 
 
 async def _stream_websocket_queue(

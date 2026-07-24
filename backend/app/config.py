@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from cryptography.fernet import Fernet
 from pydantic import Field
@@ -14,6 +14,7 @@ class Settings(BaseSettings):
 
     data_dir: Path = Path("data")
     duckdb_path: Path = Path("data/quant.db")
+    deployment_mode: Literal["single_instance"] = "single_instance"
     encryption_key: Optional[str] = None
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     stock_picker_alert_webhook_enabled: bool = False

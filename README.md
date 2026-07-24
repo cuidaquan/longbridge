@@ -73,11 +73,23 @@ VITE_API_BASE=http://127.0.0.1:8000 npm run dev
 ```dotenv
 DATA_DIR=data
 DUCKDB_PATH=data/quant.db
+DEPLOYMENT_MODE=single_instance
 CORS_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 # ENCRYPTION_KEY=<Fernet key；不设置时首次运行自动生成>
 ```
 
 `backend/longbridge.env.example` 提供 Longbridge 官方服务端点示例。需要覆盖 SDK 默认端点时，将其复制为 `backend/.longbridge.env` 后再启动；已有的 `.longport.env` 仍可兼容加载。前端 API 地址由 `VITE_API_BASE` 控制，默认是 `http://localhost:8000`。
+
+## 部署模式
+
+当前只支持本地单实例部署：同一 DuckDB 文件同时只能由一个后端进程使用。后端启动时会按 DuckDB 绝对路径获取系统级独占锁；如果已有后端使用同一数据库，第二个进程会在启动阶段明确失败。进程正常退出或异常终止后，操作系统会自动释放锁。
+
+- 不要使用 Uvicorn 的多 worker 模式，也不要让多个后端进程共享同一 `DUCKDB_PATH`。
+- 不同 DuckDB 路径可以分别启动独立实例。
+- `GET /health` 返回 `deployment_mode`、`instance_lock_acquired` 和不直接暴露路径的 SHA-256 `database_id` 指纹，可用于核对运行边界。
+- 分析任务、缓存、熔断和限流状态均为进程内状态；这与当前单实例部署一致，服务重启后不会恢复这些瞬时状态。
+
+只有确定需要多实例部署时，才需要迁移到支持并发写入的共享数据库、任务队列和共享缓存，并重新设计分布式协调。
 
 ## 实盘保护
 

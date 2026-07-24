@@ -126,6 +126,16 @@ def get_connection():  # -> Iterator[DuckDBPyConnection]
         yield _CONN
 
 
+def close_connection() -> None:
+    """Close the process-wide DuckDB connection before releasing its lock."""
+    with _LOCK:
+        global _CONN
+        connection = _CONN
+        _CONN = None
+        if connection is not None:
+            connection.close()
+
+
 def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_SETTINGS_TABLE_SQL)
     conn.execute(_SYMBOLS_TABLE_SQL)
