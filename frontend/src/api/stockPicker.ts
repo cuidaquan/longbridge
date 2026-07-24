@@ -842,6 +842,124 @@ export interface StockPickerAIIncrementEvaluationHistoryItem {
   data_as_of: string | null;
 }
 
+export interface StockPickerFactorReturnSummary {
+  sample_count: number;
+  average: number | null;
+  median: number | null;
+  positive_rate: number | null;
+  p05: number | null;
+  p95: number | null;
+}
+
+export interface StockPickerFactorIncrementMetrics {
+  paired_dates: number;
+  baseline: StockPickerFactorReturnSummary;
+  variant: StockPickerFactorReturnSummary;
+  paired_delta: StockPickerFactorReturnSummary;
+  average_baseline_count: number;
+  average_selected_count: number;
+  paired_delta_inference: {
+    ready: boolean;
+    reason: string | null;
+    method: string;
+    cluster_unit: string;
+    estimate: number | null;
+    confidence_level: number;
+    lower: number | null;
+    upper: number | null;
+    standard_error: number | null;
+    interval_direction: 'positive' | 'negative' | 'inconclusive' | null;
+    bootstrap_samples: number;
+    requested_block_size: number | null;
+    effective_block_size: number;
+    distinct_observation_dates: number;
+    seed: number;
+  };
+}
+
+export interface StockPickerFactorIncrementEvaluationReport {
+  id?: number;
+  evaluation_version: string;
+  market: 'US' | 'HK';
+  pool_type: 'LONG' | 'SHORT';
+  ready: boolean;
+  parameters: {
+    horizons: number[];
+    lookback_days: number;
+    max_bars: number;
+    minimum_observation_dates: number;
+    minimum_distinct_symbols: number;
+    minimum_factor_coverage: number;
+    maximum_snapshot_age_hours: number;
+    minimum_label_coverage: number;
+    minimum_paired_dates: number;
+    minimum_selected_per_date: number;
+    bootstrap_samples: number;
+    bootstrap_confidence_level: number;
+    bootstrap_block_size: number | null;
+    bootstrap_seed: number;
+    snapshot_version: string;
+    thresholds: Record<string, number>;
+    variants: Record<string, string[]>;
+  };
+  coverage: {
+    raw_snapshot_rows: number;
+    eligible_snapshot_rows: number;
+    observation_dates: number;
+    distinct_symbols: number;
+    latest_observed_at: string | null;
+    snapshot_age_hours: number | null;
+    applicable_factors: string[];
+    factor_coverage: Record<string, {
+      available_count: number;
+      total_count: number;
+      coverage: number;
+    }>;
+    labeled_records_by_horizon: Record<string, number>;
+    label_coverage_by_horizon: Record<string, number | null>;
+    paired_dates_by_variant_horizon: Record<string, Record<string, number>>;
+    selection: Record<string, {
+      selected_records: number;
+      total_records: number;
+      selected_dates: number;
+      total_dates: number;
+    }>;
+    excluded_rows: Record<string, number>;
+    latest_label_date: string | null;
+    gate_reasons: string[];
+  };
+  metrics: Record<
+    string,
+    Record<string, StockPickerFactorIncrementMetrics>
+  > | null;
+  methodology: {
+    comparison: string;
+    no_lookahead: string;
+    deduplication: string;
+    snapshot_integrity: string;
+    gate: string;
+    inference: string;
+    causal_limit: string;
+    costs: string;
+    price_limit: string;
+  };
+}
+
+export interface StockPickerFactorIncrementEvaluationHistoryItem {
+  id: number;
+  created_at: string;
+  market: 'US' | 'HK';
+  pool_type: 'LONG' | 'SHORT';
+  evaluation_version: string;
+  parameters: StockPickerFactorIncrementEvaluationReport['parameters'];
+  result: Omit<
+    StockPickerFactorIncrementEvaluationReport,
+    'id' | 'parameters'
+  >;
+  ready: boolean;
+  data_as_of: string | null;
+}
+
 export interface StockPickerConfig {
   auto_refresh_enabled: boolean;
   auto_refresh_interval: number;
@@ -1326,6 +1444,73 @@ export async function getStockPickerAIIncrementEvaluations(
   if (!response.ok) {
     const error = await response.json().catch(() => null);
     throw new Error(error?.detail || '获取 AI 增量评估历史失败');
+  }
+  return response.json();
+}
+
+export async function runStockPickerFactorIncrementEvaluation(params: {
+  market: 'US' | 'HK';
+  poolType: 'LONG' | 'SHORT';
+  horizons?: number[];
+  lookbackDays?: number;
+  maxBars?: number;
+  minimumObservationDates?: number;
+  minimumDistinctSymbols?: number;
+  minimumFactorCoverage?: number;
+  maximumSnapshotAgeHours?: number;
+  minimumLabelCoverage?: number;
+  minimumPairedDates?: number;
+  minimumSelectedPerDate?: number;
+  bootstrapSamples?: number;
+  bootstrapConfidenceLevel?: number;
+  bootstrapBlockSize?: number | null;
+  bootstrapSeed?: number;
+}): Promise<StockPickerFactorIncrementEvaluationReport> {
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/factor-evaluation`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        market: params.market,
+        pool_type: params.poolType,
+        horizons: params.horizons ?? [5, 10, 20],
+        lookback_days: params.lookbackDays ?? 730,
+        max_bars: params.maxBars ?? 5000,
+        minimum_observation_dates: params.minimumObservationDates ?? 60,
+        minimum_distinct_symbols: params.minimumDistinctSymbols ?? 10,
+        minimum_factor_coverage: params.minimumFactorCoverage ?? 0.9,
+        maximum_snapshot_age_hours: params.maximumSnapshotAgeHours ?? 48,
+        minimum_label_coverage: params.minimumLabelCoverage ?? 0.9,
+        minimum_paired_dates: params.minimumPairedDates ?? 40,
+        minimum_selected_per_date: params.minimumSelectedPerDate ?? 3,
+        bootstrap_samples: params.bootstrapSamples ?? 2000,
+        bootstrap_confidence_level:
+          params.bootstrapConfidenceLevel ?? 0.95,
+        bootstrap_block_size: params.bootstrapBlockSize ?? null,
+        bootstrap_seed: params.bootstrapSeed ?? 20260724,
+      }),
+    },
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '运行因子增量评估失败');
+  }
+  return response.json();
+}
+
+export async function getStockPickerFactorIncrementEvaluations(
+  limit = 20,
+): Promise<{
+  items: StockPickerFactorIncrementEvaluationHistoryItem[];
+}> {
+  const queryParams = new URLSearchParams({ limit: String(limit) });
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/factor-evaluations?${queryParams.toString()}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取因子增量评估历史失败');
   }
   return response.json();
 }

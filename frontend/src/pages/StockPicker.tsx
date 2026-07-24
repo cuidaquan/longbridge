@@ -18,6 +18,7 @@ import {
   Refresh,
   Storage,
   History,
+  Science,
 } from '@mui/icons-material';
 import {
   PageHeader,
@@ -91,6 +92,7 @@ import {
   saveActiveStockPickerTask,
   type ActiveStockPickerTask,
 } from '../lib/stockPickerTaskRecovery';
+import StockPickerFactorEvaluationDialog from '../components/StockPickerFactorEvaluationDialog';
 
 export default function StockPicker() {
   const [pools, setPools] = useState<PoolsResponse>({ long_pool: [], short_pool: [] });
@@ -101,6 +103,7 @@ export default function StockPicker() {
   const [showDiscoveryDialog, setShowDiscoveryDialog] = useState(false);
   const [showBacktestDialog, setShowBacktestDialog] = useState(false);
   const [showAIEvaluationDialog, setShowAIEvaluationDialog] = useState(false);
+  const [showFactorEvaluationDialog, setShowFactorEvaluationDialog] = useState(false);
   const [showSnapshotDialog, setShowSnapshotDialog] = useState(false);
   const [addDialogType, setAddDialogType] = useState<'LONG' | 'SHORT'>('LONG');
   const [error, setError] = useState<string | null>(null);
@@ -445,6 +448,13 @@ export default function StockPicker() {
             </Button>
             <Button
               variant="secondary"
+              onClick={() => setShowFactorEvaluationDialog(true)}
+              icon={<Science className="w-4 h-4" />}
+            >
+              因子增量评估
+            </Button>
+            <Button
+              variant="secondary"
               onClick={() => setShowBacktestDialog(true)}
               icon={<Analytics className="w-4 h-4" />}
             >
@@ -637,6 +647,12 @@ export default function StockPicker() {
       {showAIEvaluationDialog && (
         <StockPickerAIIncrementEvaluationDialog
           onClose={() => setShowAIEvaluationDialog(false)}
+        />
+      )}
+
+      {showFactorEvaluationDialog && (
+        <StockPickerFactorEvaluationDialog
+          onClose={() => setShowFactorEvaluationDialog(false)}
         />
       )}
 
