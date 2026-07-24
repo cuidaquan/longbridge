@@ -1142,6 +1142,19 @@ function ScoreRow({ label, value, max }: { label: string; value: number; max: nu
   );
 }
 
+const SNAPSHOT_FACTOR_LABELS: Record<string, string> = {
+  market_rs: '市场 RS',
+  fundamental_quality: '财务质量',
+  expectations: '预期方向',
+  financial_event: '财报事件',
+  corporate_action: '公司行动',
+  trade_status: '交易状态',
+  depth: '盘口深度',
+  margin: '保证金',
+  short_risk: '做空拥挤度',
+  short_capacity: '账户预估卖空能力',
+};
+
 function StockPickerSnapshotDialog({ onClose }: { onClose: () => void }) {
   const [config, setConfig] = useState<StockPickerConfig | null>(null);
   const [coverage, setCoverage] = useState<StockPickerFactorCoverage | null>(null);
@@ -1209,7 +1222,7 @@ function StockPickerSnapshotDialog({ onClose }: { onClose: () => void }) {
       !config.factor_snapshot_enabled
       && snapshotEnabled
       && !confirm(
-        '启用后，服务会在 US/HK 收盘后持续调用 Longbridge、Fundamental 和交易接口。确认启用吗？',
+        '启用后，服务会在 US/HK 收盘后持续调用 Longbridge、Fundamental 和交易接口，并为 US SHORT 查询账户预估可卖空数量。确认启用吗？',
       )
     ) {
       return;
@@ -1252,7 +1265,7 @@ function StockPickerSnapshotDialog({ onClose }: { onClose: () => void }) {
               因子快照管理
             </h3>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-              查看 Fundamental 与执行风险点时覆盖；自动采集默认关闭。
+              查看 Fundamental、执行风险与美股账户卖空能力的点时覆盖；自动采集默认关闭。
             </p>
           </div>
           <button
@@ -1288,12 +1301,14 @@ function StockPickerSnapshotDialog({ onClose }: { onClose: () => void }) {
                 title="自动采集配置"
                 description="只有真实交易日当地 17:00 后才会采集；日历不可用时失败关闭。"
                 action={
-                  <Badge
-                    variant={snapshotEnabled ? 'success' : 'default'}
-                    dot
-                  >
-                    {snapshotEnabled ? '已启用' : '已关闭'}
-                  </Badge>
+                  <span className="shrink-0 whitespace-nowrap">
+                    <Badge
+                      variant={snapshotEnabled ? 'success' : 'default'}
+                      dot
+                    >
+                      {snapshotEnabled ? '已启用' : '已关闭'}
+                    </Badge>
+                  </span>
                 }
               />
               <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_220px]">
@@ -1373,6 +1388,7 @@ function StockPickerSnapshotDialog({ onClose }: { onClose: () => void }) {
                 <div className="grid gap-3 md:grid-cols-2">
                   {coverage.groups.map((group) => {
                     const factors = Object.values(group.factors);
+                    const factorEntries = Object.entries(group.factors);
                     const readyFactors = factors.filter((factor) => factor.coverage_ready).length;
                     const phaseSummary = Object.entries(group.session_phase_counts)
                       .map(([phase, count]) => `${phase} ${count}`)
@@ -1411,6 +1427,27 @@ function StockPickerSnapshotDialog({ onClose }: { onClose: () => void }) {
                           <p>有效快照 {group.snapshot_count}；采集去重后 {group.captured_daily_snapshot_count}</p>
                           <p>最新快照：{formatDateTime(group.latest_observed_at)}</p>
                           <p>采集阶段：{phaseSummary || '-'}</p>
+                        </div>
+                        <div className="mt-3 grid gap-1.5 sm:grid-cols-2">
+                          {factorEntries.map(([name, factor]) => (
+                            <div
+                              key={name}
+                              className="flex items-center justify-between gap-2 rounded bg-slate-50 px-2 py-1.5 text-xs dark:bg-slate-900/50"
+                            >
+                              <span className="min-w-0 truncate text-slate-600 dark:text-slate-300">
+                                {SNAPSHOT_FACTOR_LABELS[name] || name}
+                              </span>
+                              <span
+                                className={
+                                  factor.coverage_ready
+                                    ? 'shrink-0 text-emerald-600 dark:text-emerald-400'
+                                    : 'shrink-0 text-amber-600 dark:text-amber-400'
+                                }
+                              >
+                                {formatPercent(factor.coverage)}
+                              </span>
+                            </div>
+                          ))}
                         </div>
                       </div>
                     );

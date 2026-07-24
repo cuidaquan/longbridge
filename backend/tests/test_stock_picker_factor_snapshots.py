@@ -105,6 +105,22 @@ def _short_risk(symbols):
     }
 
 
+def _short_capacity(symbols):
+    return {
+        symbol: {
+            "status": "available",
+            "error": None,
+            "cash_max_qty": 100,
+            "margin_max_qty": 250,
+            "short_selling_max_qty": 250,
+            "availability": "available",
+            "borrow_fee_rate": None,
+            "recall_risk": "unknown",
+        }
+        for symbol in symbols
+    }
+
+
 def _service(**kwargs):
     return StockPickerFactorSnapshotService(
         index_loader=kwargs.get("index_loader", _indexes),
@@ -121,6 +137,10 @@ def _service(**kwargs):
             _fundamentals,
         ),
         margin_loader=kwargs.get("margin_loader", _margin),
+        short_capacity_loader=kwargs.get(
+            "short_capacity_loader",
+            _short_capacity,
+        ),
         trading_day_loader=kwargs.get(
             "trading_day_loader",
             lambda market, trading_date: True,
@@ -154,7 +174,8 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
     def test_capture_records_directional_rs_and_all_point_in_time_sections(
         self,
     ) -> None:
-        service = _service()
+        capacity_loader = MagicMock(side_effect=_short_capacity)
+        service = _service(short_capacity_loader=capacity_loader)
 
         long_result = service.capture_group(
             "US",
@@ -212,6 +233,67 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
             long_row["payload"]["short_risk"]["status"],
             "not_applicable",
         )
+        self.assertEqual(
+            short_row["payload"]["short_capacity"][
+                "short_selling_max_qty"
+            ],
+            250,
+        )
+        self.assertEqual(
+            long_row["payload"]["short_capacity"]["status"],
+            "not_applicable",
+        )
+        capacity_loader.assert_called_once_with(["AAA.US"])
+
+    def test_short_capacity_scope_and_failure_are_explicit(self) -> None:
+        capacity_loader = MagicMock(
+            side_effect=RuntimeError("account estimate unavailable"),
+        )
+        service = _service(short_capacity_loader=capacity_loader)
+
+        us_short = service.capture_group(
+            "US",
+            "SHORT",
+            ["AAA.US"],
+            persist=False,
+            include_payloads=True,
+        )
+        hk_short = service.capture_group(
+            "HK",
+            "SHORT",
+            ["700.HK"],
+            persist=False,
+            include_payloads=True,
+        )
+
+        self.assertEqual(
+            us_short["channel_status"]["short_capacity"]["status"],
+            "error",
+        )
+        us_payload = us_short["snapshots"][0]["payload"][
+            "short_capacity"
+        ]
+        self.assertEqual(us_payload["status"], "error")
+        self.assertIn("account estimate unavailable", us_payload["error"])
+        self.assertEqual(us_payload["availability"], "unknown")
+        self.assertIsNone(us_payload["borrow_fee_rate"])
+        self.assertEqual(us_payload["recall_risk"], "unknown")
+
+        self.assertEqual(
+            hk_short["channel_status"]["short_capacity"]["status"],
+            "unsupported",
+        )
+        self.assertEqual(
+            hk_short["snapshots"][0]["payload"]["short_capacity"][
+                "status"
+            ],
+            "unsupported",
+        )
+        self.assertEqual(capacity_loader.call_count, 2)
+        self.assertTrue(all(
+            item.args == (["AAA.US"],)
+            for item in capacity_loader.call_args_list
+        ))
 
     def test_external_failure_is_persistable_as_explicit_missing_data(
         self,
@@ -285,6 +367,19 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
             json.loads(row[3])["short_risk"]["status"],
             "available",
         )
+        self.assertEqual(
+            json.loads(row[3])["short_capacity"][
+                "short_selling_max_qty"
+            ],
+            250,
+        )
+        self.assertTrue(
+            json.loads(row[3])["short_capacity"]["account_specific"]
+        )
+        self.assertEqual(
+            json.loads(row[3])["short_capacity"]["supported_market"],
+            "US",
+        )
         self.assertEqual(group["snapshot_count"], 2)
         self.assertEqual(
             group["captured_daily_snapshot_count"],
@@ -295,6 +390,80 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
         self.assertEqual(coverage["evaluation_snapshot_count"], 2)
         self.assertFalse(group["ready_for_return_evaluation"])
         self.assertFalse(coverage["ready_for_return_evaluation"])
+
+    def test_legacy_snapshot_remains_missing_for_v2_short_capacity(
+        self,
+    ) -> None:
+        connection = duckdb.connect(":memory:")
+        self.addCleanup(connection.close)
+        _run_migrations(connection)
+        factory = lambda: _ConnectionContext(connection)
+        observed_at = datetime(
+            2026,
+            7,
+            23,
+            23,
+            tzinfo=timezone.utc,
+        )
+        connection.execute(
+            """
+            INSERT INTO stock_picker_factor_snapshots (
+                request_id, observed_at, observation_date,
+                snapshot_version, market, target_direction,
+                symbol, benchmark_symbol, source,
+                source_versions, payload
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                "legacy-request",
+                observed_at.replace(tzinfo=None),
+                observed_at.date(),
+                "stock-picker-factor-snapshot-v1",
+                "US",
+                "SHORT",
+                "AAA.US",
+                "SPY.US",
+                "longbridge-live",
+                json.dumps({
+                    "snapshot_schema": (
+                        "stock-picker-factor-snapshot-v1"
+                    ),
+                }),
+                json.dumps({
+                    "capture": {"session_phase": "post_close"},
+                }),
+            ],
+        )
+        service = _service(connection_factory=factory)
+
+        coverage = service.get_coverage(
+            current_time=datetime(
+                2026,
+                7,
+                24,
+                tzinfo=timezone.utc,
+            ),
+        )
+        group = next(
+            item
+            for item in coverage["groups"]
+            if item["market"] == "US"
+            and item["target_direction"] == "SHORT"
+        )
+
+        self.assertEqual(coverage["snapshot_version"], SNAPSHOT_VERSION)
+        self.assertEqual(
+            group["factors"]["short_capacity"],
+            {
+                "available_count": 0,
+                "total_count": 1,
+                "coverage": 0,
+                "missing_reasons": {
+                    "missing_required_values": 1,
+                },
+                "coverage_ready": False,
+            },
+        )
 
     def test_coverage_uses_latest_snapshot_per_symbol_market_date(
         self,
@@ -382,6 +551,13 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
                 "short_ratio": 0.1,
                 "days_to_cover": 2,
             },
+            "short_capacity": {
+                "status": "available",
+                "short_selling_max_qty": 0,
+                "availability": "unavailable",
+                "borrow_fee_rate": None,
+                "recall_risk": "unknown",
+            },
             "capture": {
                 "session_phase": "post_close",
             },
@@ -425,6 +601,10 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
             factor["coverage_ready"]
             for factor in group["factors"].values()
         ))
+        self.assertEqual(
+            group["factors"]["short_capacity"]["available_count"],
+            len(rows),
+        )
 
         missing_depth = [
             {
@@ -451,6 +631,86 @@ class StockPickerFactorSnapshotTests(unittest.TestCase):
             incomplete["factors"]["depth"]["coverage_ready"]
         )
         self.assertFalse(incomplete["ready_for_return_evaluation"])
+
+        missing_capacity = [
+            {
+                **row,
+                "payload": {
+                    **payload,
+                    "short_capacity": {
+                        "status": "error",
+                        "error": "estimate unavailable",
+                        "short_selling_max_qty": None,
+                        "availability": "unknown",
+                    },
+                },
+            }
+            for row in rows
+        ]
+        capacity_incomplete = service._coverage_group(
+            "US",
+            "SHORT",
+            missing_capacity,
+            now,
+        )
+        self.assertFalse(
+            capacity_incomplete["factors"]["short_capacity"][
+                "coverage_ready"
+            ]
+        )
+        self.assertEqual(
+            capacity_incomplete["factors"]["short_capacity"][
+                "missing_reasons"
+            ],
+            {f"error:estimate unavailable": len(rows)},
+        )
+        self.assertFalse(
+            capacity_incomplete["ready_for_return_evaluation"]
+        )
+
+    def test_short_capacity_coverage_applies_only_to_us_short(self) -> None:
+        now = datetime(2026, 7, 24, tzinfo=timezone.utc)
+        base_row = {
+            "observed_at": now,
+            "observation_date": now.date().isoformat(),
+            "symbol": "AAA.US",
+            "payload": {
+                "capture": {"session_phase": "post_close"},
+            },
+        }
+        service = _service()
+
+        us_long = service._coverage_group(
+            "US",
+            "LONG",
+            [{**base_row, "market": "US", "target_direction": "LONG"}],
+            now,
+        )
+        hk_short = service._coverage_group(
+            "HK",
+            "SHORT",
+            [{
+                **base_row,
+                "market": "HK",
+                "target_direction": "SHORT",
+                "symbol": "700.HK",
+            }],
+            now,
+        )
+        us_short = service._coverage_group(
+            "US",
+            "SHORT",
+            [{**base_row, "market": "US", "target_direction": "SHORT"}],
+            now,
+        )
+
+        self.assertNotIn("short_capacity", us_long["factors"])
+        self.assertNotIn("short_capacity", hk_short["factors"])
+        self.assertIn("short_capacity", us_short["factors"])
+        self.assertEqual(
+            us_short["factors"]["short_capacity"]["missing_reasons"],
+            {"missing_required_values": 1},
+        )
 
     def test_session_phase_uses_market_local_time_and_weekends(
         self,

@@ -22,13 +22,14 @@ from .stock_candidate_data import (
     get_fundamental_profiles,
     get_margin_requirements,
     get_security_tradeability,
+    get_short_selling_capacity,
     is_market_trading_day,
 )
 from .stock_picker_baseline import BASELINE_UNIVERSES
 from .stock_screener import DEFAULT_MARKET_BENCHMARKS
 
 
-SNAPSHOT_VERSION = "stock-picker-factor-snapshot-v1"
+SNAPSHOT_VERSION = "stock-picker-factor-snapshot-v2"
 SNAPSHOT_SOURCE = "longbridge-live"
 MIN_OBSERVATION_DATES = 60
 MIN_FACTOR_COVERAGE = 0.9
@@ -83,6 +84,10 @@ FACTOR_REQUIREMENTS = {
         "short_risk",
         ("short_ratio", "days_to_cover"),
     ),
+    "short_capacity": (
+        "short_capacity",
+        ("short_selling_max_qty",),
+    ),
 }
 
 
@@ -101,6 +106,7 @@ class StockPickerFactorSnapshotService:
         tradeability_loader: Callable = get_security_tradeability,
         fundamental_loader: Callable = get_fundamental_profiles,
         margin_loader: Callable = get_margin_requirements,
+        short_capacity_loader: Callable = get_short_selling_capacity,
         trading_day_loader: Callable = is_market_trading_day,
         connection_factory: Callable = get_connection,
         clock: Callable[[], datetime] = (
@@ -112,6 +118,7 @@ class StockPickerFactorSnapshotService:
         self.tradeability_loader = tradeability_loader
         self.fundamental_loader = fundamental_loader
         self.margin_loader = margin_loader
+        self.short_capacity_loader = short_capacity_loader
         self.trading_day_loader = trading_day_loader
         self.connection_factory = connection_factory
         self.clock = clock
@@ -233,6 +240,27 @@ class StockPickerFactorSnapshotService:
                 "status": "not_applicable",
                 "error": None,
             }
+        short_capacity = (
+            self._load_channel(
+                channel_status,
+                "trade",
+                "factor_snapshot_short_capacity",
+                self.short_capacity_loader,
+                normalized_symbols,
+            )
+            if normalized_market == "US" and direction == "SHORT"
+            else {}
+        )
+        if direction != "SHORT":
+            channel_status["short_capacity"] = {
+                "status": "not_applicable",
+                "error": None,
+            }
+        elif normalized_market != "US":
+            channel_status["short_capacity"] = {
+                "status": "unsupported",
+                "error": None,
+            }
 
         source_versions = {
             "snapshot_schema": SNAPSHOT_VERSION,
@@ -297,6 +325,43 @@ class StockPickerFactorSnapshotService:
                         "error": None,
                     }
                 ),
+                "short_capacity": {
+                    **(
+                        short_capacity.get(
+                            symbol,
+                            {
+                                "status": channel_status[
+                                    "short_capacity"
+                                ]["status"],
+                                "error": channel_status[
+                                    "short_capacity"
+                                ]["error"],
+                                "cash_max_qty": None,
+                                "margin_max_qty": None,
+                                "short_selling_max_qty": None,
+                                "availability": "unknown",
+                                "borrow_fee_rate": None,
+                                "recall_risk": "unknown",
+                            },
+                        )
+                        if normalized_market == "US"
+                        and direction == "SHORT"
+                        else {
+                            "status": channel_status[
+                                "short_capacity"
+                            ]["status"],
+                            "error": None,
+                            "cash_max_qty": None,
+                            "margin_max_qty": None,
+                            "short_selling_max_qty": None,
+                            "availability": "unknown",
+                            "borrow_fee_rate": None,
+                            "recall_risk": "unknown",
+                        }
+                    ),
+                    "account_specific": True,
+                    "supported_market": "US",
+                },
                 "capture": {
                     "session_phase": session_phase,
                     "depth_requested": True,
@@ -635,7 +700,14 @@ class StockPickerFactorSnapshotService:
         factor_names = [
             factor
             for factor in FACTOR_REQUIREMENTS
-            if factor != "short_risk" or direction == "SHORT"
+            if (
+                factor != "short_risk"
+                or direction == "SHORT"
+            )
+            and (
+                factor != "short_capacity"
+                or (market == "US" and direction == "SHORT")
+            )
         ]
         factors = {}
         for factor in factor_names:
@@ -1086,7 +1158,10 @@ def get_stock_picker_factor_snapshot_service(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="采集智能选股 Fundamental 与执行风险点时快照",
+        description=(
+            "采集智能选股 Fundamental、执行风险与"
+            "美股账户卖空能力点时快照"
+        ),
     )
     parser.add_argument("--market", choices=["US", "HK"])
     parser.add_argument(
