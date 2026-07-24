@@ -270,7 +270,10 @@ class StockScreenerServiceTest(unittest.TestCase):
         self.assertEqual(result["filters"]["after"], 4)
         self.assertEqual(result["filters"]["excluded"], 1)
         self.assertEqual(result["filters"]["reasons"], {"duplicate_symbol": 1})
-        self.assertEqual(result["relative_strength"]["industry_basis"], "source_page_industry_median")
+        self.assertEqual(
+            result["relative_strength"]["industry_basis"],
+            "scan_range_industry_median",
+        )
         self.assertEqual(result["scan"], {
             "mode": "bounded",
             "requested_pages": 5,
@@ -334,6 +337,175 @@ class StockScreenerServiceTest(unittest.TestCase):
         self.assertEqual(result["scan"]["next_page"], 2)
         self.assertEqual(result["scan"]["stopped_reason"], "page_limit")
         self.assertTrue(result["has_more"])
+
+    def test_bounded_scan_recomputes_directional_industry_rs_before_filtering(
+        self,
+    ) -> None:
+        context = MagicMock()
+
+        def search_page(_market, _strategy_id, _conditions, _show, page, _size):
+            symbols = (
+                ("LEADER.US",)
+                if page == 0
+                else ("LEADER.US", "LAGGARD.US")
+            )
+            return _Response({
+                "total": 3,
+                "has_more": page == 0,
+                "items": [
+                    {
+                        "symbol": symbol,
+                        "name": symbol,
+                        "indicators": [{
+                            "key": "industry",
+                            "value": "Technology",
+                        }],
+                    }
+                    for symbol in symbols
+                ],
+            })
+
+        indexes = {
+            "LEADER.US": {
+                "ten_day_change_rate": 0.10,
+                "half_year_change_rate": 0.30,
+            },
+            "LAGGARD.US": {
+                "ten_day_change_rate": 0.00,
+                "half_year_change_rate": 0.10,
+            },
+            "SPY.US": {
+                "ten_day_change_rate": 0.02,
+                "half_year_change_rate": 0.15,
+            },
+        }
+
+        context.screener_search.side_effect = search_page
+        service = _ServiceWithContext(
+            context,
+            index_loader=lambda symbols: {
+                symbol: indexes[symbol]
+                for symbol in symbols
+            },
+        )
+
+        result = service.search(
+            "US",
+            101,
+            size=2,
+            scan_pages=2,
+            filters={"min_industry_rs_10d": 0.04},
+            include_tradeability=False,
+            require_normal_trade_status=False,
+        )
+
+        self.assertEqual(
+            result["relative_strength"]["industry_basis"],
+            "scan_range_industry_median",
+        )
+        self.assertEqual(
+            [item["symbol"] for item in result["items"]],
+            ["LEADER.US"],
+        )
+        relative_strength = result["items"][0]["relative_strength"]
+        self.assertEqual(relative_strength["industry_peer_count"], 2)
+        self.assertEqual(relative_strength["industry_rs_10d"], 0.05)
+        self.assertEqual(relative_strength["market_rs_10d"], 0.08)
+        self.assertEqual(result["filters"]["before"], 3)
+        self.assertEqual(result["filters"]["after"], 1)
+        self.assertEqual(result["filters"]["excluded"], 2)
+        self.assertEqual(
+            result["filters"]["reasons"],
+            {
+                "below_min_industry_rs_10d": 1,
+                "duplicate_symbol": 1,
+            },
+        )
+
+        short_result = service.search(
+            "US",
+            101,
+            size=2,
+            scan_pages=2,
+            target_direction="SHORT",
+            filters={"min_industry_rs_10d": 0.04},
+            include_short_risk=False,
+            include_tradeability=False,
+            require_normal_trade_status=False,
+        )
+
+        self.assertEqual(
+            [item["symbol"] for item in short_result["items"]],
+            ["LAGGARD.US"],
+        )
+        short_relative_strength = short_result["items"][0][
+            "relative_strength"
+        ]
+        self.assertEqual(short_relative_strength["industry_peer_count"], 2)
+        self.assertEqual(short_relative_strength["industry_rs_10d"], 0.05)
+        self.assertEqual(short_relative_strength["market_rs_10d"], 0.02)
+
+    def test_bounded_scan_stopping_on_first_page_keeps_single_page_rs(self) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "total": 2,
+            "has_more": False,
+            "items": [
+                {
+                    "symbol": "LEADER.US",
+                    "name": "Leader",
+                    "indicators": [{
+                        "key": "industry",
+                        "value": "Technology",
+                    }],
+                },
+                {
+                    "symbol": "LAGGARD.US",
+                    "name": "Laggard",
+                    "indicators": [{
+                        "key": "industry",
+                        "value": "Technology",
+                    }],
+                },
+            ],
+        })
+        indexes = {
+            "LEADER.US": {"ten_day_change_rate": 0.10},
+            "LAGGARD.US": {"ten_day_change_rate": 0.00},
+            "SPY.US": {"ten_day_change_rate": 0.02},
+        }
+        service = _ServiceWithContext(
+            context,
+            index_loader=lambda symbols: {
+                symbol: indexes[symbol]
+                for symbol in symbols
+            },
+        )
+
+        result = service.search(
+            "US",
+            101,
+            size=20,
+            scan_pages=3,
+            filters={"min_industry_rs_10d": 0.04},
+            include_tradeability=False,
+            require_normal_trade_status=False,
+        )
+
+        self.assertEqual(result["scan"]["mode"], "bounded")
+        self.assertEqual(result["scan"]["pages_scanned"], 1)
+        self.assertEqual(
+            result["relative_strength"]["industry_basis"],
+            "current_page_industry_median",
+        )
+        self.assertEqual(
+            [item["symbol"] for item in result["items"]],
+            ["LEADER.US"],
+        )
+        self.assertEqual(
+            result["items"][0]["relative_strength"]["industry_rs_10d"],
+            0.05,
+        )
 
     def test_scan_caps_an_overfilled_upstream_page_to_requested_size(self) -> None:
         context = MagicMock()

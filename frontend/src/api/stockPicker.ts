@@ -330,7 +330,7 @@ export interface ScreenerSearchResponse {
   relative_strength: {
     benchmark_symbol: string;
     target_direction: 'LONG' | 'SHORT';
-    industry_basis: 'current_page_industry_median' | 'source_page_industry_median';
+    industry_basis: 'current_page_industry_median' | 'scan_range_industry_median';
   };
   short_risk: {
     status: 'available' | 'fallback' | 'disabled' | 'not_applicable';

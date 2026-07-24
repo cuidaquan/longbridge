@@ -2816,8 +2816,8 @@ function StockDiscoveryDialog({
     ['min_capital_flow', '最低资金流', '可输入负数'],
     ['min_market_rs_10d', '最低市场 RS(10日)', '方向化差值'],
     ['min_market_rs_half_year', '最低市场 RS(半年)', '方向化差值'],
-    ['min_industry_rs_10d', '最低行业 RS(10日)', '同页行业中位数'],
-    ['min_industry_rs_half_year', '最低行业 RS(半年)', '同页行业中位数'],
+    ['min_industry_rs_10d', '最低行业 RS(10日)', '当前扫描范围中位数'],
+    ['min_industry_rs_half_year', '最低行业 RS(半年)', '当前扫描范围中位数'],
     ['max_spread_bps', '最高买卖点差', 'bps，例如 50'],
     ['min_top_of_book_notional', '最低一档盘口金额', '市场币种'],
     ['min_revenue_yoy', '最低收入同比', '小数，例如 0.1'],
@@ -3204,7 +3204,9 @@ function StockDiscoveryDialog({
                 </p>
                 <p className="text-xs text-slate-500">
                   市场基准 {result.relative_strength.benchmark_symbol}；
-                  行业 RS 为{result.scan.pages_scanned === 1 ? '本页' : '各来源页'}同行中位数差
+                  行业 RS 为{result.relative_strength.industry_basis === 'current_page_industry_median'
+                    ? '本页'
+                    : '扫描范围'}同行中位数差
                 </p>
                 <p className="text-xs text-slate-500">
                   已排除非正常交易标的；点差与盘口仅在设置对应阈值时请求，

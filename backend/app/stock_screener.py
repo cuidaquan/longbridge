@@ -269,6 +269,8 @@ class StockScreenerService:
             )
 
         page_results: List[Dict[str, Any]] = []
+        # Cross-page industry peers must be deduplicated before RS and filters.
+        combine_before_filtering = scan_pages > 1
         for current_page in range(page, page + scan_pages):
             page_result = self._search_single_page(
                 market=market,
@@ -287,12 +289,17 @@ class StockScreenerService:
                 include_short_capacity=include_short_capacity,
                 fundamental_event_window_days=fundamental_event_window_days,
                 include_corporate_actions=include_corporate_actions,
+                apply_filters=not combine_before_filtering,
             )
             page_results.append(page_result)
             if not page_result["has_more"]:
                 break
 
-        return self._combine_page_results(page_results, scan_pages)
+        return self._combine_page_results(
+            page_results,
+            scan_pages,
+            apply_combined_filters=combine_before_filtering,
+        )
 
     def _search_single_page(
         self,
@@ -312,6 +319,7 @@ class StockScreenerService:
         include_short_capacity: bool = False,
         fundamental_event_window_days: int = 30,
         include_corporate_actions: bool = False,
+        apply_filters: bool = True,
     ) -> Dict[str, Any]:
         normalized_market = self.normalize_market(market)
         normalized_direction = target_direction.strip().upper()
@@ -804,11 +812,14 @@ class StockScreenerService:
             })
 
         before_filter_count = len(candidates)
-        candidates, exclusion_reasons = self._apply_candidate_filters(
-            candidates,
-            normalized_filters,
-            require_normal_trade_status,
-        )
+        if apply_filters:
+            candidates, exclusion_reasons = self._apply_candidate_filters(
+                candidates,
+                normalized_filters,
+                require_normal_trade_status,
+            )
+        else:
+            exclusion_reasons = {}
         total = self._read_int(
             container,
             ("total", "total_count", "totalCount", "count"),
@@ -862,10 +873,11 @@ class StockScreenerService:
             "items": candidates,
         }
 
-    @staticmethod
     def _combine_page_results(
+        self,
         page_results: List[Dict[str, Any]],
         requested_pages: int,
+        apply_combined_filters: bool,
     ) -> Dict[str, Any]:
         first_result = page_results[0]
         last_result = page_results[-1]
@@ -876,13 +888,11 @@ class StockScreenerService:
         duplicates_removed = 0
         exclusion_reasons: Dict[str, int] = {}
         before_count = 0
-        excluded_count = 0
 
         for page_result in page_results:
             page_number = int(page_result["page"])
             page_filters = page_result["filters"]
             before_count += int(page_filters["before"])
-            excluded_count += int(page_filters["excluded"])
             for reason, count in page_filters["reasons"].items():
                 exclusion_reasons[reason] = (
                     exclusion_reasons.get(reason, 0) + int(count)
@@ -897,9 +907,29 @@ class StockScreenerService:
                 item["source_page"] = page_number
                 items.append(item)
 
+        pages_scanned = len(page_results)
+        if apply_combined_filters:
+            self._attach_industry_relative_strength(
+                items,
+                first_result["relative_strength"]["target_direction"],
+            )
+            applied_filters = dict(first_result["filters"]["applied"])
+            require_normal_trade_status = bool(
+                applied_filters.pop("require_normal_trade_status", False)
+            )
+            items, combined_filter_reasons = self._apply_candidate_filters(
+                items,
+                applied_filters,
+                require_normal_trade_status,
+            )
+            for reason, count in combined_filter_reasons.items():
+                exclusion_reasons[reason] = (
+                    exclusion_reasons.get(reason, 0) + count
+                )
+
         if duplicates_removed:
             exclusion_reasons["duplicate_symbol"] = duplicates_removed
-        excluded_count += duplicates_removed
+        excluded_count = before_count - len(items)
 
         for status_key in (
             "enrichment",
@@ -909,11 +939,10 @@ class StockScreenerService:
             "margin_requirements",
             "short_capacity",
         ):
-            combined[status_key] = StockScreenerService._combine_status(
+            combined[status_key] = self._combine_status(
                 [page_result[status_key] for page_result in page_results]
             )
 
-        pages_scanned = len(page_results)
         has_more = bool(last_result["has_more"])
         combined["has_more"] = has_more
         combined["items"] = items
@@ -929,7 +958,7 @@ class StockScreenerService:
             "industry_basis": (
                 "current_page_industry_median"
                 if pages_scanned == 1
-                else "source_page_industry_median"
+                else "scan_range_industry_median"
             ),
         }
         combined["scan"] = {
@@ -1205,6 +1234,33 @@ class StockScreenerService:
             "10d": "ten_day_change_rate",
             "half_year": "half_year_change_rate",
         }
+        for candidate in candidates:
+            indexes = candidate.get("indexes") or {}
+            relative = self._empty_relative_strength(
+                benchmark_symbol,
+                target_direction,
+            )
+            for horizon, metric in horizons.items():
+                stock_return = indexes.get(metric)
+                market_return = benchmark_indexes.get(metric)
+                if stock_return is not None and market_return is not None:
+                    relative[f"market_rs_{horizon}"] = round(
+                        direction * (stock_return - market_return),
+                        6,
+                    )
+            candidate["relative_strength"] = relative
+        self._attach_industry_relative_strength(candidates, target_direction)
+
+    @staticmethod
+    def _attach_industry_relative_strength(
+        candidates: List[Dict[str, Any]],
+        target_direction: str,
+    ) -> None:
+        direction = 1 if target_direction == "LONG" else -1
+        horizons = {
+            "10d": "ten_day_change_rate",
+            "half_year": "half_year_change_rate",
+        }
         industry_groups: Dict[str, Dict[str, List[float]]] = {}
         for candidate in candidates:
             industry = str(
@@ -1240,33 +1296,21 @@ class StockScreenerService:
                 ),
                 default=0,
             )
-            relative = self._empty_relative_strength(
-                benchmark_symbol,
-                target_direction,
-            )
+            relative = candidate.get("relative_strength") or {}
             relative["industry"] = industry or None
             relative["industry_peer_count"] = peer_count
             for horizon, metric in horizons.items():
+                relative[f"industry_rs_{horizon}"] = None
                 stock_return = indexes.get(metric)
-                market_return = benchmark_indexes.get(metric)
+                peer_values = industry_groups.get(industry, {}).get(
+                    horizon,
+                    [],
+                )
                 industry_return = (
                     industry_medians.get(industry, {}).get(horizon)
-                    if (
-                        industry
-                        and len(
-                            industry_groups.get(industry, {}).get(
-                                horizon,
-                                [],
-                            )
-                        ) >= 2
-                    )
+                    if industry and len(peer_values) >= 2
                     else None
                 )
-                if stock_return is not None and market_return is not None:
-                    relative[f"market_rs_{horizon}"] = round(
-                        direction * (stock_return - market_return),
-                        6,
-                    )
                 if stock_return is not None and industry_return is not None:
                     relative[f"industry_rs_{horizon}"] = round(
                         direction * (stock_return - industry_return),
