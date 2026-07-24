@@ -26,6 +26,12 @@ from ..stock_picker_ai_evaluation import (
 from ..stock_picker_factor_snapshots import (
     get_stock_picker_factor_snapshot_service,
 )
+from ..stock_picker_factor_evaluation import (
+    DEFAULT_BOOTSTRAP_CONFIDENCE_LEVEL as FACTOR_BOOTSTRAP_CONFIDENCE_LEVEL,
+    DEFAULT_BOOTSTRAP_SAMPLES as FACTOR_BOOTSTRAP_SAMPLES,
+    DEFAULT_BOOTSTRAP_SEED as FACTOR_BOOTSTRAP_SEED,
+    get_stock_picker_factor_evaluation_service,
+)
 from ..stock_picker_reliability import (
     get_stock_picker_reliability_service,
 )
@@ -297,6 +303,51 @@ class StockPickerFactorSnapshotCaptureRequest(BaseModel):
 
     market: Literal["US", "HK"]
     target_direction: Literal["LONG", "SHORT"]
+
+
+class StockPickerFactorIncrementEvaluationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    market: Literal["US", "HK"]
+    pool_type: Literal["LONG", "SHORT"]
+    horizons: List[int] = Field(
+        default_factory=lambda: [5, 10, 20],
+        min_length=1,
+        max_length=10,
+    )
+    lookback_days: int = Field(default=730, ge=1, le=3650)
+    max_bars: int = Field(default=5000, ge=2, le=10000)
+    minimum_observation_dates: int = Field(default=60, ge=1, le=3650)
+    minimum_distinct_symbols: int = Field(default=10, ge=1, le=10000)
+    minimum_factor_coverage: float = Field(default=0.9, ge=0, le=1)
+    maximum_snapshot_age_hours: float = Field(
+        default=48,
+        ge=1,
+        le=87600,
+    )
+    minimum_label_coverage: float = Field(default=0.9, ge=0, le=1)
+    minimum_paired_dates: int = Field(default=40, ge=1, le=3650)
+    minimum_selected_per_date: int = Field(default=3, ge=1, le=10000)
+    bootstrap_samples: int = Field(
+        default=FACTOR_BOOTSTRAP_SAMPLES,
+        ge=200,
+        le=100000,
+    )
+    bootstrap_confidence_level: float = Field(
+        default=FACTOR_BOOTSTRAP_CONFIDENCE_LEVEL,
+        ge=0.8,
+        le=0.99,
+    )
+    bootstrap_block_size: Optional[int] = Field(
+        default=None,
+        ge=2,
+        le=3650,
+    )
+    bootstrap_seed: int = Field(
+        default=FACTOR_BOOTSTRAP_SEED,
+        ge=0,
+        le=4294967295,
+    )
 
 
 def _utc_now() -> datetime:
@@ -791,6 +842,66 @@ async def capture_stock_picker_factor_snapshots(
     except Exception as exc:
         logger.error(
             "采集智能选股因子点时快照失败: %s",
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/factor-evaluation")
+async def run_stock_picker_factor_evaluation(
+    request: StockPickerFactorIncrementEvaluationRequest,
+):
+    try:
+        return await asyncio.to_thread(
+            get_stock_picker_factor_evaluation_service().run,
+            market=request.market,
+            pool_type=request.pool_type,
+            horizons=request.horizons,
+            lookback_days=request.lookback_days,
+            max_bars=request.max_bars,
+            minimum_observation_dates=request.minimum_observation_dates,
+            minimum_distinct_symbols=request.minimum_distinct_symbols,
+            minimum_factor_coverage=request.minimum_factor_coverage,
+            maximum_snapshot_age_hours=(
+                request.maximum_snapshot_age_hours
+            ),
+            minimum_label_coverage=request.minimum_label_coverage,
+            minimum_paired_dates=request.minimum_paired_dates,
+            minimum_selected_per_date=request.minimum_selected_per_date,
+            bootstrap_samples=request.bootstrap_samples,
+            bootstrap_confidence_level=(
+                request.bootstrap_confidence_level
+            ),
+            bootstrap_block_size=request.bootstrap_block_size,
+            bootstrap_seed=request.bootstrap_seed,
+            persist=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(
+            "运行智能选股因子增量评估失败: %s",
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/factor-evaluations")
+async def get_stock_picker_factor_evaluations(
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    try:
+        return {
+            "items": await asyncio.to_thread(
+                get_stock_picker_factor_evaluation_service().get_history,
+                limit,
+            )
+        }
+    except Exception as exc:
+        logger.error(
+            "获取智能选股因子增量评估历史失败: %s",
             exc,
             exc_info=True,
         )

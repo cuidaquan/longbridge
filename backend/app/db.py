@@ -162,6 +162,7 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_STOCK_PICKER_FACTOR_EXPERIMENT_TABLE_SQL)
     conn.execute(_STOCK_PICKER_FACTOR_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_PICKER_FACTOR_SNAPSHOT_RUN_TABLE_SQL)
+    conn.execute(_STOCK_PICKER_FACTOR_EVALUATION_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_SCAN_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_AUTO_CAPTURE_RUN_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_SNAPSHOT_TABLE_SQL)
@@ -609,6 +610,29 @@ CREATE TABLE IF NOT EXISTS stock_picker_factor_snapshot_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_stock_picker_factor_snapshot_run_status
 ON stock_picker_factor_snapshot_runs(status, started_at);
+"""
+
+_STOCK_PICKER_FACTOR_EVALUATION_TABLE_SQL = """
+CREATE SEQUENCE IF NOT EXISTS stock_picker_factor_evaluation_seq START 1;
+CREATE TABLE IF NOT EXISTS stock_picker_factor_evaluations (
+    id INTEGER PRIMARY KEY DEFAULT nextval(
+        'stock_picker_factor_evaluation_seq'
+    ),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    market TEXT NOT NULL,
+    pool_type TEXT NOT NULL,
+    evaluation_version TEXT NOT NULL,
+    parameters TEXT NOT NULL,
+    result TEXT NOT NULL,
+    ready BOOLEAN NOT NULL,
+    data_as_of DATE,
+    CHECK (market IN ('US', 'HK')),
+    CHECK (pool_type IN ('LONG', 'SHORT'))
+);
+CREATE INDEX IF NOT EXISTS idx_stock_picker_factor_evaluation_created
+ON stock_picker_factor_evaluations(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_stock_picker_factor_evaluation_scope
+ON stock_picker_factor_evaluations(market, pool_type, created_at DESC);
 """
 
 _STOCK_SCREENER_SCAN_SNAPSHOT_TABLE_SQL = """
