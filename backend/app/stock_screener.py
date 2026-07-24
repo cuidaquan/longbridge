@@ -471,6 +471,7 @@ class StockScreenerService:
             "status": "disabled",
             "error": None,
         }
+        benchmark_returns = self._benchmark_returns({})
         hard_index_filters = INDEX_FILTER_KEYS.intersection(
             normalized_filters
         )
@@ -501,6 +502,7 @@ class StockScreenerService:
                     "error": str(exc),
                 }
             else:
+                benchmark_indexes = indexes.get(benchmark, {})
                 for candidate in candidates:
                     candidate["indexes"] = indexes.get(
                         candidate["symbol"],
@@ -508,9 +510,12 @@ class StockScreenerService:
                     )
                 self._attach_relative_strength(
                     candidates,
-                    indexes.get(benchmark, {}),
+                    benchmark_indexes,
                     normalized_direction,
                     benchmark,
+                )
+                benchmark_returns = self._benchmark_returns(
+                    benchmark_indexes
                 )
                 enrichment = {
                     "status": "available",
@@ -945,6 +950,7 @@ class StockScreenerService:
                 "benchmark_symbol": benchmark,
                 "target_direction": normalized_direction,
                 "industry_basis": "current_page_industry_median",
+                "benchmark_returns": benchmark_returns,
             },
             "short_risk": short_risk_status,
             "tradeability": tradeability_status,
@@ -1098,6 +1104,15 @@ class StockScreenerService:
                 if pages_scanned == 1
                 else "scan_range_industry_median"
             ),
+            "benchmark_observations": [
+                {
+                    "page": int(page_result["page"]),
+                    **page_result["relative_strength"][
+                        "benchmark_returns"
+                    ],
+                }
+                for page_result in page_results
+            ],
         }
         combined["scan"] = {
             "mode": "single_page" if requested_pages == 1 else "bounded",
@@ -1541,6 +1556,24 @@ class StockScreenerService:
             "industry_rs_10d": None,
             "industry_rs_half_year": None,
         }
+
+    @staticmethod
+    def _benchmark_returns(
+        benchmark_indexes: Dict[str, Optional[float]],
+    ) -> Dict[str, Optional[float]]:
+        result: Dict[str, Optional[float]] = {}
+        for key in ("ten_day_change_rate", "half_year_change_rate"):
+            value = benchmark_indexes.get(key)
+            try:
+                number = float(value) if value is not None else None
+            except (TypeError, ValueError):
+                number = None
+            result[key] = (
+                number
+                if number is not None and math.isfinite(number)
+                else None
+            )
+        return result
 
     def _normalize_strategies(
         self,

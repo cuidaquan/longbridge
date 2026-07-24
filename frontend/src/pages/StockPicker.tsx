@@ -2704,6 +2704,15 @@ const screenerCoverageReasonLabels: Record<string, string> = {
   snapshot_integrity_incomplete: '快照完整性未通过',
 };
 
+const screenerEnvironmentReasonLabels: Record<string, string> = {
+  legacy_snapshot_version: '旧版快照未保存精确基准收益',
+  unsupported_snapshot_version: '快照版本不受支持',
+  invalid_payload: '快照载荷无效',
+  missing_metric_basis: '缺少指标口径',
+  missing_benchmark_observations: '缺少基准观测',
+  incomplete_benchmark_returns: '基准收益周期不完整',
+};
+
 function StockDiscoveryDialog({
   onClose,
   onComplete,
@@ -3411,6 +3420,9 @@ function StockDiscoveryDialog({
                         <span className="text-slate-500" title={group.policy_hash}>
                           配置 {group.policy_hash.slice(0, 10)}
                         </span>
+                        <span className="text-slate-500" title={group.snapshot_version}>
+                          {group.snapshot_version.endsWith('-v2') ? '快照 v2' : '快照 v1'}
+                        </span>
                         <span className={group.ready
                           ? 'text-emerald-600 dark:text-emerald-400'
                           : 'text-amber-600 dark:text-amber-400'}
@@ -3427,7 +3439,8 @@ function StockDiscoveryDialog({
                       </p>
                       <p className="mt-1 break-words text-slate-500">
                         候选观测 {group.universe_observations}/{snapshotCoverage.minimums.universe_observations} ·
-                        {' '}入选观测 {group.selected_observations}/{snapshotCoverage.minimums.selected_observations}
+                        {' '}入选观测 {group.selected_observations}/{snapshotCoverage.minimums.selected_observations} ·
+                        {' '}精确基准输入 {(group.market_environment.coverage * 100).toFixed(0)}%
                       </p>
                       {group.not_ready_reasons.length > 0 && (
                         <p className="mt-1 break-words text-amber-600 dark:text-amber-400">
@@ -3442,11 +3455,24 @@ function StockDiscoveryDialog({
                     <p className="text-xs text-slate-500">尚无可统计的配置 cohort。</p>
                   )}
                 </div>
-                {!snapshotCoverage.market_environment.ready && (
-                  <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
-                    市场环境分层未就绪：当前快照尚未保存基准原始收益。
-                  </p>
-                )}
+                <p className={`mt-2 text-xs ${snapshotCoverage.market_environment.ready
+                  ? 'text-emerald-600 dark:text-emerald-400'
+                  : 'text-amber-600 dark:text-amber-400'}`}
+                >
+                  精确基准输入 {snapshotCoverage.market_environment.available_snapshot_count}/
+                  {snapshotCoverage.market_environment.total_snapshot_count} 条；
+                  {snapshotCoverage.market_environment.ready
+                    ? '存在市场环境输入就绪 cohort'
+                    : Object.keys(snapshotCoverage.market_environment.missing_reasons).length > 0
+                      ? Object.entries(snapshotCoverage.market_environment.missing_reasons)
+                        .map(([reason, count]) => (
+                          `${screenerEnvironmentReasonLabels[reason] || reason} ${count}`
+                        ))
+                        .join('；')
+                      : snapshotCoverage.market_environment.total_snapshot_count > 0
+                        ? '精确输入已覆盖，等待 cohort 样本门禁'
+                        : '尚无快照'}
+                </p>
               </div>
             )}
             {!snapshotError && !loadingSnapshots && snapshotHistory.length === 0 && (
@@ -3489,6 +3515,23 @@ function StockDiscoveryDialog({
                           哈希 {snapshotDetail.payload_hash.slice(0, 12)}
                         </span>
                       </div>
+                      {snapshotDetail.payload.metric_basis.benchmark_returns ? (
+                        <p className="mt-1 break-words text-xs text-slate-500">
+                          精确基准收益：10 日
+                          {' '}{snapshotDetail.payload.metric_basis.benchmark_returns.ten_day_change_rate == null
+                            ? '-'
+                            : `${(snapshotDetail.payload.metric_basis.benchmark_returns.ten_day_change_rate * 100).toFixed(2)}%`}
+                          {' '}· 半年
+                          {' '}{snapshotDetail.payload.metric_basis.benchmark_returns.half_year_change_rate == null
+                            ? '-'
+                            : `${(snapshotDetail.payload.metric_basis.benchmark_returns.half_year_change_rate * 100).toFixed(2)}%`}
+                          {' '}· {snapshotDetail.payload.metric_basis.benchmark_observations?.length || 0} 页观测
+                        </p>
+                      ) : (
+                        <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                          旧版快照未保存精确基准收益
+                        </p>
+                      )}
                       {Object.keys(snapshotDetail.payload.filter_summary.reasons).length > 0 && (
                         <p className="mt-2 break-words text-xs text-amber-600 dark:text-amber-400">
                           {Object.entries(snapshotDetail.payload.filter_summary.reasons)
@@ -3544,6 +3587,18 @@ function StockDiscoveryDialog({
                     ? '本页'
                     : '扫描范围'}同行中位数差
                 </p>
+                {result.relative_strength.benchmark_returns && (
+                  <p className="text-xs text-slate-500">
+                    基准收益：10 日
+                    {' '}{result.relative_strength.benchmark_returns.ten_day_change_rate == null
+                      ? '-'
+                      : `${(result.relative_strength.benchmark_returns.ten_day_change_rate * 100).toFixed(2)}%`}
+                    {' '}· 半年
+                    {' '}{result.relative_strength.benchmark_returns.half_year_change_rate == null
+                      ? '-'
+                      : `${(result.relative_strength.benchmark_returns.half_year_change_rate * 100).toFixed(2)}%`}
+                  </p>
+                )}
                 <p className="text-xs text-slate-500">
                   已排除非正常交易标的；点差与盘口仅在设置对应阈值时请求，
                   冲击成本仍需订单规模才能评估

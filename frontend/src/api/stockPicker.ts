@@ -345,6 +345,15 @@ export interface ScreenerSearchResponse {
     benchmark_symbol: string;
     target_direction: 'LONG' | 'SHORT';
     industry_basis: 'current_page_industry_median' | 'scan_range_industry_median';
+    benchmark_returns?: {
+      ten_day_change_rate: number | null;
+      half_year_change_rate: number | null;
+    };
+    benchmark_observations?: Array<{
+      page: number;
+      ten_day_change_rate: number | null;
+      half_year_change_rate: number | null;
+    }>;
   };
   short_risk: {
     status: 'available' | 'fallback' | 'disabled' | 'not_applicable';
@@ -436,6 +445,7 @@ export interface ScreenerSnapshotDetail extends ScreenerSnapshotSummary {
         name?: string | null;
         source?: 'recommended' | 'user' | null;
       };
+      benchmark_symbol?: string;
       filters: ScreenerIndexFilters & {
         require_normal_trade_status?: boolean;
       };
@@ -470,6 +480,7 @@ export interface ScreenerSnapshotCoverageGroup {
   strategy_id: number;
   strategy_name?: string | null;
   strategy_source?: 'recommended' | 'user' | null;
+  snapshot_version: string;
   policy_hash: string;
   raw_snapshot_count: number;
   daily_snapshot_count: number;
@@ -495,6 +506,14 @@ export interface ScreenerSnapshotCoverageGroup {
     | 'insufficient_selected_observations'
     | 'snapshot_integrity_incomplete'
   >;
+  market_environment: {
+    available_snapshot_count: number;
+    total_snapshot_count: number;
+    coverage: number;
+    minimum_coverage: number;
+    missing_reasons: Record<string, number>;
+    ready: boolean;
+  };
 }
 
 export interface ScreenerSnapshotCoverage {
@@ -517,7 +536,13 @@ export interface ScreenerSnapshotCoverage {
   };
   market_environment: {
     ready: boolean;
-    reason: 'exact_benchmark_returns_not_captured';
+    ready_cohort_count: number;
+    total_cohort_count: number;
+    available_snapshot_count: number;
+    total_snapshot_count: number;
+    coverage: number;
+    minimum_coverage: number;
+    missing_reasons: Record<string, number>;
   };
   groups: ScreenerSnapshotCoverageGroup[];
 }

@@ -364,7 +364,7 @@ class StockScreenerServiceTest(unittest.TestCase):
             "status": "captured",
             "snapshot_id": "snapshot-1",
             "captured_at": "2026-07-24T00:00:00+00:00",
-            "snapshot_version": "stock-screener-scan-snapshot-v1",
+            "snapshot_version": "stock-screener-scan-snapshot-v2",
             "payload_hash": "hash",
             "candidates_unique": len(payload["universe"]),
         }
@@ -413,6 +413,21 @@ class StockScreenerServiceTest(unittest.TestCase):
             3,
         )
         self.assertEqual(payload["selected_symbols"], ["BBB.US", "CCC.US"])
+        self.assertEqual(
+            payload["metric_basis"]["benchmark_observations"],
+            [
+                {
+                    "page": 0,
+                    "ten_day_change_rate": 0.05,
+                    "half_year_change_rate": 0.05,
+                },
+                {
+                    "page": 1,
+                    "ten_day_change_rate": 0.05,
+                    "half_year_change_rate": 0.05,
+                },
+            ],
+        )
 
     def test_snapshot_capture_is_disabled_by_default(self) -> None:
         context = MagicMock()
@@ -552,6 +567,21 @@ class StockScreenerServiceTest(unittest.TestCase):
         self.assertEqual(relative_strength["industry_peer_count"], 2)
         self.assertEqual(relative_strength["industry_rs_10d"], 0.05)
         self.assertEqual(relative_strength["market_rs_10d"], 0.08)
+        self.assertEqual(
+            result["relative_strength"]["benchmark_observations"],
+            [
+                {
+                    "page": 0,
+                    "ten_day_change_rate": 0.02,
+                    "half_year_change_rate": 0.15,
+                },
+                {
+                    "page": 1,
+                    "ten_day_change_rate": 0.02,
+                    "half_year_change_rate": 0.15,
+                },
+            ],
+        )
         self.assertEqual(result["filters"]["before"], 3)
         self.assertEqual(result["filters"]["after"], 1)
         self.assertEqual(result["filters"]["excluded"], 2)
@@ -914,6 +944,13 @@ class StockScreenerServiceTest(unittest.TestCase):
         self.assertEqual(
             long_result["items"][0]["relative_strength"]["industry_rs_10d"],
             0.03,
+        )
+        self.assertEqual(
+            long_result["relative_strength"]["benchmark_returns"],
+            {
+                "ten_day_change_rate": 0.05,
+                "half_year_change_rate": 0.15,
+            },
         )
         self.assertEqual(
             [item["symbol"] for item in short_result["items"]],
@@ -1590,6 +1627,21 @@ class StockScreenerServiceTest(unittest.TestCase):
         degraded = service.search("US", 101)
         self.assertEqual(degraded["enrichment"]["status"], "fallback")
         self.assertEqual(degraded["items"][0]["symbol"], "AAPL.US")
+        self.assertEqual(
+            degraded["relative_strength"]["benchmark_returns"],
+            {
+                "ten_day_change_rate": None,
+                "half_year_change_rate": None,
+            },
+        )
+        self.assertEqual(
+            degraded["relative_strength"]["benchmark_observations"],
+            [{
+                "page": 0,
+                "ten_day_change_rate": None,
+                "half_year_change_rate": None,
+            }],
+        )
 
         with self.assertRaisesRegex(LongbridgeAPIError, "无法应用候选过滤条件"):
             service.search(

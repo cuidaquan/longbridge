@@ -14,6 +14,7 @@ from app.main import app
 from app.stock_screener_snapshots import (
     COVERAGE_VERSION,
     FILTER_VERSION,
+    LEGACY_SNAPSHOT_VERSION,
     MIN_CALENDAR_SPAN_DAYS,
     MIN_CAPTURE_DATES,
     MIN_DISTINCT_SELECTED_SYMBOLS,
@@ -42,6 +43,7 @@ def _payload() -> dict:
         "request": {
             "market": "US",
             "target_direction": "LONG",
+            "benchmark_symbol": "SPY.US",
             "strategy": {
                 "id": 101,
                 "name": "Growth",
@@ -65,6 +67,22 @@ def _payload() -> dict:
             "benchmark_symbol": "SPY.US",
             "target_direction": "LONG",
             "industry_basis": "scan_range_industry_median",
+            "benchmark_returns": {
+                "ten_day_change_rate": 0.05,
+                "half_year_change_rate": 0.15,
+            },
+            "benchmark_observations": [
+                {
+                    "page": 0,
+                    "ten_day_change_rate": 0.05,
+                    "half_year_change_rate": 0.15,
+                },
+                {
+                    "page": 1,
+                    "ten_day_change_rate": 0.05,
+                    "half_year_change_rate": 0.15,
+                },
+            ],
         },
         "statuses": {},
         "filter_summary": {
@@ -160,6 +178,45 @@ class StockScreenerSnapshotServiceTest(unittest.TestCase):
                 5,
                 tzinfo=timezone.utc,
             ),
+        )
+
+    def _rewrite_payload(self, snapshot_id: str, mutate) -> None:
+        stored = self.connection.execute(
+            """
+            SELECT payload
+            FROM stock_screener_scan_snapshots
+            WHERE snapshot_id = ?
+            """,
+            [snapshot_id],
+        ).fetchone()[0]
+        payload = json.loads(stored)
+        mutate(payload)
+        payload["capture"].pop("payload_hash", None)
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        payload_hash = sha256(canonical.encode("utf-8")).hexdigest()
+        payload["capture"]["payload_hash"] = payload_hash
+        self.connection.execute(
+            """
+            UPDATE stock_screener_scan_snapshots
+            SET payload_hash = ?, payload = ?
+            WHERE snapshot_id = ?
+            """,
+            [
+                payload_hash,
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                snapshot_id,
+            ],
         )
 
     def test_capture_history_and_detail_preserve_versioned_payload(self) -> None:
@@ -294,6 +351,121 @@ class StockScreenerSnapshotServiceTest(unittest.TestCase):
         self.assertEqual(group["first_capture_date"], "2026-05-31")
         self.assertTrue(group["ready"])
         self.assertTrue(coverage["ready_for_scope_evaluation"])
+        self.assertTrue(group["market_environment"]["ready"])
+        self.assertTrue(coverage["market_environment"]["ready"])
+
+    def test_coverage_keeps_legacy_snapshot_valid_but_environment_missing(self) -> None:
+        captured = self.service.capture(_payload())
+        stored = self.connection.execute(
+            "SELECT payload FROM stock_screener_scan_snapshots WHERE snapshot_id = ?",
+            [captured["snapshot_id"]],
+        ).fetchone()[0]
+        legacy = json.loads(stored)
+        legacy["capture"]["snapshot_version"] = LEGACY_SNAPSHOT_VERSION
+        legacy["capture"].pop("payload_hash")
+        legacy["metric_basis"].pop("benchmark_returns")
+        legacy["metric_basis"].pop("benchmark_observations")
+        canonical = json.dumps(
+            legacy,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        payload_hash = sha256(canonical.encode("utf-8")).hexdigest()
+        legacy["capture"]["payload_hash"] = payload_hash
+        self.connection.execute(
+            """
+            UPDATE stock_screener_scan_snapshots
+            SET snapshot_version = ?, payload_hash = ?, payload = ?
+            WHERE snapshot_id = ?
+            """,
+            [
+                LEGACY_SNAPSHOT_VERSION,
+                payload_hash,
+                json.dumps(
+                    legacy,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                captured["snapshot_id"],
+            ],
+        )
+
+        coverage = self.service.get_coverage(
+            current_time=datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        group = coverage["groups"][0]
+
+        self.assertEqual(group["snapshot_version"], LEGACY_SNAPSHOT_VERSION)
+        self.assertEqual(group["integrity_rate"], 1.0)
+        self.assertEqual(
+            group["market_environment"]["missing_reasons"],
+            {"legacy_snapshot_version": 1},
+        )
+        self.assertFalse(coverage["market_environment"]["ready"])
+
+    def test_incomplete_benchmark_returns_are_valid_but_not_environment_ready(self) -> None:
+        payload = _payload()
+        payload["metric_basis"]["benchmark_returns"][
+            "half_year_change_rate"
+        ] = None
+        for observation in payload["metric_basis"]["benchmark_observations"]:
+            observation["half_year_change_rate"] = None
+        self.service.capture(payload)
+
+        coverage = self.service.get_coverage(
+            current_time=datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        group = coverage["groups"][0]
+
+        self.assertEqual(group["integrity_rate"], 1.0)
+        self.assertEqual(
+            group["market_environment"]["missing_reasons"],
+            {"incomplete_benchmark_returns": 1},
+        )
+        self.assertFalse(group["market_environment"]["ready"])
+
+    def test_coverage_rejects_benchmark_summary_mismatch(self) -> None:
+        captured = self.service.capture(_payload())
+        self._rewrite_payload(
+            captured["snapshot_id"],
+            lambda payload: payload["metric_basis"][
+                "benchmark_returns"
+            ].update({"ten_day_change_rate": 0.06}),
+        )
+
+        coverage = self.service.get_coverage(
+            current_time=datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        group = coverage["groups"][0]
+
+        self.assertEqual(group["integrity_rate"], 0.0)
+        self.assertEqual(
+            group["integrity_reasons"],
+            {"benchmark_summary_mismatch": 1},
+        )
+
+    def test_coverage_rejects_benchmark_observation_page_mismatch(self) -> None:
+        captured = self.service.capture(_payload())
+        self._rewrite_payload(
+            captured["snapshot_id"],
+            lambda payload: payload["metric_basis"][
+                "benchmark_observations"
+            ][1].update({"page": 2}),
+        )
+
+        coverage = self.service.get_coverage(
+            current_time=datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+        group = coverage["groups"][0]
+
+        self.assertEqual(group["integrity_rate"], 0.0)
+        self.assertEqual(
+            group["integrity_reasons"],
+            {"benchmark_page_mismatch": 1},
+        )
 
     def test_coverage_separates_policies_and_reports_tampered_payload(self) -> None:
         first = self.service.capture(_payload())

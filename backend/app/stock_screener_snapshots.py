@@ -11,10 +11,15 @@ from zoneinfo import ZoneInfo
 from .db import get_connection
 
 
-SNAPSHOT_VERSION = "stock-screener-scan-snapshot-v1"
+LEGACY_SNAPSHOT_VERSION = "stock-screener-scan-snapshot-v1"
+SNAPSHOT_VERSION = "stock-screener-scan-snapshot-v2"
+SUPPORTED_SNAPSHOT_VERSIONS = {
+    LEGACY_SNAPSHOT_VERSION,
+    SNAPSHOT_VERSION,
+}
 FILTER_VERSION = "stock-screener-candidate-filter-v1"
 RELATIVE_STRENGTH_VERSION = "directional-return-difference-v1"
-COVERAGE_VERSION = "stock-screener-scan-coverage-v1"
+COVERAGE_VERSION = "stock-screener-scan-coverage-v2"
 MIN_CAPTURE_DATES = 20
 MIN_CALENDAR_SPAN_DAYS = 28
 MIN_DISTINCT_UNIVERSE_SYMBOLS = 30
@@ -22,6 +27,7 @@ MIN_DISTINCT_SELECTED_SYMBOLS = 10
 MIN_UNIVERSE_OBSERVATIONS = 200
 MIN_SELECTED_OBSERVATIONS = 60
 MIN_INTEGRITY_RATE = 1.0
+MIN_MARKET_ENVIRONMENT_COVERAGE = 1.0
 
 _MARKET_TIMEZONES = {
     "US": ZoneInfo("America/New_York"),
@@ -348,6 +354,24 @@ class StockScreenerSnapshotService:
             )
         )
         ready_groups = [group for group in groups if group["ready"]]
+        environment_ready_groups = [
+            group
+            for group in groups
+            if group["market_environment"]["ready"]
+        ]
+        environment_available_count = sum(
+            group["market_environment"]["available_snapshot_count"]
+            for group in groups
+        )
+        environment_total_count = sum(
+            group["market_environment"]["total_snapshot_count"]
+            for group in groups
+        )
+        environment_missing_reasons = Counter()
+        for group in groups:
+            environment_missing_reasons.update(
+                group["market_environment"]["missing_reasons"]
+            )
         return {
             "coverage_version": COVERAGE_VERSION,
             "snapshot_version": SNAPSHOT_VERSION,
@@ -367,8 +391,18 @@ class StockScreenerSnapshotService:
                 "integrity_rate": MIN_INTEGRITY_RATE,
             },
             "market_environment": {
-                "ready": False,
-                "reason": "exact_benchmark_returns_not_captured",
+                "ready": bool(environment_ready_groups),
+                "ready_cohort_count": len(environment_ready_groups),
+                "total_cohort_count": len(groups),
+                "available_snapshot_count": environment_available_count,
+                "total_snapshot_count": environment_total_count,
+                "coverage": (
+                    environment_available_count / environment_total_count
+                    if environment_total_count
+                    else 0.0
+                ),
+                "minimum_coverage": MIN_MARKET_ENVIRONMENT_COVERAGE,
+                "missing_reasons": dict(environment_missing_reasons),
             },
             "groups": groups,
         }
@@ -405,6 +439,8 @@ class StockScreenerSnapshotService:
         policy_hash = "invalid"
         universe_symbols: List[str] = []
         selected_symbols: List[str] = []
+        market_environment_available = False
+        market_environment_missing_reason = "invalid_payload"
         if isinstance(payload, dict):
             request = payload.get("request")
             capture = payload.get("capture")
@@ -470,7 +506,7 @@ class StockScreenerSnapshotService:
                 for key, value in expected_fields.items()
             ):
                 integrity_reasons.append("capture_metadata_mismatch")
-            if row[2] != SNAPSHOT_VERSION:
+            if row[2] not in SUPPORTED_SNAPSHOT_VERSIONS:
                 integrity_reasons.append("unsupported_snapshot_version")
             request_strategy = strategy
             if (
@@ -481,6 +517,17 @@ class StockScreenerSnapshotService:
                 integrity_reasons.append("request_scope_mismatch")
             if selected_symbols != selected_from_universe:
                 integrity_reasons.append("selection_mismatch")
+            (
+                market_environment_available,
+                market_environment_missing_reason,
+                benchmark_integrity_reasons,
+            ) = self._market_environment_status(
+                row[2],
+                request,
+                payload.get("metric_basis"),
+                payload.get("pages"),
+            )
+            integrity_reasons.extend(benchmark_integrity_reasons)
             if capture.get("payload_hash") != row[8]:
                 integrity_reasons.append("payload_hash_mismatch")
             hash_payload = json.loads(json.dumps(payload))
@@ -508,6 +555,10 @@ class StockScreenerSnapshotService:
             "policy_hash": policy_hash,
             "universe_symbols": universe_symbols,
             "selected_symbols": selected_symbols,
+            "market_environment_available": market_environment_available,
+            "market_environment_missing_reason": (
+                market_environment_missing_reason
+            ),
             "integrity_valid": not integrity_reasons,
             "integrity_reasons": integrity_reasons,
         }
@@ -561,6 +612,20 @@ class StockScreenerSnapshotService:
             not_ready_reasons.append("insufficient_selected_observations")
         if integrity_rate < MIN_INTEGRITY_RATE:
             not_ready_reasons.append("snapshot_integrity_incomplete")
+        environment_available_count = sum(
+            row["market_environment_available"]
+            for row in rows
+        )
+        environment_coverage = (
+            environment_available_count / len(rows)
+            if rows
+            else 0.0
+        )
+        environment_missing_reasons = Counter(
+            row["market_environment_missing_reason"]
+            for row in rows
+            if not row["market_environment_available"]
+        )
         latest = rows[-1] if rows else None
         return {
             "market": key[0],
@@ -568,6 +633,7 @@ class StockScreenerSnapshotService:
             "strategy_id": key[2],
             "strategy_name": latest["strategy_name"] if latest else None,
             "strategy_source": latest["strategy_source"] if latest else None,
+            "snapshot_version": latest["snapshot_version"] if latest else None,
             "policy_hash": key[3],
             "raw_snapshot_count": int(raw_snapshot_count),
             "daily_snapshot_count": len(rows),
@@ -585,7 +651,118 @@ class StockScreenerSnapshotService:
             "integrity_reasons": dict(integrity_reasons),
             "ready": not not_ready_reasons,
             "not_ready_reasons": not_ready_reasons,
+            "market_environment": {
+                "available_snapshot_count": environment_available_count,
+                "total_snapshot_count": len(rows),
+                "coverage": environment_coverage,
+                "minimum_coverage": MIN_MARKET_ENVIRONMENT_COVERAGE,
+                "missing_reasons": dict(environment_missing_reasons),
+                "ready": (
+                    not not_ready_reasons
+                    and environment_coverage
+                    >= MIN_MARKET_ENVIRONMENT_COVERAGE
+                ),
+            },
         }
+
+    @staticmethod
+    def _market_environment_status(
+        snapshot_version: str,
+        request: Dict[str, Any],
+        metric_basis: Any,
+        pages: Any,
+    ) -> Tuple[bool, Optional[str], List[str]]:
+        if snapshot_version == LEGACY_SNAPSHOT_VERSION:
+            return False, "legacy_snapshot_version", []
+        if snapshot_version != SNAPSHOT_VERSION:
+            return False, "unsupported_snapshot_version", []
+        if not isinstance(metric_basis, dict):
+            return False, "missing_metric_basis", ["missing_metric_basis"]
+        integrity_reasons = []
+        if (
+            metric_basis.get("benchmark_symbol")
+            != request.get("benchmark_symbol")
+            or metric_basis.get("target_direction")
+            != request.get("target_direction")
+        ):
+            integrity_reasons.append("benchmark_basis_mismatch")
+        observations = metric_basis.get("benchmark_observations")
+        if not isinstance(observations, list):
+            return (
+                False,
+                "missing_benchmark_observations",
+                [*integrity_reasons, "missing_benchmark_observations"],
+            )
+        if not observations:
+            return (
+                False,
+                "missing_benchmark_observations",
+                [*integrity_reasons, "missing_benchmark_observations"],
+            )
+
+        complete = True
+        observation_pages = []
+        for observation in observations:
+            if not isinstance(observation, dict):
+                integrity_reasons.append("invalid_benchmark_observation")
+                complete = False
+                continue
+            if not isinstance(observation.get("page"), int):
+                integrity_reasons.append("invalid_benchmark_observation")
+            else:
+                observation_pages.append(observation["page"])
+            for key in ("ten_day_change_rate", "half_year_change_rate"):
+                if key not in observation:
+                    integrity_reasons.append("invalid_benchmark_observation")
+                    complete = False
+                    continue
+                value = observation[key]
+                if value is None:
+                    complete = False
+                    continue
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    integrity_reasons.append("invalid_benchmark_observation")
+                    complete = False
+                    continue
+                if not (-float("inf") < number < float("inf")):
+                    integrity_reasons.append("invalid_benchmark_observation")
+                    complete = False
+        benchmark_returns = metric_basis.get("benchmark_returns")
+        if not isinstance(benchmark_returns, dict):
+            integrity_reasons.append("missing_benchmark_returns")
+        else:
+            summary_keys = (
+                "ten_day_change_rate",
+                "half_year_change_rate",
+            )
+            if any(key not in benchmark_returns for key in summary_keys):
+                integrity_reasons.append("invalid_benchmark_returns")
+            if isinstance(observations[0], dict) and any(
+                benchmark_returns.get(key) != observations[0].get(key)
+                for key in summary_keys
+            ):
+                integrity_reasons.append("benchmark_summary_mismatch")
+        if not isinstance(pages, list):
+            integrity_reasons.append("missing_pages")
+        else:
+            expected_pages = [
+                page.get("page")
+                for page in pages
+                if isinstance(page, dict)
+            ]
+            if (
+                len(expected_pages) != len(pages)
+                or observation_pages != expected_pages
+            ):
+                integrity_reasons.append("benchmark_page_mismatch")
+        return (
+            complete and not integrity_reasons,
+            None if complete and not integrity_reasons
+            else "incomplete_benchmark_returns",
+            list(dict.fromkeys(integrity_reasons)),
+        )
 
     @staticmethod
     def _summary(row) -> Dict[str, Any]:
