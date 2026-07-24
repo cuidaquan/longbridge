@@ -3678,11 +3678,11 @@ function StockDiscoveryDialog({
                           精确基准收益：10 日
                           {' '}{snapshotDetail.payload.metric_basis.benchmark_returns.ten_day_change_rate == null
                             ? '-'
-                            : `${(snapshotDetail.payload.metric_basis.benchmark_returns.ten_day_change_rate * 100).toFixed(2)}%`}
+                            : `${snapshotDetail.payload.metric_basis.benchmark_returns.ten_day_change_rate.toFixed(2)}%`}
                           {' '}· 半年
                           {' '}{snapshotDetail.payload.metric_basis.benchmark_returns.half_year_change_rate == null
                             ? '-'
-                            : `${(snapshotDetail.payload.metric_basis.benchmark_returns.half_year_change_rate * 100).toFixed(2)}%`}
+                            : `${snapshotDetail.payload.metric_basis.benchmark_returns.half_year_change_rate.toFixed(2)}%`}
                           {' '}· {snapshotDetail.payload.metric_basis.benchmark_observations?.length || 0} 页观测
                         </p>
                       ) : (
@@ -3750,11 +3750,11 @@ function StockDiscoveryDialog({
                     基准收益：10 日
                     {' '}{result.relative_strength.benchmark_returns.ten_day_change_rate == null
                       ? '-'
-                      : `${(result.relative_strength.benchmark_returns.ten_day_change_rate * 100).toFixed(2)}%`}
+                      : `${result.relative_strength.benchmark_returns.ten_day_change_rate.toFixed(2)}%`}
                     {' '}· 半年
                     {' '}{result.relative_strength.benchmark_returns.half_year_change_rate == null
                       ? '-'
-                      : `${(result.relative_strength.benchmark_returns.half_year_change_rate * 100).toFixed(2)}%`}
+                      : `${result.relative_strength.benchmark_returns.half_year_change_rate.toFixed(2)}%`}
                   </p>
                 )}
                 <p className="text-xs text-slate-500">
