@@ -16,6 +16,9 @@ from ..exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
 from ..models import SecuritySearchResponse
 from ..runtime import get_runtime_metadata
 from ..security_catalog import get_security_catalog_service
+from ..security_universe_snapshots import (
+    get_security_universe_snapshot_service,
+)
 from ..stock_picker_backtest import get_stock_picker_backtest_service
 from ..stock_picker_ai_evaluation import (
     DEFAULT_BOOTSTRAP_CONFIDENCE_LEVEL,
@@ -513,6 +516,43 @@ async def search_securities(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except LongbridgeAPIError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/security-universe-snapshots")
+async def get_security_universe_snapshots(
+    market: Optional[Literal["US", "HK", "CN"]] = None,
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    try:
+        return await asyncio.to_thread(
+            get_security_universe_snapshot_service().get_history,
+            market,
+            limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("获取证券目录快照历史失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/security-universe-snapshots/{snapshot_id}")
+async def get_security_universe_snapshot(snapshot_id: str):
+    try:
+        snapshot = await asyncio.to_thread(
+            get_security_universe_snapshot_service().get_snapshot,
+            snapshot_id,
+        )
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="证券目录快照不存在")
+        return snapshot
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("获取证券目录快照失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/screener/strategies")

@@ -163,6 +163,7 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_STOCK_PICKER_FACTOR_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_PICKER_FACTOR_SNAPSHOT_RUN_TABLE_SQL)
     conn.execute(_STOCK_PICKER_FACTOR_EVALUATION_TABLE_SQL)
+    conn.execute(_SECURITY_UNIVERSE_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_SCAN_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_AUTO_CAPTURE_RUN_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_SNAPSHOT_TABLE_SQL)
@@ -610,6 +611,26 @@ CREATE TABLE IF NOT EXISTS stock_picker_factor_snapshot_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_stock_picker_factor_snapshot_run_status
 ON stock_picker_factor_snapshot_runs(status, started_at);
+"""
+
+_SECURITY_UNIVERSE_SNAPSHOT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS security_universe_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    captured_at TIMESTAMP NOT NULL,
+    observation_date DATE NOT NULL,
+    snapshot_version TEXT NOT NULL,
+    market TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_query TEXT NOT NULL,
+    security_count INTEGER NOT NULL,
+    payload_hash TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    UNIQUE (market, observation_date, snapshot_version)
+);
+CREATE INDEX IF NOT EXISTS idx_security_universe_snapshot_captured
+ON security_universe_snapshots(captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_security_universe_snapshot_scope
+ON security_universe_snapshots(market, observation_date DESC);
 """
 
 _STOCK_PICKER_FACTOR_EVALUATION_TABLE_SQL = """

@@ -47,9 +47,7 @@ class SecurityCatalogService:
         self._lock = threading.Lock()
 
     def search(self, market: str, query: str, limit: int = 20) -> List[dict]:
-        normalized_market = market.strip().upper()
-        if normalized_market not in SUPPORTED_MARKETS:
-            raise ValueError("market 必须是 US、HK 或 CN")
+        normalized_market = self._normalize_market(market)
 
         normalized_query = query.strip().casefold()
         if not normalized_query:
@@ -66,6 +64,45 @@ class SecurityCatalogService:
             {key: value for key, value in item.items() if key != "_search_text"}
             for item in matches[:limit]
         ]
+
+    def refresh(self, market: str) -> List[dict]:
+        """Fetch a current official list without falling back to stale cache."""
+        normalized_market = self._normalize_market(market)
+        with self._lock:
+            last_error: Optional[LongbridgeAPIError] = None
+            for attempt in range(1, self._fetch_attempts + 1):
+                try:
+                    securities = self._fetch_market_securities(
+                        normalized_market
+                    )
+                    break
+                except LongbridgeAPIError as exc:
+                    last_error = exc
+                    logger.warning(
+                        "Security catalog refresh failed for %s "
+                        "(attempt %s/%s): %s",
+                        normalized_market,
+                        attempt,
+                        self._fetch_attempts,
+                        exc,
+                    )
+            else:
+                assert last_error is not None
+                raise last_error
+
+            self._cache[normalized_market] = (
+                self._clock() + self.cache_ttl_seconds,
+                securities,
+            )
+            self._store_disk_cache(normalized_market, securities)
+            return [
+                {
+                    key: value
+                    for key, value in item.items()
+                    if key != "_search_text"
+                }
+                for item in securities
+            ]
 
     def _get_market_securities(self, market: str) -> List[dict]:
         now = self._clock()
@@ -122,6 +159,13 @@ class SecurityCatalogService:
             if last_error is None or securities is not stale_securities:
                 self._store_disk_cache(market, securities)
             return securities
+
+    @staticmethod
+    def _normalize_market(market: str) -> str:
+        normalized = market.strip().upper()
+        if normalized not in SUPPORTED_MARKETS:
+            raise ValueError("market 必须是 US、HK 或 CN")
+        return normalized
 
     def _cache_path(self, market: str) -> Optional[Path]:
         if self._cache_dir is None:

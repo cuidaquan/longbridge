@@ -30,6 +30,7 @@ build-backend = "setuptools.build_meta"
 stock-picker-baseline = "app.stock_picker_baseline:main"
 stock-picker-factor-experiment = "app.stock_picker_factor_experiment:main"
 stock-picker-factor-snapshot = "app.stock_picker_factor_snapshots:main"
+security-universe-snapshot = "app.security_universe_snapshots:main"
 
 [tool.setuptools]
 packages = ["app"]

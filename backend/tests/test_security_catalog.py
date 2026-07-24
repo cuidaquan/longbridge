@@ -167,6 +167,65 @@ class SecurityCatalogServiceTest(unittest.TestCase):
         self.assertEqual(fetch.call_count, 2)
         self.assertEqual(results[0]["symbol"], "AAPL.US")
 
+    def test_refresh_forces_live_fetch_and_does_not_use_stale_cache(
+        self,
+    ) -> None:
+        service = SecurityCatalogService(fetch_attempts=2)
+        service._cache["US"] = (
+            float("inf"),
+            [{
+                "symbol": "STALE.US",
+                "name": "Stale",
+                "name_en": "Stale",
+                "name_hk": "",
+                "market": "US",
+                "_search_text": "stale.us stale",
+            }],
+        )
+        fresh = [{
+            "symbol": "AAPL.US",
+            "name": "苹果",
+            "name_en": "Apple Inc.",
+            "name_hk": "Apple",
+            "market": "US",
+            "_search_text": "aapl.us 苹果 apple inc. apple",
+        }]
+        with patch.object(
+            service,
+            "_fetch_market_securities",
+            side_effect=[LongbridgeAPIError("timeout"), fresh],
+        ) as fetch:
+            result = service.refresh("us")
+
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual([item["symbol"] for item in result], ["AAPL.US"])
+        self.assertNotIn("_search_text", result[0])
+        self.assertEqual(service.search("US", "Apple")[0]["symbol"], "AAPL.US")
+
+    def test_refresh_failure_never_falls_back_to_cached_catalog(self) -> None:
+        service = SecurityCatalogService(fetch_attempts=1)
+        service._cache["HK"] = (
+            float("inf"),
+            [{
+                "symbol": "700.HK",
+                "name": "腾讯控股",
+                "name_en": "Tencent",
+                "name_hk": "騰訊控股",
+                "market": "HK",
+                "_search_text": "700.hk 腾讯控股 tencent 騰訊控股",
+            }],
+        )
+        with patch.object(
+            service,
+            "_fetch_market_securities",
+            side_effect=LongbridgeAPIError("live unavailable"),
+        ):
+            with self.assertRaisesRegex(
+                LongbridgeAPIError,
+                "live unavailable",
+            ):
+                service.refresh("HK")
+
     def test_reuses_persisted_catalog_across_service_instances(self) -> None:
         securities = [
             {
