@@ -47,6 +47,7 @@ import {
   getScreenerStrategies,
   searchScreenerCandidates,
   getScreenerSnapshots,
+  getScreenerSnapshotCoverage,
   getScreenerSnapshot,
   importScreenerCandidates,
   runStockPickerBacktest,
@@ -69,6 +70,7 @@ import {
   type ScreenerSearchResponse,
   type ScreenerSnapshotSummary,
   type ScreenerSnapshotDetail,
+  type ScreenerSnapshotCoverage,
   type ScreenerIndexFilters,
   type StockPickerBacktestReport,
   type StockPickerBacktestHistoryItem,
@@ -2692,6 +2694,16 @@ function StockPickerBacktestDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
+const screenerCoverageReasonLabels: Record<string, string> = {
+  insufficient_capture_dates: '采集日不足',
+  insufficient_calendar_span: '时间跨度不足',
+  insufficient_universe_symbols: '候选股票不足',
+  insufficient_selected_symbols: '入选股票不足',
+  insufficient_universe_observations: '候选观测不足',
+  insufficient_selected_observations: '入选观测不足',
+  snapshot_integrity_incomplete: '快照完整性未通过',
+};
+
 function StockDiscoveryDialog({
   onClose,
   onComplete,
@@ -2717,6 +2729,7 @@ function StockDiscoveryDialog({
   const [scanPages, setScanPages] = useState(1);
   const [showSnapshotHistory, setShowSnapshotHistory] = useState(false);
   const [snapshotHistory, setSnapshotHistory] = useState<ScreenerSnapshotSummary[]>([]);
+  const [snapshotCoverage, setSnapshotCoverage] = useState<ScreenerSnapshotCoverage | null>(null);
   const [snapshotDetail, setSnapshotDetail] = useState<ScreenerSnapshotDetail | null>(null);
   const [loadingSnapshots, setLoadingSnapshots] = useState(false);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
@@ -2783,6 +2796,7 @@ function StockDiscoveryDialog({
   useEffect(() => {
     setShowSnapshotHistory(false);
     setSnapshotHistory([]);
+    setSnapshotCoverage(null);
     setSnapshotDetail(null);
     setSnapshotError(null);
   }, [market, poolType, selectedStrategyId]);
@@ -2795,13 +2809,17 @@ function StockDiscoveryDialog({
     setLoadingSnapshots(true);
     setSnapshotError(null);
     try {
-      const history = await getScreenerSnapshots({
+      const scope = {
         market,
         targetDirection: poolType,
         strategyId: selectedStrategy?.id,
-        limit: 20,
-      });
+      };
+      const [history, coverage] = await Promise.all([
+        getScreenerSnapshots({ ...scope, limit: 20 }),
+        getScreenerSnapshotCoverage({ ...scope, days: 365 }),
+      ]);
       setSnapshotHistory(history.items);
+      setSnapshotCoverage(coverage);
       if (
         snapshotDetail
         && !history.items.some((item) => item.snapshot_id === snapshotDetail.snapshot_id)
@@ -3361,6 +3379,76 @@ function StockDiscoveryDialog({
         {showSnapshotHistory && (
           <section className="mt-3 border-y border-slate-200 py-3 dark:border-slate-700">
             {snapshotError && <Alert type="error">{snapshotError}</Alert>}
+            {snapshotCoverage && (
+              <div className="mb-3 border-b border-slate-200 pb-3 dark:border-slate-700">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                      近 {snapshotCoverage.window_days} 天覆盖
+                    </p>
+                    <p className="mt-0.5 text-xs text-slate-500">
+                      原始 {snapshotCoverage.raw_snapshot_count} 条 · 按市场本地日期去重
+                      {' '}{snapshotCoverage.daily_snapshot_count} 条 ·
+                      {' '}{snapshotCoverage.cohort_count} 个配置 cohort
+                    </p>
+                  </div>
+                  <Badge
+                    variant={snapshotCoverage.ready_for_scope_evaluation ? 'success' : 'warning'}
+                  >
+                    {snapshotCoverage.ready_for_scope_evaluation ? '存在输入覆盖达标 cohort' : '样本积累中'}
+                  </Badge>
+                </div>
+                <div className="mt-2 space-y-2">
+                  {snapshotCoverage.groups.map((group) => (
+                    <div
+                      key={`${group.market}-${group.target_direction}-${group.strategy_id}-${group.policy_hash}`}
+                      className="border-l-2 border-slate-200 pl-3 text-xs dark:border-slate-600"
+                    >
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <span className="font-medium text-slate-700 dark:text-slate-200">
+                          {group.strategy_name || `策略 ${group.strategy_id}`}
+                        </span>
+                        <span className="text-slate-500" title={group.policy_hash}>
+                          配置 {group.policy_hash.slice(0, 10)}
+                        </span>
+                        <span className={group.ready
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : 'text-amber-600 dark:text-amber-400'}
+                        >
+                          {group.ready ? '门禁通过' : '未就绪'}
+                        </span>
+                      </div>
+                      <p className="mt-1 break-words text-slate-500">
+                        采集日 {group.capture_dates}/{snapshotCoverage.minimums.capture_dates} ·
+                        {' '}跨度 {group.calendar_span_days}/{snapshotCoverage.minimums.calendar_span_days} 天 ·
+                        {' '}候选 {group.distinct_universe_symbols}/{snapshotCoverage.minimums.distinct_universe_symbols} 只 ·
+                        {' '}入选 {group.distinct_selected_symbols}/{snapshotCoverage.minimums.distinct_selected_symbols} 只 ·
+                        {' '}完整性 {(group.integrity_rate * 100).toFixed(0)}%
+                      </p>
+                      <p className="mt-1 break-words text-slate-500">
+                        候选观测 {group.universe_observations}/{snapshotCoverage.minimums.universe_observations} ·
+                        {' '}入选观测 {group.selected_observations}/{snapshotCoverage.minimums.selected_observations}
+                      </p>
+                      {group.not_ready_reasons.length > 0 && (
+                        <p className="mt-1 break-words text-amber-600 dark:text-amber-400">
+                          {group.not_ready_reasons
+                            .map((reason) => screenerCoverageReasonLabels[reason] || reason)
+                            .join('；')}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                  {snapshotCoverage.groups.length === 0 && (
+                    <p className="text-xs text-slate-500">尚无可统计的配置 cohort。</p>
+                  )}
+                </div>
+                {!snapshotCoverage.market_environment.ready && (
+                  <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">
+                    市场环境分层未就绪：当前快照尚未保存基准原始收益。
+                  </p>
+                )}
+              </div>
+            )}
             {!snapshotError && !loadingSnapshots && snapshotHistory.length === 0 && (
               <p className="text-sm text-slate-500">当前市场、方向和策略还没有扫描快照。</p>
             )}

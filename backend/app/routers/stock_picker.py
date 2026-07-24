@@ -551,6 +551,28 @@ async def get_screener_snapshots(
         raise HTTPException(status_code=500, detail="获取扫描快照失败") from exc
 
 
+@router.get("/screener/snapshots/coverage")
+async def get_screener_snapshot_coverage(
+    days: int = Query(default=365, ge=1, le=3650),
+    market: Optional[Literal["US", "HK", "CN", "SG"]] = None,
+    target_direction: Optional[Literal["LONG", "SHORT"]] = None,
+    strategy_id: Optional[int] = Query(default=None, gt=0),
+):
+    try:
+        return await asyncio.to_thread(
+            get_stock_screener_snapshot_service().get_coverage,
+            days=days,
+            market=market,
+            target_direction=target_direction,
+            strategy_id=strategy_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("获取 Screener 扫描快照覆盖率失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="获取扫描快照覆盖率失败") from exc
+
+
 @router.get("/screener/snapshots/{snapshot_id}")
 async def get_screener_snapshot(
     snapshot_id: str = Path(min_length=1, max_length=64),

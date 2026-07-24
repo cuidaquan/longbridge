@@ -464,6 +464,64 @@ export interface ScreenerSnapshotHistoryResponse {
   };
 }
 
+export interface ScreenerSnapshotCoverageGroup {
+  market: ScreenerMarket;
+  target_direction: 'LONG' | 'SHORT';
+  strategy_id: number;
+  strategy_name?: string | null;
+  strategy_source?: 'recommended' | 'user' | null;
+  policy_hash: string;
+  raw_snapshot_count: number;
+  daily_snapshot_count: number;
+  duplicate_same_day_count: number;
+  capture_dates: number;
+  first_capture_date?: string | null;
+  latest_capture_date?: string | null;
+  calendar_span_days: number;
+  universe_observations: number;
+  selected_observations: number;
+  distinct_universe_symbols: number;
+  distinct_selected_symbols: number;
+  valid_snapshot_count: number;
+  integrity_rate: number;
+  integrity_reasons: Record<string, number>;
+  ready: boolean;
+  not_ready_reasons: Array<
+    | 'insufficient_capture_dates'
+    | 'insufficient_calendar_span'
+    | 'insufficient_universe_symbols'
+    | 'insufficient_selected_symbols'
+    | 'insufficient_universe_observations'
+    | 'insufficient_selected_observations'
+    | 'snapshot_integrity_incomplete'
+  >;
+}
+
+export interface ScreenerSnapshotCoverage {
+  coverage_version: string;
+  snapshot_version: string;
+  window_days: number;
+  raw_snapshot_count: number;
+  daily_snapshot_count: number;
+  cohort_count: number;
+  ready_cohort_count: number;
+  ready_for_scope_evaluation: boolean;
+  minimums: {
+    capture_dates: number;
+    calendar_span_days: number;
+    distinct_universe_symbols: number;
+    distinct_selected_symbols: number;
+    universe_observations: number;
+    selected_observations: number;
+    integrity_rate: number;
+  };
+  market_environment: {
+    ready: boolean;
+    reason: 'exact_benchmark_returns_not_captured';
+  };
+  groups: ScreenerSnapshotCoverageGroup[];
+}
+
 export interface AnalysisResponse {
   long_analysis: Analysis[];
   short_analysis: Analysis[];
@@ -999,6 +1057,27 @@ export async function getScreenerSnapshots(params: {
   if (!response.ok) {
     const error = await response.json().catch(() => null);
     throw new Error(error?.detail || '获取扫描快照失败');
+  }
+  return response.json();
+}
+
+export async function getScreenerSnapshotCoverage(params: {
+  days?: number;
+  market?: ScreenerMarket;
+  targetDirection?: 'LONG' | 'SHORT';
+  strategyId?: number;
+} = {}): Promise<ScreenerSnapshotCoverage> {
+  const query = new URLSearchParams();
+  query.set('days', String(params.days ?? 365));
+  if (params.market) query.set('market', params.market);
+  if (params.targetDirection) query.set('target_direction', params.targetDirection);
+  if (params.strategyId != null) query.set('strategy_id', String(params.strategyId));
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/screener/snapshots/coverage?${query.toString()}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取扫描快照覆盖率失败');
   }
   return response.json();
 }
