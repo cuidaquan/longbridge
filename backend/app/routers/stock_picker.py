@@ -17,6 +17,9 @@ from ..models import SecuritySearchResponse
 from ..security_catalog import get_security_catalog_service
 from ..stock_picker_backtest import get_stock_picker_backtest_service
 from ..stock_picker_ai_evaluation import (
+    DEFAULT_BOOTSTRAP_CONFIDENCE_LEVEL,
+    DEFAULT_BOOTSTRAP_SAMPLES,
+    DEFAULT_BOOTSTRAP_SEED,
     get_stock_picker_ai_evaluation_service,
 )
 from ..stock_picker_factor_snapshots import (
@@ -230,6 +233,26 @@ class StockPickerAIIncrementEvaluationRequest(BaseModel):
         default=0.9,
         ge=0,
         le=1,
+    )
+    bootstrap_samples: int = Field(
+        default=DEFAULT_BOOTSTRAP_SAMPLES,
+        ge=200,
+        le=100000,
+    )
+    bootstrap_confidence_level: float = Field(
+        default=DEFAULT_BOOTSTRAP_CONFIDENCE_LEVEL,
+        ge=0.8,
+        le=0.99,
+    )
+    bootstrap_block_size: Optional[int] = Field(
+        default=None,
+        ge=2,
+        le=3650,
+    )
+    bootstrap_seed: int = Field(
+        default=DEFAULT_BOOTSTRAP_SEED,
+        ge=0,
+        le=4294967295,
     )
     score_version: Optional[str] = Field(
         default=None,
@@ -552,6 +575,12 @@ async def run_stock_picker_ai_evaluation(
             minimum_ai_completion_rate=(
                 request.minimum_ai_completion_rate
             ),
+            bootstrap_samples=request.bootstrap_samples,
+            bootstrap_confidence_level=(
+                request.bootstrap_confidence_level
+            ),
+            bootstrap_block_size=request.bootstrap_block_size,
+            bootstrap_seed=request.bootstrap_seed,
             score_version=request.score_version,
             prompt_version=request.prompt_version,
             ai_model=request.ai_model,

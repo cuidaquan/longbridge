@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta, timezone
 import math
+import random
 from statistics import mean, median
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -19,11 +20,16 @@ from .stock_picker_ai_snapshots import (
 )
 
 
-AI_INCREMENT_EVALUATION_VERSION = "stock-picker-ai-increment-v1"
+AI_INCREMENT_EVALUATION_VERSION = "stock-picker-ai-increment-v2"
+BLOCK_BOOTSTRAP_METHOD = "circular-moving-block-bootstrap-v1"
+DEFAULT_BOOTSTRAP_SAMPLES = 2000
+DEFAULT_BOOTSTRAP_CONFIDENCE_LEVEL = 0.95
+DEFAULT_BOOTSTRAP_SEED = 20260724
+MINIMUM_BOOTSTRAP_DATES = 4
 
 
 class StockPickerAIIncrementEvaluationService:
-    """Evaluate AI re-ranking only after snapshot outcome coverage is sufficient."""
+    """Evaluate final-score re-ranking after outcome coverage is sufficient."""
 
     def __init__(
         self,
@@ -51,6 +57,12 @@ class StockPickerAIIncrementEvaluationService:
         minimum_complete_batches: int = 20,
         minimum_labeled_records: int = 60,
         minimum_ai_completion_rate: float = 0.9,
+        bootstrap_samples: int = DEFAULT_BOOTSTRAP_SAMPLES,
+        bootstrap_confidence_level: float = (
+            DEFAULT_BOOTSTRAP_CONFIDENCE_LEVEL
+        ),
+        bootstrap_block_size: Optional[int] = None,
+        bootstrap_seed: int = DEFAULT_BOOTSTRAP_SEED,
         score_version: Optional[str] = None,
         prompt_version: Optional[str] = None,
         ai_model: Optional[str] = None,
@@ -80,6 +92,10 @@ class StockPickerAIIncrementEvaluationService:
             minimum_complete_batches,
             minimum_labeled_records,
             minimum_ai_completion_rate,
+            bootstrap_samples,
+            bootstrap_confidence_level,
+            bootstrap_block_size,
+            bootstrap_seed,
             effective_score_version,
             effective_prompt_version,
             effective_ai_model,
@@ -202,7 +218,15 @@ class StockPickerAIIncrementEvaluationService:
         metrics = (
             {
                 str(horizon): self._summarize_comparisons(
-                    paired_returns[horizon]
+                    paired_returns[horizon],
+                    bootstrap_samples=bootstrap_samples,
+                    bootstrap_confidence_level=(
+                        bootstrap_confidence_level
+                    ),
+                    bootstrap_block_size=bootstrap_block_size,
+                    bootstrap_seed=(
+                        bootstrap_seed + horizon
+                    ) % 4294967296,
                 )
                 for horizon in normalized_horizons
             }
@@ -224,6 +248,12 @@ class StockPickerAIIncrementEvaluationService:
                 "minimum_ai_completion_rate": (
                     minimum_ai_completion_rate
                 ),
+                "bootstrap_samples": bootstrap_samples,
+                "bootstrap_confidence_level": (
+                    bootstrap_confidence_level
+                ),
+                "bootstrap_block_size": bootstrap_block_size,
+                "bootstrap_seed": bootstrap_seed,
                 "snapshot_version": AI_INPUT_SNAPSHOT_VERSION,
                 "score_version": effective_score_version,
                 "prompt_version": effective_prompt_version,
@@ -268,9 +298,20 @@ class StockPickerAIIncrementEvaluationService:
                 "gate": (
                     "完整批次、后验标签和 AI 完成率任一不足时 metrics 为 null"
                 ),
+                "inference": (
+                    "按 data_as_of 日期聚类并排序，使用循环移动块 bootstrap"
+                    " 估计配对平均增量的置信区间；同日批次不会拆散，少于"
+                    f" {MINIMUM_BOOTSTRAP_DATES} 个不同日期时不输出区间"
+                ),
+                "inference_limit": (
+                    "bootstrap 区间只描述当前 cohort 的采样不确定性，"
+                    "未校正多持有期或多 cohort 比较，也不是 AI 或新闻的"
+                    "因果证明"
+                ),
                 "causal_limit": (
-                    "该报告评估已部署 AI/新闻链路的重排增量，不是随机对照试验，"
-                    "不能把相关性解释为模型或新闻的独立因果贡献"
+                    "该报告评估已部署最终机会分链路的重排增量；最终分还包含"
+                    "量化权重和趋势强度，且不是随机对照试验，不能把结果解释为"
+                    "模型或新闻的独立因果贡献"
                 ),
                 "costs": (
                     "比较使用未扣交易成本的方向收益；两组 Top K 数量相同，"
@@ -493,6 +534,13 @@ class StockPickerAIIncrementEvaluationService:
         ]
         if len(selected) <= top_k:
             return None, "insufficient_ai_candidates"
+        observation_dates = {
+            row["data_as_of"]
+            for row in selected
+            if row["data_as_of"] is not None
+        }
+        if len(observation_dates) != 1:
+            return None, "mixed_data_as_of"
         for row in selected:
             indicators = row["input_snapshot"].get(
                 "technical_indicators"
@@ -569,6 +617,7 @@ class StockPickerAIIncrementEvaluationService:
             "job_id": rows[0]["job_id"],
             "selection_version": next(iter(versions)),
             "news_enabled": news_enabled,
+            "observation_date": next(iter(observation_dates)),
             "rows": rows,
             "selected": selected,
         }, None
@@ -665,6 +714,7 @@ class StockPickerAIIncrementEvaluationService:
         overlap = len(set(quant_ids) & set(ai_ids)) / top_k
         return {
             "job_id": batch["job_id"],
+            "observation_date": batch["observation_date"],
             "quant_return": quant_return,
             "ai_return": ai_return,
             "delta": ai_return - quant_return,
@@ -675,6 +725,11 @@ class StockPickerAIIncrementEvaluationService:
     def _summarize_comparisons(
         self,
         comparisons: List[Dict[str, Any]],
+        *,
+        bootstrap_samples: int,
+        bootstrap_confidence_level: float,
+        bootstrap_block_size: Optional[int],
+        bootstrap_seed: int,
     ) -> Dict[str, Any]:
         quant = [item["quant_return"] for item in comparisons]
         ai = [item["ai_return"] for item in comparisons]
@@ -684,6 +739,13 @@ class StockPickerAIIncrementEvaluationService:
             "quant_top_k": self._return_summary(quant),
             "ai_top_k": self._return_summary(ai),
             "paired_delta": self._return_summary(deltas),
+            "paired_delta_inference": self._block_bootstrap_inference(
+                comparisons,
+                bootstrap_samples=bootstrap_samples,
+                confidence_level=bootstrap_confidence_level,
+                requested_block_size=bootstrap_block_size,
+                seed=bootstrap_seed,
+            ),
             "selection_changed_batches": sum(
                 1
                 for item in comparisons
@@ -706,6 +768,111 @@ class StockPickerAIIncrementEvaluationService:
                 else None
             ),
         }
+
+    def _block_bootstrap_inference(
+        self,
+        comparisons: List[Dict[str, Any]],
+        *,
+        bootstrap_samples: int,
+        confidence_level: float,
+        requested_block_size: Optional[int],
+        seed: int,
+    ) -> Dict[str, Any]:
+        clusters: Dict[str, List[float]] = defaultdict(list)
+        for item in comparisons:
+            observation_date = self._date_string(
+                item.get("observation_date")
+            )
+            delta = self._finite_number(item.get("delta"))
+            if observation_date is None or delta is None:
+                continue
+            clusters[observation_date].append(delta)
+
+        ordered_clusters = [
+            clusters[observation_date]
+            for observation_date in sorted(clusters)
+        ]
+        distinct_dates = len(ordered_clusters)
+        effective_block_size = (
+            requested_block_size
+            if requested_block_size is not None
+            else max(2, math.ceil(distinct_dates ** (1 / 3)))
+        )
+        result: Dict[str, Any] = {
+            "ready": False,
+            "reason": None,
+            "method": BLOCK_BOOTSTRAP_METHOD,
+            "cluster_unit": "data_as_of_date",
+            "estimate": mean(
+                item["delta"]
+                for item in comparisons
+            ) if comparisons else None,
+            "confidence_level": confidence_level,
+            "lower": None,
+            "upper": None,
+            "standard_error": None,
+            "interval_direction": None,
+            "bootstrap_samples": bootstrap_samples,
+            "requested_block_size": requested_block_size,
+            "effective_block_size": effective_block_size,
+            "distinct_observation_dates": distinct_dates,
+            "seed": seed,
+        }
+        if distinct_dates < MINIMUM_BOOTSTRAP_DATES:
+            result["reason"] = "insufficient_distinct_observation_dates"
+            return result
+        if effective_block_size >= distinct_dates:
+            result["reason"] = "block_size_not_less_than_date_count"
+            return result
+
+        random_generator = random.Random(seed)
+        bootstrap_means = []
+        for _ in range(bootstrap_samples):
+            sampled_clusters: List[List[float]] = []
+            while len(sampled_clusters) < distinct_dates:
+                start = random_generator.randrange(distinct_dates)
+                remaining = distinct_dates - len(sampled_clusters)
+                take = min(effective_block_size, remaining)
+                sampled_clusters.extend(
+                    ordered_clusters[
+                        (start + offset) % distinct_dates
+                    ]
+                    for offset in range(take)
+                )
+            sampled_values = [
+                value
+                for cluster in sampled_clusters
+                for value in cluster
+            ]
+            bootstrap_means.append(mean(sampled_values))
+
+        alpha = 1 - confidence_level
+        lower = self._percentile(bootstrap_means, alpha / 2)
+        upper = self._percentile(
+            bootstrap_means,
+            1 - alpha / 2,
+        )
+        bootstrap_average = mean(bootstrap_means)
+        standard_error = math.sqrt(
+            sum(
+                (value - bootstrap_average) ** 2
+                for value in bootstrap_means
+            ) / (len(bootstrap_means) - 1)
+        )
+        result.update({
+            "ready": True,
+            "lower": lower,
+            "upper": upper,
+            "standard_error": standard_error,
+            "interval_direction": (
+                "positive"
+                if lower > 0
+                else "negative"
+                if upper < 0
+                else "inconclusive"
+            ),
+        })
+        return result
 
     def _return_summary(self, values: List[float]) -> Dict[str, Any]:
         return {
@@ -787,6 +954,10 @@ class StockPickerAIIncrementEvaluationService:
         minimum_complete_batches: int,
         minimum_labeled_records: int,
         minimum_ai_completion_rate: float,
+        bootstrap_samples: int,
+        bootstrap_confidence_level: float,
+        bootstrap_block_size: Optional[int],
+        bootstrap_seed: int,
         score_version: str,
         prompt_version: str,
         ai_model: str,
@@ -835,6 +1006,41 @@ class StockPickerAIIncrementEvaluationService:
         ):
             raise ValueError(
                 "minimum_ai_completion_rate 必须在 0～1 之间"
+            )
+        if (
+            isinstance(bootstrap_samples, bool)
+            or not isinstance(bootstrap_samples, int)
+            or not 200 <= bootstrap_samples <= 100000
+        ):
+            raise ValueError(
+                "bootstrap_samples 必须在 200～100000 之间"
+            )
+        if (
+            isinstance(bootstrap_confidence_level, bool)
+            or not math.isfinite(bootstrap_confidence_level)
+            or not 0.8 <= bootstrap_confidence_level <= 0.99
+        ):
+            raise ValueError(
+                "bootstrap_confidence_level 必须在 0.8～0.99 之间"
+            )
+        if (
+            bootstrap_block_size is not None
+            and (
+                isinstance(bootstrap_block_size, bool)
+                or not isinstance(bootstrap_block_size, int)
+                or not 2 <= bootstrap_block_size <= 3650
+            )
+        ):
+            raise ValueError(
+                "bootstrap_block_size 必须为空或在 2～3650 之间"
+            )
+        if (
+            isinstance(bootstrap_seed, bool)
+            or not isinstance(bootstrap_seed, int)
+            or not 0 <= bootstrap_seed <= 4294967295
+        ):
+            raise ValueError(
+                "bootstrap_seed 必须在 0～4294967295 之间"
             )
         for label, value in (
             ("score_version", score_version),

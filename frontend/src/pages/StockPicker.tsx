@@ -1330,6 +1330,12 @@ function StockPickerAIIncrementEvaluationDialog({
   const [minimumBatches, setMinimumBatches] = useState(20);
   const [minimumLabels, setMinimumLabels] = useState(60);
   const [minimumCompletionPercent, setMinimumCompletionPercent] = useState(90);
+  const [bootstrapSamples, setBootstrapSamples] = useState(2000);
+  const [bootstrapConfidencePercent, setBootstrapConfidencePercent] = (
+    useState(95)
+  );
+  const [bootstrapBlockSize, setBootstrapBlockSize] = useState('');
+  const [bootstrapSeed, setBootstrapSeed] = useState(20260724);
   const [newsMode, setNewsMode] = useState<
     'all' | 'enabled' | 'disabled'
   >('all');
@@ -1375,6 +1381,14 @@ function StockPickerAIIncrementEvaluationDialog({
         minimumCompleteBatches: minimumBatches,
         minimumLabeledRecords: minimumLabels,
         minimumAICompletionRate: minimumCompletionPercent / 100,
+        bootstrapSamples,
+        bootstrapConfidenceLevel: bootstrapConfidencePercent / 100,
+        bootstrapBlockSize: (
+          bootstrapBlockSize === ''
+            ? null
+            : Number(bootstrapBlockSize)
+        ),
+        bootstrapSeed,
         newsMode,
       });
       setReport(result);
@@ -1417,6 +1431,16 @@ function StockPickerAIIncrementEvaluationDialog({
     setMinimumCompletionPercent(
       item.parameters.minimum_ai_completion_rate * 100,
     );
+    setBootstrapSamples(item.parameters.bootstrap_samples ?? 2000);
+    setBootstrapConfidencePercent(
+      (item.parameters.bootstrap_confidence_level ?? 0.95) * 100,
+    );
+    setBootstrapBlockSize(
+      item.parameters.bootstrap_block_size == null
+        ? ''
+        : String(item.parameters.bootstrap_block_size),
+    );
+    setBootstrapSeed(item.parameters.bootstrap_seed ?? 20260724);
     setNewsMode(item.parameters.news_mode || 'all');
     setReport({
       ...item.result,
@@ -1452,6 +1476,7 @@ function StockPickerAIIncrementEvaluationDialog({
     incomplete_batch: '方向排名记录不完整',
     missing_quant_rank: '量化名次缺失',
     insufficient_ai_candidates: 'AI 候选数不足以比较 Top K',
+    mixed_data_as_of: '批次包含多个数据截止日',
     missing_or_invalid_output_snapshot: 'AI 输出快照缺失或无法解析',
     unsupported_output_snapshot_version: 'AI 输出快照版本不支持',
     missing_analysis_values: '分析价格、分数或日期缺失',
@@ -1468,6 +1493,25 @@ function StockPickerAIIncrementEvaluationDialog({
     if (labelMatch) return `${labelMatch[1]} 日后验标签不足`;
     return gateLabels[reason] || reason;
   };
+  const inferenceReasonLabel = (reason: string | null) => {
+    if (reason === 'insufficient_distinct_observation_dates') {
+      return '不同观测日期不足';
+    }
+    if (reason === 'block_size_not_less_than_date_count') {
+      return '时间块长度不小于观测日期数';
+    }
+    return reason || '推断未就绪';
+  };
+  const inferenceDirectionLabel = (
+    direction: 'positive' | 'negative' | 'inconclusive' | null,
+  ) => {
+    if (direction === 'positive') return '正向';
+    if (direction === 'negative') return '负向';
+    return '不确定';
+  };
+  const parsedBootstrapBlockSize = (
+    bootstrapBlockSize === '' ? null : Number(bootstrapBlockSize)
+  );
   const parametersValid = (
     Number.isInteger(topK)
     && topK >= 1
@@ -1484,6 +1528,32 @@ function StockPickerAIIncrementEvaluationDialog({
     && Number.isFinite(minimumCompletionPercent)
     && minimumCompletionPercent >= 0
     && minimumCompletionPercent <= 100
+    && Number.isInteger(bootstrapSamples)
+    && bootstrapSamples >= 200
+    && bootstrapSamples <= 100000
+    && Number.isFinite(bootstrapConfidencePercent)
+    && bootstrapConfidencePercent >= 80
+    && bootstrapConfidencePercent <= 99
+    && (
+      parsedBootstrapBlockSize == null
+      || (
+        Number.isInteger(parsedBootstrapBlockSize)
+        && parsedBootstrapBlockSize >= 2
+        && parsedBootstrapBlockSize <= 3650
+      )
+    )
+    && Number.isInteger(bootstrapSeed)
+    && bootstrapSeed >= 0
+    && bootstrapSeed <= 4294967295
+  );
+  const reportInferenceReady = Boolean(
+    report?.metrics
+    && report.parameters.horizons.every(
+      (horizon) => (
+        report.metrics?.[String(horizon)]
+          ?.paired_delta_inference?.ready === true
+      ),
+    ),
   );
 
   return (
@@ -1495,7 +1565,7 @@ function StockPickerAIIncrementEvaluationDialog({
               AI 增量评估
             </h3>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-              在相同 AI Top N 候选内，配对比较纯量化与 AI 重排结果。
+              在相同 AI Top N 候选内，配对比较量化排名与最终机会分重排。
             </p>
           </div>
           <button
@@ -1571,6 +1641,27 @@ function StockPickerAIIncrementEvaluationDialog({
               0,
               100,
             ],
+            [
+              'Bootstrap 次数',
+              bootstrapSamples,
+              setBootstrapSamples,
+              200,
+              100000,
+            ],
+            [
+              '置信水平（%）',
+              bootstrapConfidencePercent,
+              setBootstrapConfidencePercent,
+              80,
+              99,
+            ],
+            [
+              'Bootstrap 种子',
+              bootstrapSeed,
+              setBootstrapSeed,
+              0,
+              4294967295,
+            ],
           ] as Array<
             [string, number, React.Dispatch<React.SetStateAction<number>>, number, number]
           >).map(([label, value, setter, min, max]) => (
@@ -1591,6 +1682,22 @@ function StockPickerAIIncrementEvaluationDialog({
               />
             </label>
           ))}
+          <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
+            <span className="mb-1 block">时间块长度（留空自动）</span>
+            <input
+              type="number"
+              min={2}
+              max={3650}
+              step="1"
+              value={bootstrapBlockSize}
+              disabled={running}
+              onChange={(event) => setBootstrapBlockSize(event.target.value)}
+              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2
+                text-slate-900 focus:border-cyan-500 focus:outline-none focus:ring-2
+                focus:ring-cyan-500/30 disabled:opacity-60 dark:border-slate-600
+                dark:bg-slate-900 dark:text-white"
+            />
+          </label>
         </div>
 
         <div className="mt-4 flex justify-end">
@@ -1614,7 +1721,9 @@ function StockPickerAIIncrementEvaluationDialog({
           <div className="mt-5 space-y-4">
             <Alert type={report.ready ? 'success' : 'warning'}>
               {report.ready
-                ? '样本门禁已通过，可以查看配对描述性指标。'
+                ? reportInferenceReady
+                  ? '样本门禁与时间聚类推断均已通过。'
+                  : '样本门禁已通过；描述性指标可用，部分置信区间尚未就绪。'
                 : `样本门禁未通过：${report.gate.reasons.map(gateReasonLabel).join('；')}`}
             </Alert>
 
@@ -1623,6 +1732,10 @@ function StockPickerAIIncrementEvaluationDialog({
               {' · '}{report.parameters.prompt_version}
               {' · '}{report.parameters.ai_model}
               {' · '}新闻 {report.parameters.news_mode}
+              {' · '}Bootstrap {report.parameters.bootstrap_samples ?? '-'}
+              {' · '}置信水平 {formatPercent(
+                report.parameters.bootstrap_confidence_level,
+              )}
             </p>
 
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -1652,14 +1765,16 @@ function StockPickerAIIncrementEvaluationDialog({
                     <th className="px-3 py-2">标签数</th>
                     <th className="px-3 py-2">配对批次</th>
                     <th className="px-3 py-2">量化 Top K</th>
-                    <th className="px-3 py-2">AI Top K</th>
+                    <th className="px-3 py-2">最终分 Top K</th>
                     <th className="px-3 py-2">配对增量</th>
+                    <th className="px-3 py-2">增量置信区间</th>
                     <th className="px-3 py-2">重排批次</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
                   {report.parameters.horizons.map((horizon) => {
                     const metric = report.metrics?.[String(horizon)];
+                    const inference = metric?.paired_delta_inference;
                     return (
                       <tr key={horizon} className="text-slate-700 dark:text-slate-300">
                         <td className="px-3 py-2 font-medium">{horizon} 日</td>
@@ -1677,6 +1792,15 @@ function StockPickerAIIncrementEvaluationDialog({
                         </td>
                         <td className="px-3 py-2">
                           {metric ? formatPercent(metric.paired_delta.average) : '-'}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-2">
+                          {!metric
+                            ? '-'
+                            : !inference
+                              ? '旧版未计算'
+                              : inference.ready
+                                ? `${formatPercent(inference.lower)} ～ ${formatPercent(inference.upper)}（${inferenceDirectionLabel(inference.interval_direction)}）`
+                                : inferenceReasonLabel(inference.reason)}
                         </td>
                         <td className="px-3 py-2">
                           {metric
@@ -1705,6 +1829,14 @@ function StockPickerAIIncrementEvaluationDialog({
             <Alert type="info">
               {report.methodology.causal_limit}
             </Alert>
+            {report.methodology.inference && (
+              <Alert type="info">
+                {report.methodology.inference}
+                {report.methodology.inference_limit
+                  ? `；${report.methodology.inference_limit}`
+                  : ''}
+              </Alert>
+            )}
           </div>
         )}
 

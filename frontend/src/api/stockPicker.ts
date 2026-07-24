@@ -508,6 +508,23 @@ export interface StockPickerAIIncrementMetrics {
   quant_top_k: StockPickerAIReturnSummary;
   ai_top_k: StockPickerAIReturnSummary;
   paired_delta: StockPickerAIReturnSummary;
+  paired_delta_inference?: {
+    ready: boolean;
+    reason: string | null;
+    method: string;
+    cluster_unit: string;
+    estimate: number | null;
+    confidence_level: number;
+    lower: number | null;
+    upper: number | null;
+    standard_error: number | null;
+    interval_direction: 'positive' | 'negative' | 'inconclusive' | null;
+    bootstrap_samples: number;
+    requested_block_size: number | null;
+    effective_block_size: number;
+    distinct_observation_dates: number;
+    seed: number;
+  };
   selection_changed_batches: number;
   selection_change_rate: number | null;
   average_selection_overlap: number | null;
@@ -526,6 +543,10 @@ export interface StockPickerAIIncrementEvaluationReport {
     minimum_complete_batches: number;
     minimum_labeled_records: number;
     minimum_ai_completion_rate: number;
+    bootstrap_samples?: number;
+    bootstrap_confidence_level?: number;
+    bootstrap_block_size?: number | null;
+    bootstrap_seed?: number;
     snapshot_version: string;
     score_version: string;
     prompt_version: string;
@@ -556,6 +577,8 @@ export interface StockPickerAIIncrementEvaluationReport {
     no_lookahead: string;
     batch_integrity: string;
     gate: string;
+    inference?: string;
+    inference_limit?: string;
     causal_limit: string;
     costs: string;
   };
@@ -873,6 +896,10 @@ export async function runStockPickerAIIncrementEvaluation(params: {
   minimumCompleteBatches?: number;
   minimumLabeledRecords?: number;
   minimumAICompletionRate?: number;
+  bootstrapSamples?: number;
+  bootstrapConfidenceLevel?: number;
+  bootstrapBlockSize?: number | null;
+  bootstrapSeed?: number;
   scoreVersion?: string;
   promptVersion?: string;
   aiModel?: string;
@@ -895,6 +922,11 @@ export async function runStockPickerAIIncrementEvaluation(params: {
           params.minimumLabeledRecords ?? 60,
         minimum_ai_completion_rate:
           params.minimumAICompletionRate ?? 0.9,
+        bootstrap_samples: params.bootstrapSamples ?? 2000,
+        bootstrap_confidence_level:
+          params.bootstrapConfidenceLevel ?? 0.95,
+        bootstrap_block_size: params.bootstrapBlockSize ?? null,
+        bootstrap_seed: params.bootstrapSeed ?? 20260724,
         score_version: params.scoreVersion,
         prompt_version: params.promptVersion,
         ai_model: params.aiModel,

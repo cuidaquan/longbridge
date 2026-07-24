@@ -69,6 +69,7 @@ class StockPickerAIIncrementEvaluationTests(unittest.TestCase):
         score_version: str = StockPickerService.SCORE_VERSION,
         news_enabled: bool = True,
         analysis_time: str = "2026-07-10T12:00:00",
+        data_as_of: str = "2026-07-01T00:00:00",
     ) -> None:
         symbols = {
             1: "AAA.US",
@@ -216,7 +217,7 @@ class StockPickerAIIncrementEvaluationTests(unittest.TestCase):
                         if selected
                         else "skipped"
                     ),
-                    "2026-07-01T00:00:00",
+                    data_as_of,
                     job_id,
                     canonical_json(snapshot),
                     input_hash,
@@ -287,6 +288,11 @@ class StockPickerAIIncrementEvaluationTests(unittest.TestCase):
             0.2,
         )
         self.assertEqual(metrics["selection_changed_batches"], 1)
+        self.assertFalse(metrics["paired_delta_inference"]["ready"])
+        self.assertEqual(
+            metrics["paired_delta_inference"]["reason"],
+            "insufficient_distinct_observation_dates",
+        )
         self.assertEqual(
             report["coverage"]["labeled_records_by_horizon"]["1"],
             3,
@@ -474,6 +480,195 @@ class StockPickerAIIncrementEvaluationTests(unittest.TestCase):
             1,
         )
 
+    def test_mixed_data_as_of_batch_is_excluded(self) -> None:
+        self._insert_batch()
+        self._set_future_prices()
+        self.connection.execute(
+            """
+            UPDATE stock_picker_analysis
+            SET data_as_of = '2026-07-02T00:00:00'
+            WHERE pool_id = 2
+            """
+        )
+
+        report = self._run_ready()
+
+        self.assertFalse(report["ready"])
+        self.assertEqual(
+            report["coverage"]["excluded_batches"]["mixed_data_as_of"],
+            1,
+        )
+
+    def test_block_bootstrap_is_reproducible_and_order_independent(
+        self,
+    ) -> None:
+        comparisons = [
+            {
+                "observation_date": f"2026-07-{day:02d}",
+                "delta": delta,
+            }
+            for day, delta in enumerate(
+                [0.01, 0.03, 0.02, 0.05, 0.04, 0.06],
+                start=1,
+            )
+        ]
+        comparisons.append({
+            "observation_date": "2026-07-03",
+            "delta": 0.025,
+        })
+        parameters = {
+            "bootstrap_samples": 500,
+            "confidence_level": 0.95,
+            "requested_block_size": None,
+            "seed": 1234,
+        }
+
+        first = self.service._block_bootstrap_inference(
+            comparisons,
+            **parameters,
+        )
+        second = self.service._block_bootstrap_inference(
+            list(reversed(comparisons)),
+            **parameters,
+        )
+
+        self.assertEqual(first, second)
+        self.assertTrue(first["ready"])
+        self.assertEqual(first["effective_block_size"], 2)
+        self.assertEqual(first["distinct_observation_dates"], 6)
+        self.assertEqual(first["interval_direction"], "positive")
+        self.assertGreater(first["lower"], 0)
+        self.assertLessEqual(first["lower"], first["upper"])
+        self.assertGreater(first["standard_error"], 0)
+
+    def test_block_bootstrap_reports_inconclusive_interval(self) -> None:
+        comparisons = [
+            {
+                "observation_date": f"2026-07-{day:02d}",
+                "delta": delta,
+            }
+            for day, delta in enumerate(
+                [-0.04, 0.04, -0.03, 0.03, -0.02, 0.02],
+                start=1,
+            )
+        ]
+
+        result = self.service._block_bootstrap_inference(
+            comparisons,
+            bootstrap_samples=500,
+            confidence_level=0.95,
+            requested_block_size=2,
+            seed=42,
+        )
+
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["interval_direction"], "inconclusive")
+        self.assertLessEqual(result["lower"], 0)
+        self.assertGreaterEqual(result["upper"], 0)
+
+    def test_block_bootstrap_reports_negative_interval(self) -> None:
+        comparisons = [
+            {
+                "observation_date": f"2026-07-{day:02d}",
+                "delta": delta,
+            }
+            for day, delta in enumerate(
+                [-0.01, -0.03, -0.02, -0.05, -0.04, -0.06],
+                start=1,
+            )
+        ]
+
+        result = self.service._block_bootstrap_inference(
+            comparisons,
+            bootstrap_samples=500,
+            confidence_level=0.95,
+            requested_block_size=None,
+            seed=1234,
+        )
+
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["interval_direction"], "negative")
+        self.assertLess(result["upper"], 0)
+
+    def test_ready_report_produces_date_clustered_confidence_interval(
+        self,
+    ) -> None:
+        for day in range(1, 5):
+            self._insert_batch(
+                job_id=f"job-{day}",
+                analysis_time=f"2026-07-{day + 9:02d}T12:00:00",
+                data_as_of=f"2026-07-{day:02d}T00:00:00",
+            )
+        self._set_future_prices({
+            "AAA.US": [102.0, 103.0, 104.0, 105.0, 106.0],
+            "BBB.US": [101.0, 102.0, 103.0, 104.0, 105.0],
+            "CCC.US": [110.0, 112.0, 114.0, 116.0, 118.0],
+            "DDD.US": [100.0, 100.0, 100.0, 100.0, 100.0],
+        })
+
+        report = self._run_ready(
+            minimum_complete_batches=4,
+            minimum_labeled_records=12,
+            bootstrap_samples=500,
+            bootstrap_seed=99,
+            persist=True,
+        )
+        inference = report["metrics"]["1"]["paired_delta_inference"]
+        history = self.service.get_history(limit=1)
+
+        self.assertTrue(report["ready"])
+        self.assertTrue(inference["ready"])
+        self.assertEqual(inference["distinct_observation_dates"], 4)
+        self.assertEqual(inference["effective_block_size"], 2)
+        self.assertEqual(inference["seed"], 100)
+        self.assertEqual(inference["interval_direction"], "positive")
+        self.assertGreater(inference["lower"], 0)
+        self.assertEqual(
+            history[0]["result"]["metrics"]["1"][
+                "paired_delta_inference"
+            ],
+            inference,
+        )
+        self.assertEqual(
+            history[0]["parameters"]["bootstrap_seed"],
+            99,
+        )
+
+    def test_block_bootstrap_rejects_degenerate_date_coverage(self) -> None:
+        comparisons = [
+            {
+                "observation_date": f"2026-07-{day:02d}",
+                "delta": 0.01 * day,
+            }
+            for day in range(1, 5)
+        ]
+
+        too_few_dates = self.service._block_bootstrap_inference(
+            comparisons[:3],
+            bootstrap_samples=200,
+            confidence_level=0.95,
+            requested_block_size=2,
+            seed=7,
+        )
+        oversized_block = self.service._block_bootstrap_inference(
+            comparisons,
+            bootstrap_samples=200,
+            confidence_level=0.95,
+            requested_block_size=4,
+            seed=7,
+        )
+
+        self.assertFalse(too_few_dates["ready"])
+        self.assertEqual(
+            too_few_dates["reason"],
+            "insufficient_distinct_observation_dates",
+        )
+        self.assertFalse(oversized_block["ready"])
+        self.assertEqual(
+            oversized_block["reason"],
+            "block_size_not_less_than_date_count",
+        )
+
     def test_ai_failure_is_reported_and_excluded_from_primary_metrics(
         self,
     ) -> None:
@@ -583,6 +778,10 @@ class StockPickerAIIncrementEvaluationTests(unittest.TestCase):
                         "minimum_complete_batches": 1,
                         "minimum_labeled_records": 3,
                         "minimum_ai_completion_rate": 1,
+                        "bootstrap_samples": 500,
+                        "bootstrap_confidence_level": 0.9,
+                        "bootstrap_block_size": 2,
+                        "bootstrap_seed": 123,
                     },
                 )
                 invalid = await client.post(
@@ -606,6 +805,26 @@ class StockPickerAIIncrementEvaluationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["ready"])
+        self.assertEqual(
+            response.json()["parameters"]["bootstrap_samples"],
+            500,
+        )
+        self.assertEqual(
+            response.json()["parameters"]["bootstrap_confidence_level"],
+            0.9,
+        )
+        self.assertEqual(
+            response.json()["parameters"]["bootstrap_block_size"],
+            2,
+        )
+        self.assertEqual(
+            response.json()["parameters"]["bootstrap_seed"],
+            123,
+        )
+        self.assertIn(
+            "paired_delta_inference",
+            response.json()["metrics"]["1"],
+        )
         self.assertEqual(invalid.status_code, 422)
         self.assertEqual(history.status_code, 200)
         self.assertEqual(len(history.json()["items"]), 1)
@@ -627,6 +846,30 @@ class StockPickerAIIncrementEvaluationTests(unittest.TestCase):
             self.service.run(
                 pool_type="LONG",
                 minimum_ai_completion_rate=float("nan"),
+                persist=False,
+            )
+        with self.assertRaisesRegex(ValueError, "bootstrap_samples"):
+            self.service.run(
+                pool_type="LONG",
+                bootstrap_samples=199,
+                persist=False,
+            )
+        with self.assertRaisesRegex(ValueError, "confidence_level"):
+            self.service.run(
+                pool_type="LONG",
+                bootstrap_confidence_level=1,
+                persist=False,
+            )
+        with self.assertRaisesRegex(ValueError, "block_size"):
+            self.service.run(
+                pool_type="LONG",
+                bootstrap_block_size=1,
+                persist=False,
+            )
+        with self.assertRaisesRegex(ValueError, "bootstrap_seed"):
+            self.service.run(
+                pool_type="LONG",
+                bootstrap_seed=-1,
                 persist=False,
             )
 
