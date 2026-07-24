@@ -15,6 +15,7 @@ from app.stock_screener_auto_capture import (
     AUTO_CAPTURE_VERSION,
     StockScreenerAutoCaptureService,
 )
+from app.stock_screener import RELATIVE_STRENGTH_VERSION
 from app.stock_screener_snapshots import StockScreenerSnapshotService
 
 
@@ -64,9 +65,13 @@ def _payload(*, heavy: bool = False) -> dict:
             "duplicates_removed": 0,
         },
         "metric_basis": {
+            "version": RELATIVE_STRENGTH_VERSION,
             "benchmark_symbol": "2800.HK",
             "target_direction": "LONG",
-            "industry_basis": "scan_range_industry_median",
+            "industry_basis": "scan_range_leave_one_out_industry_median",
+            "industry_membership_source": "current_screener_scan_candidates",
+            "minimum_industry_peers": 2,
+            "historical_industry_membership": False,
             "benchmark_returns": {
                 "ten_day_change_rate": 0.05,
                 "half_year_change_rate": 0.15,

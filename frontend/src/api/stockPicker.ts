@@ -533,6 +533,10 @@ export interface ScreenerCandidate {
     target_direction: 'LONG' | 'SHORT';
     industry?: string | null;
     industry_peer_count: number;
+    industry_peer_counts?: {
+      '10d': number;
+      half_year: number;
+    };
     market_rs_10d?: number | null;
     market_rs_half_year?: number | null;
     industry_rs_10d?: number | null;
@@ -673,9 +677,17 @@ export interface ScreenerSearchResponse {
     error?: string;
   };
   relative_strength: {
+    version?: 'leave-one-out-industry-median-v2';
     benchmark_symbol: string;
     target_direction: 'LONG' | 'SHORT';
-    industry_basis: 'current_page_industry_median' | 'scan_range_industry_median';
+    industry_basis:
+      | 'current_page_industry_median'
+      | 'scan_range_industry_median'
+      | 'current_page_leave_one_out_industry_median'
+      | 'scan_range_leave_one_out_industry_median';
+    industry_membership_source?: 'current_screener_scan_candidates';
+    minimum_industry_peers?: number;
+    historical_industry_membership?: false;
     benchmark_returns?: {
       ten_day_change_rate: number | null;
       half_year_change_rate: number | null;

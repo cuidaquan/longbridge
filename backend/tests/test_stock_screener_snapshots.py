@@ -15,6 +15,7 @@ from app.stock_screener_snapshots import (
     COVERAGE_VERSION,
     FILTER_VERSION,
     LEGACY_SNAPSHOT_VERSION,
+    LEGACY_RELATIVE_STRENGTH_VERSION,
     MIN_CALENDAR_SPAN_DAYS,
     MIN_CAPTURE_DATES,
     MIN_DISTINCT_SELECTED_SYMBOLS,
@@ -64,9 +65,13 @@ def _payload() -> dict:
             "duplicates_removed": 1,
         },
         "metric_basis": {
+            "version": RELATIVE_STRENGTH_VERSION,
             "benchmark_symbol": "SPY.US",
             "target_direction": "LONG",
-            "industry_basis": "scan_range_industry_median",
+            "industry_basis": "scan_range_leave_one_out_industry_median",
+            "industry_membership_source": "current_screener_scan_candidates",
+            "minimum_industry_peers": 2,
+            "historical_industry_membership": False,
             "benchmark_returns": {
                 "ten_day_change_rate": 0.05,
                 "half_year_change_rate": 0.15,
@@ -503,6 +508,59 @@ class StockScreenerSnapshotServiceTest(unittest.TestCase):
         self.assertIn(
             "snapshot_integrity_incomplete",
             invalid_group["not_ready_reasons"],
+        )
+
+    def test_coverage_separates_relative_strength_versions(self) -> None:
+        current = self.service.capture(_payload())
+        legacy = self.service.capture(_payload())
+
+        def mark_legacy(payload: dict) -> None:
+            payload["capture"]["relative_strength_version"] = (
+                LEGACY_RELATIVE_STRENGTH_VERSION
+            )
+            payload["metric_basis"].pop("version", None)
+            payload["metric_basis"]["industry_basis"] = (
+                "scan_range_industry_median"
+            )
+            payload["metric_basis"].pop("industry_membership_source", None)
+            payload["metric_basis"].pop("minimum_industry_peers", None)
+            payload["metric_basis"].pop(
+                "historical_industry_membership",
+                None,
+            )
+
+        self._rewrite_payload(legacy["snapshot_id"], mark_legacy)
+        coverage = self.service.get_coverage(
+            current_time=datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+
+        self.assertNotEqual(current["snapshot_id"], legacy["snapshot_id"])
+        self.assertEqual(coverage["cohort_count"], 2)
+        self.assertEqual(
+            {group["integrity_rate"] for group in coverage["groups"]},
+            {1.0},
+        )
+        self.assertEqual(
+            len({group["policy_hash"] for group in coverage["groups"]}),
+            2,
+        )
+
+    def test_coverage_rejects_mismatched_relative_strength_basis(self) -> None:
+        captured = self.service.capture(_payload())
+        self._rewrite_payload(
+            captured["snapshot_id"],
+            lambda payload: payload["metric_basis"].update({
+                "industry_basis": "scan_range_industry_median",
+            }),
+        )
+
+        coverage = self.service.get_coverage(
+            current_time=datetime(2026, 7, 25, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(
+            coverage["groups"][0]["integrity_reasons"],
+            {"relative_strength_basis_mismatch": 1},
         )
 
     def test_coverage_rejects_invalid_parameters(self) -> None:

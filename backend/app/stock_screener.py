@@ -89,6 +89,8 @@ SHORT_CAPACITY_FILTER_KEYS = {
 }
 MAX_SCAN_PAGES = 5
 MAX_SCAN_CANDIDATES = 100
+MIN_INDUSTRY_PEERS = 2
+RELATIVE_STRENGTH_VERSION = "leave-one-out-industry-median-v2"
 
 
 def _retry_candidate_batch(error: BaseException) -> bool:
@@ -947,9 +949,17 @@ class StockScreenerService:
             "has_more": has_more,
             "enrichment": enrichment,
             "relative_strength": {
+                "version": RELATIVE_STRENGTH_VERSION,
                 "benchmark_symbol": benchmark,
                 "target_direction": normalized_direction,
-                "industry_basis": "current_page_industry_median",
+                "industry_basis": (
+                    "current_page_leave_one_out_industry_median"
+                ),
+                "industry_membership_source": (
+                    "current_screener_scan_candidates"
+                ),
+                "minimum_industry_peers": MIN_INDUSTRY_PEERS,
+                "historical_industry_membership": False,
                 "benchmark_returns": benchmark_returns,
             },
             "short_risk": short_risk_status,
@@ -1100,9 +1110,9 @@ class StockScreenerService:
         combined["relative_strength"] = {
             **first_result["relative_strength"],
             "industry_basis": (
-                "current_page_industry_median"
+                "current_page_leave_one_out_industry_median"
                 if pages_scanned == 1
-                else "scan_range_industry_median"
+                else "scan_range_leave_one_out_industry_median"
             ),
             "benchmark_observations": [
                 {
@@ -1484,8 +1494,11 @@ class StockScreenerService:
             "10d": "ten_day_change_rate",
             "half_year": "half_year_change_rate",
         }
-        industry_groups: Dict[str, Dict[str, List[float]]] = {}
-        for candidate in candidates:
+        industry_groups: Dict[
+            str,
+            Dict[str, List[tuple[int, float]]],
+        ] = {}
+        for candidate_index, candidate in enumerate(candidates):
             industry = str(
                 candidate.get("indicators", {}).get("industry") or ""
             ).strip()
@@ -1498,40 +1511,34 @@ class StockScreenerService:
             for horizon, metric in horizons.items():
                 value = (candidate.get("indexes") or {}).get(metric)
                 if value is not None:
-                    industry_groups[industry][horizon].append(value)
+                    industry_groups[industry][horizon].append(
+                        (candidate_index, value)
+                    )
 
-        industry_medians = {
-            industry: {
-                horizon: median(values) if values else None
-                for horizon, values in by_horizon.items()
-            }
-            for industry, by_horizon in industry_groups.items()
-        }
-        for candidate in candidates:
+        for candidate_index, candidate in enumerate(candidates):
             indexes = candidate.get("indexes") or {}
             industry = str(
                 candidate.get("indicators", {}).get("industry") or ""
             ).strip()
-            peer_count = max(
-                (
-                    len(values)
-                    for values in industry_groups.get(industry, {}).values()
-                ),
-                default=0,
-            )
             relative = candidate.get("relative_strength") or {}
             relative["industry"] = industry or None
-            relative["industry_peer_count"] = peer_count
+            peer_counts: Dict[str, int] = {}
             for horizon, metric in horizons.items():
                 relative[f"industry_rs_{horizon}"] = None
                 stock_return = indexes.get(metric)
-                peer_values = industry_groups.get(industry, {}).get(
-                    horizon,
-                    [],
-                )
+                peer_values = [
+                    value
+                    for peer_index, value in industry_groups.get(
+                        industry,
+                        {},
+                    ).get(horizon, [])
+                    if peer_index != candidate_index
+                ]
+                peer_counts[horizon] = len(peer_values)
                 industry_return = (
-                    industry_medians.get(industry, {}).get(horizon)
-                    if industry and len(peer_values) >= 2
+                    median(peer_values)
+                    if industry
+                    and len(peer_values) >= MIN_INDUSTRY_PEERS
                     else None
                 )
                 if stock_return is not None and industry_return is not None:
@@ -1539,6 +1546,11 @@ class StockScreenerService:
                         direction * (stock_return - industry_return),
                         6,
                     )
+            relative["industry_peer_counts"] = peer_counts
+            relative["industry_peer_count"] = max(
+                peer_counts.values(),
+                default=0,
+            )
             candidate["relative_strength"] = relative
 
     @staticmethod
@@ -1551,6 +1563,10 @@ class StockScreenerService:
             "target_direction": target_direction,
             "industry": None,
             "industry_peer_count": 0,
+            "industry_peer_counts": {
+                "10d": 0,
+                "half_year": 0,
+            },
             "market_rs_10d": None,
             "market_rs_half_year": None,
             "industry_rs_10d": None,

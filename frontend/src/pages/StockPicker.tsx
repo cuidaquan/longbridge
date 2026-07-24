@@ -3078,8 +3078,8 @@ function StockDiscoveryDialog({
     ['min_capital_flow', '最低资金流', '可输入负数'],
     ['min_market_rs_10d', '最低市场 RS(10日)', '方向化差值'],
     ['min_market_rs_half_year', '最低市场 RS(半年)', '方向化差值'],
-    ['min_industry_rs_10d', '最低行业 RS(10日)', '当前扫描范围中位数'],
-    ['min_industry_rs_half_year', '最低行业 RS(半年)', '当前扫描范围中位数'],
+    ['min_industry_rs_10d', '最低行业 RS(10日)', '留一法同行中位数'],
+    ['min_industry_rs_half_year', '最低行业 RS(半年)', '留一法同行中位数'],
     ['max_spread_bps', '最高买卖点差', 'bps，例如 50'],
     ['min_top_of_book_notional', '最低一档盘口金额', '市场币种'],
     ['min_revenue_yoy', '最低收入同比', '小数，例如 0.1'],
@@ -3776,9 +3776,10 @@ function StockDiscoveryDialog({
                 </p>
                 <p className="text-xs text-slate-500">
                   市场基准 {result.relative_strength.benchmark_symbol}；
-                  行业 RS 为{result.relative_strength.industry_basis === 'current_page_industry_median'
+                  行业 RS 为{result.relative_strength.industry_basis === 'current_page_leave_one_out_industry_median'
                     ? '本页'
-                    : '扫描范围'}同行中位数差
+                    : '扫描范围'}留一法同行中位数差；至少
+                  {' '}{result.relative_strength.minimum_industry_peers ?? 2} 个其他有效同行
                 </p>
                 {result.relative_strength.benchmark_returns && (
                   <p className="text-xs text-slate-500">
@@ -3964,7 +3965,8 @@ function StockDiscoveryDialog({
                         <span>
                           行业RS(10日) {formatIndex(
                             candidate.relative_strength.industry_rs_10d,
-                          )}
+                          )}（同行 {candidate.relative_strength.industry_peer_counts?.['10d']
+                            ?? candidate.relative_strength.industry_peer_count}）
                         </span>
                         <span>
                           PE {formatIndex(

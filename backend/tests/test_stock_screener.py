@@ -274,7 +274,7 @@ class StockScreenerServiceTest(unittest.TestCase):
         self.assertEqual(result["filters"]["reasons"], {"duplicate_symbol": 1})
         self.assertEqual(
             result["relative_strength"]["industry_basis"],
-            "scan_range_industry_median",
+            "scan_range_leave_one_out_industry_median",
         )
         self.assertEqual(result["scan"], {
             "mode": "bounded",
@@ -410,7 +410,7 @@ class StockScreenerServiceTest(unittest.TestCase):
             payload["universe"][1]["candidate"]["relative_strength"][
                 "industry_peer_count"
             ],
-            3,
+            2,
         )
         self.assertEqual(payload["selected_symbols"], ["BBB.US", "CCC.US"])
         self.assertEqual(
@@ -501,12 +501,12 @@ class StockScreenerServiceTest(unittest.TestCase):
 
         def search_page(_market, _strategy_id, _conditions, _show, page, _size):
             symbols = (
-                ("LEADER.US",)
+                ("LEADER.US", "MIDDLE.US")
                 if page == 0
                 else ("LEADER.US", "LAGGARD.US")
             )
             return _Response({
-                "total": 3,
+                "total": 4,
                 "has_more": page == 0,
                 "items": [
                     {
@@ -529,6 +529,10 @@ class StockScreenerServiceTest(unittest.TestCase):
             "LAGGARD.US": {
                 "ten_day_change_rate": 0.00,
                 "half_year_change_rate": 0.10,
+            },
+            "MIDDLE.US": {
+                "ten_day_change_rate": 0.04,
+                "half_year_change_rate": 0.20,
             },
             "SPY.US": {
                 "ten_day_change_rate": 0.02,
@@ -557,7 +561,7 @@ class StockScreenerServiceTest(unittest.TestCase):
 
         self.assertEqual(
             result["relative_strength"]["industry_basis"],
-            "scan_range_industry_median",
+            "scan_range_leave_one_out_industry_median",
         )
         self.assertEqual(
             [item["symbol"] for item in result["items"]],
@@ -565,7 +569,8 @@ class StockScreenerServiceTest(unittest.TestCase):
         )
         relative_strength = result["items"][0]["relative_strength"]
         self.assertEqual(relative_strength["industry_peer_count"], 2)
-        self.assertEqual(relative_strength["industry_rs_10d"], 0.05)
+        self.assertEqual(relative_strength["industry_peer_counts"]["10d"], 2)
+        self.assertEqual(relative_strength["industry_rs_10d"], 0.08)
         self.assertEqual(relative_strength["market_rs_10d"], 0.08)
         self.assertEqual(
             result["relative_strength"]["benchmark_observations"],
@@ -582,13 +587,13 @@ class StockScreenerServiceTest(unittest.TestCase):
                 },
             ],
         )
-        self.assertEqual(result["filters"]["before"], 3)
+        self.assertEqual(result["filters"]["before"], 4)
         self.assertEqual(result["filters"]["after"], 1)
-        self.assertEqual(result["filters"]["excluded"], 2)
+        self.assertEqual(result["filters"]["excluded"], 3)
         self.assertEqual(
             result["filters"]["reasons"],
             {
-                "below_min_industry_rs_10d": 1,
+                "below_min_industry_rs_10d": 2,
                 "duplicate_symbol": 1,
             },
         )
@@ -613,18 +618,26 @@ class StockScreenerServiceTest(unittest.TestCase):
             "relative_strength"
         ]
         self.assertEqual(short_relative_strength["industry_peer_count"], 2)
-        self.assertEqual(short_relative_strength["industry_rs_10d"], 0.05)
+        self.assertEqual(short_relative_strength["industry_rs_10d"], 0.07)
         self.assertEqual(short_relative_strength["market_rs_10d"], 0.02)
 
     def test_bounded_scan_stopping_on_first_page_keeps_single_page_rs(self) -> None:
         context = MagicMock()
         context.screener_search.return_value = _Response({
-            "total": 2,
+            "total": 3,
             "has_more": False,
             "items": [
                 {
                     "symbol": "LEADER.US",
                     "name": "Leader",
+                    "indicators": [{
+                        "key": "industry",
+                        "value": "Technology",
+                    }],
+                },
+                {
+                    "symbol": "MIDDLE.US",
+                    "name": "Middle",
                     "indicators": [{
                         "key": "industry",
                         "value": "Technology",
@@ -642,6 +655,7 @@ class StockScreenerServiceTest(unittest.TestCase):
         })
         indexes = {
             "LEADER.US": {"ten_day_change_rate": 0.10},
+            "MIDDLE.US": {"ten_day_change_rate": 0.04},
             "LAGGARD.US": {"ten_day_change_rate": 0.00},
             "SPY.US": {"ten_day_change_rate": 0.02},
         }
@@ -667,7 +681,7 @@ class StockScreenerServiceTest(unittest.TestCase):
         self.assertEqual(result["scan"]["pages_scanned"], 1)
         self.assertEqual(
             result["relative_strength"]["industry_basis"],
-            "current_page_industry_median",
+            "current_page_leave_one_out_industry_median",
         )
         self.assertEqual(
             [item["symbol"] for item in result["items"]],
@@ -675,7 +689,7 @@ class StockScreenerServiceTest(unittest.TestCase):
         )
         self.assertEqual(
             result["items"][0]["relative_strength"]["industry_rs_10d"],
-            0.05,
+            0.08,
         )
 
     def test_scan_caps_an_overfilled_upstream_page_to_requested_size(self) -> None:
@@ -879,13 +893,18 @@ class StockScreenerServiceTest(unittest.TestCase):
         )
         self.assertEqual(result["enrichment"]["status"], "available")
 
-    def test_relative_strength_is_directional_and_uses_industry_median(self) -> None:
+    def test_relative_strength_is_directional_and_excludes_self(self) -> None:
         context = MagicMock()
         context.screener_search.return_value = _Response({
             "items": [
                 {
                     "symbol": "LEADER.US",
                     "name": "Leader",
+                    "indicators": [{"key": "industry", "value": "Technology"}],
+                },
+                {
+                    "symbol": "MIDDLE.US",
+                    "name": "Middle",
                     "indicators": [{"key": "industry", "value": "Technology"}],
                 },
                 {
@@ -903,6 +922,10 @@ class StockScreenerServiceTest(unittest.TestCase):
             "LAGGARD.US": {
                 "ten_day_change_rate": 0.04,
                 "half_year_change_rate": 0.10,
+            },
+            "MIDDLE.US": {
+                "ten_day_change_rate": 0.06,
+                "half_year_change_rate": 0.20,
             },
             "SPY.US": {
                 "ten_day_change_rate": 0.05,
@@ -943,7 +966,7 @@ class StockScreenerServiceTest(unittest.TestCase):
         )
         self.assertEqual(
             long_result["items"][0]["relative_strength"]["industry_rs_10d"],
-            0.03,
+            0.05,
         )
         self.assertEqual(
             long_result["relative_strength"]["benchmark_returns"],
@@ -960,6 +983,46 @@ class StockScreenerServiceTest(unittest.TestCase):
             short_result["items"][0]["relative_strength"]["market_rs_10d"],
             0.01,
         )
+        self.assertEqual(
+            short_result["items"][0]["relative_strength"]["industry_rs_10d"],
+            0.04,
+        )
+
+    def test_industry_rs_requires_two_other_valid_peers(self) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "items": [
+                {
+                    "symbol": symbol,
+                    "name": symbol,
+                    "indicators": [{
+                        "key": "industry",
+                        "value": "Technology",
+                    }],
+                }
+                for symbol in ("FIRST.US", "SECOND.US")
+            ],
+        })
+        service = _ServiceWithContext(
+            context,
+            index_loader=lambda _symbols: {
+                "FIRST.US": {"ten_day_change_rate": 0.10},
+                "SECOND.US": {"ten_day_change_rate": 0.04},
+                "SPY.US": {"ten_day_change_rate": 0.05},
+            },
+        )
+
+        result = service.search("US", 101)
+
+        self.assertEqual(result["relative_strength"]["minimum_industry_peers"], 2)
+        self.assertFalse(
+            result["relative_strength"]["historical_industry_membership"]
+        )
+        for candidate in result["items"]:
+            relative = candidate["relative_strength"]
+            self.assertEqual(relative["industry_peer_count"], 1)
+            self.assertEqual(relative["industry_peer_counts"]["10d"], 1)
+            self.assertIsNone(relative["industry_rs_10d"])
 
     def test_short_risk_filter_is_explicit_and_does_not_claim_availability(self) -> None:
         context = MagicMock()

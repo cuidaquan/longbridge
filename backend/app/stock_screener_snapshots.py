@@ -9,6 +9,7 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from .db import get_connection
+from .stock_screener import MIN_INDUSTRY_PEERS, RELATIVE_STRENGTH_VERSION
 
 
 LEGACY_SNAPSHOT_VERSION = "stock-screener-scan-snapshot-v1"
@@ -18,7 +19,11 @@ SUPPORTED_SNAPSHOT_VERSIONS = {
     SNAPSHOT_VERSION,
 }
 FILTER_VERSION = "stock-screener-candidate-filter-v1"
-RELATIVE_STRENGTH_VERSION = "directional-return-difference-v1"
+LEGACY_RELATIVE_STRENGTH_VERSION = "directional-return-difference-v1"
+SUPPORTED_RELATIVE_STRENGTH_VERSIONS = {
+    LEGACY_RELATIVE_STRENGTH_VERSION,
+    RELATIVE_STRENGTH_VERSION,
+}
 COVERAGE_VERSION = "stock-screener-scan-coverage-v2"
 MIN_CAPTURE_DATES = 20
 MIN_CALENDAR_SPAN_DAYS = 28
@@ -522,6 +527,10 @@ class StockScreenerSnapshotService:
                 if key not in {"market", "target_direction", "strategy"}
             }
             policy["strategy_source"] = strategy.get("source")
+            policy["filter_version"] = capture.get("filter_version")
+            policy["relative_strength_version"] = capture.get(
+                "relative_strength_version"
+            )
             policy_hash = sha256(
                 _canonical_json({
                     "snapshot_version": row[2],
@@ -561,6 +570,15 @@ class StockScreenerSnapshotService:
                 integrity_reasons.append("capture_metadata_mismatch")
             if row[2] not in SUPPORTED_SNAPSHOT_VERSIONS:
                 integrity_reasons.append("unsupported_snapshot_version")
+            if capture.get("filter_version") != FILTER_VERSION:
+                integrity_reasons.append("unsupported_filter_version")
+            if (
+                capture.get("relative_strength_version")
+                not in SUPPORTED_RELATIVE_STRENGTH_VERSIONS
+            ):
+                integrity_reasons.append(
+                    "unsupported_relative_strength_version"
+                )
             request_strategy = strategy
             if (
                 request.get("market") != market
@@ -581,6 +599,32 @@ class StockScreenerSnapshotService:
                 payload.get("pages"),
             )
             integrity_reasons.extend(benchmark_integrity_reasons)
+            if (
+                capture.get("relative_strength_version")
+                == RELATIVE_STRENGTH_VERSION
+                and (
+                    not isinstance(payload.get("metric_basis"), dict)
+                    or payload["metric_basis"].get("version")
+                    != RELATIVE_STRENGTH_VERSION
+                    or payload["metric_basis"].get("industry_basis")
+                    not in {
+                        "current_page_leave_one_out_industry_median",
+                        "scan_range_leave_one_out_industry_median",
+                    }
+                    or payload["metric_basis"].get(
+                        "industry_membership_source"
+                    ) != "current_screener_scan_candidates"
+                    or payload["metric_basis"].get(
+                        "minimum_industry_peers"
+                    ) != MIN_INDUSTRY_PEERS
+                    or payload["metric_basis"].get(
+                        "historical_industry_membership"
+                    ) is not False
+                )
+            ):
+                integrity_reasons.append(
+                    "relative_strength_basis_mismatch"
+                )
             if capture.get("payload_hash") != row[8]:
                 integrity_reasons.append("payload_hash_mismatch")
             hash_payload = json.loads(json.dumps(payload))
