@@ -396,6 +396,32 @@ class StockPickerSnapshotPersistenceTests(unittest.TestCase):
         )
         self.assertNotEqual(ai_first_key, ai_second_key)
 
+    def test_ai_model_version_participates_in_analysis_cache_key(self) -> None:
+        config = self._prepared()["config"]
+        credentials = {"DEEPSEEK_API_KEY": "key"}
+        current_key = self.service._build_cache_key(
+            self.pool_id,
+            "AAA.US",
+            "LONG",
+            self.klines,
+            credentials,
+            config,
+            "ai",
+        )
+        legacy_service = StockPickerService()
+        legacy_service.AI_MODEL = "deepseek-chat"
+        legacy_key = legacy_service._build_cache_key(
+            self.pool_id,
+            "AAA.US",
+            "LONG",
+            self.klines,
+            credentials,
+            config,
+            "ai",
+        )
+
+        self.assertNotEqual(current_key, legacy_key)
+
     def test_disabled_and_skipped_requests_have_explicit_snapshots(self) -> None:
         asyncio.run(
             self.service._finalize_prepared_analysis(
@@ -495,13 +521,20 @@ class StockPickerSnapshotPersistenceTests(unittest.TestCase):
         with patch(
             "app.ai_analyzer.DeepSeekAnalyzer",
             return_value=analyzer,
-        ):
+        ) as analyzer_class:
             asyncio.run(
                 self.service._finalize_prepared_analysis(
                     self._prepared(credentials),
                     use_ai=True,
                 )
             )
+
+        analyzer_class.assert_called_once_with(
+            api_key="deepseek-secret",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com",
+            tavily_api_key="tavily-secret",
+        )
 
         detail = self.service.get_analysis_snapshot(self._latest_id())
         serialized = canonical_json(detail)
@@ -529,6 +562,10 @@ class StockPickerSnapshotPersistenceTests(unittest.TestCase):
         self.assertEqual(
             detail["ai_input_snapshot"]["score_version"],
             StockPickerService.SCORE_VERSION,
+        )
+        self.assertEqual(
+            detail["ai_input_snapshot"]["ai_model"],
+            "deepseek-v4-flash",
         )
         self.assertTrue(detail["ai_input_snapshot"]["config_version"])
         self.assertTrue(detail["ai_input_snapshot"]["universe_version"])

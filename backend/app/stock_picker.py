@@ -46,7 +46,7 @@ class StockPickerService:
     AI_TOP_N_PER_POOL = 10
     SCORE_VERSION = "stock-picker-v2.1"
     PROMPT_VERSION = "stock-picker-v2"
-    AI_MODEL = "deepseek-chat"
+    AI_MODEL = "deepseek-v4-flash"
     DEFAULT_CONFIG = {
         'auto_refresh_enabled': False,
         'auto_refresh_interval': 300,
