@@ -7,7 +7,7 @@
 4. 优化推荐度计算公式
 5. 增加多周期分析
 """
-from typing import List, Dict, Optional, Tuple
+from typing import Any, List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
 import asyncio
 import logging
@@ -23,6 +23,18 @@ from .external_service_resilience import (
 )
 from .services import get_cached_candlesticks
 from .repositories import load_ai_credentials
+from .stock_picker_ai_snapshots import (
+    AI_INPUT_SNAPSHOT_VERSION,
+    AI_OUTPUT_SNAPSHOT_VERSION,
+    DATA_DEFINITION_VERSION,
+    canonical_json,
+    klines_hash,
+    parse_snapshot,
+    sanitize_error,
+    sha256_json,
+    snapshot_hash,
+    utc_now_iso,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -358,6 +370,26 @@ class StockPickerService:
             all_stocks.extend([(s, 'LONG') for s in pools['long_pool']])
         if not pool_type or pool_type == 'SHORT':
             all_stocks.extend([(s, 'SHORT') for s in pools['short_pool']])
+
+        universe_snapshot = sorted(
+            (
+                {
+                    "pool_id": stock["id"],
+                    "symbol": stock["symbol"],
+                    "pool_type": direction,
+                }
+                for stock, direction in all_stocks
+            ),
+            key=lambda item: (
+                item["pool_type"],
+                item["symbol"],
+                item["pool_id"],
+            ),
+        )
+        config = dict(config)
+        config["_selection_context"] = "pool_ranking"
+        config["_universe_snapshot"] = universe_snapshot
+        config["_universe_version"] = sha256_json(universe_snapshot)
         
         total_count = len(all_stocks)
         logger.info(f"📊 开始分析 {total_count} 只股票...")
@@ -449,18 +481,54 @@ class StockPickerService:
                 results.append(exc)
                 report_completed(symbol, '❌ 失败')
 
-        # 第二阶段仅让每个方向量化排名前 N 的未缓存股票进入新闻和 AI。
+        # 第二阶段冻结方向内量化排名，并仅让前 N 进入新闻和 AI。
         ai_pool_ids = set()
+        for ptype in ('LONG', 'SHORT'):
+            ranked = sorted(
+                (
+                    item
+                    for item in prepared_items
+                    if item['pool_type'] == ptype
+                ),
+                key=lambda item: (
+                    -item['score']['total'],
+                    item['symbol'],
+                    item['pool_id'],
+                ),
+            )
+            selected_ids = {
+                item['pool_id']
+                for item in (
+                    ranked[:config['ai_top_n_per_pool']]
+                    if api_key
+                    else []
+                )
+            }
+            ai_pool_ids.update(selected_ids)
+            ranking_snapshot = [
+                {
+                    "rank": index,
+                    "pool_id": item["pool_id"],
+                    "symbol": item["symbol"],
+                    "score_total": item["score"]["total"],
+                }
+                for index, item in enumerate(ranked, start=1)
+            ]
+            selection_version = sha256_json({
+                "pool_type": ptype,
+                "ai_top_n_per_pool": config["ai_top_n_per_pool"],
+                "ranking": ranking_snapshot,
+            })
+            for index, item in enumerate(ranked, start=1):
+                item_config = dict(item.get("config") or config)
+                item_config["_selection_version"] = selection_version
+                item_config["_selection_snapshot"] = ranking_snapshot
+                item_config["_quant_rank"] = index
+                item_config["_ai_selected"] = (
+                    item["pool_id"] in selected_ids
+                )
+                item["config"] = item_config
         if api_key:
-            for ptype in ('LONG', 'SHORT'):
-                ranked = sorted(
-                    (item for item in prepared_items if item['pool_type'] == ptype),
-                    key=lambda item: item['score']['total'],
-                    reverse=True,
-                )
-                ai_pool_ids.update(
-                    item['pool_id'] for item in ranked[:config['ai_top_n_per_pool']]
-                )
             if progress_callback:
                 progress_callback({
                     'log': (
@@ -530,7 +598,15 @@ class StockPickerService:
         try:
             logger.info(f"🔍 开始分析: {symbol}")
             pool_type = self._validate_pool_type(pool_type)
-            config = self.get_config()
+            config = dict(self.get_config())
+            single_universe = [{
+                "pool_id": pool_id,
+                "symbol": self._normalize_symbol(symbol),
+                "pool_type": pool_type,
+            }]
+            config["_selection_context"] = "single_stock"
+            config["_universe_snapshot"] = single_universe
+            config["_universe_version"] = sha256_json(single_universe)
             self.cache_duration = config['cache_duration']
 
             from .services import sync_history_candlesticks
@@ -690,6 +766,12 @@ class StockPickerService:
             analysis_mode,
             config.get('updated_at'),
             config['analysis_lookback'],
+            config.get('_universe_version'),
+            (
+                config.get('_selection_version')
+                if ai_creds.get('DEEPSEEK_API_KEY')
+                else None
+            ),
         )
 
     def _get_cached_result(
@@ -751,6 +833,10 @@ class StockPickerService:
                 logger.info("📋 使用版本化缓存: %s (%s)", symbol, analysis_mode)
                 return cached_result
 
+        scenario = "buy_focus" if pool_type == 'LONG' else "sell_focus"
+        input_context: Optional[Dict[str, Any]] = None
+        output_context: Optional[Dict[str, Any]] = None
+
         if use_ai and api_key:
             logger.info(
                 "🤖 DeepSeek分析: %s (搜索引擎: %s)",
@@ -773,21 +859,71 @@ class StockPickerService:
                     analyzer.analyze_trading_opportunity,
                     symbol=symbol,
                     klines=klines,
-                    scenario=(
-                        "buy_focus"
-                        if pool_type == 'LONG'
-                        else "sell_focus"
-                    ),
+                    scenario=scenario,
                     technical_indicators=indicators,
                     quant_score=score,
                 )
             except Exception as exc:
+                safe_error = sanitize_error(
+                    exc,
+                    secrets=(api_key, tavily_api_key),
+                )
                 analysis = {
-                    "error": str(exc),
+                    "error": safe_error,
                 }
+                input_context = {
+                    "request_status": "initialization_failed",
+                    "request_reason": "analyzer_initialization_failed",
+                    "symbol": symbol,
+                    "scenario": scenario,
+                    "model": self.AI_MODEL,
+                    "temperature": 0.3,
+                    "style": None,
+                    "system_prompt": None,
+                    "user_prompt": None,
+                    "news_snapshot": None,
+                    "response_format": {"type": "json_object"},
+                }
+                output_context = {
+                    "status": "failed",
+                    "raw_response": None,
+                    "parsed_response": None,
+                    "error_type": type(exc).__name__,
+                    "error": safe_error,
+                }
+            else:
+                input_context = analysis.pop("_ai_input_context", None)
+                output_context = analysis.pop("_ai_output_context", None)
+                analysis.pop("ai_raw_response", None)
+                analysis.pop("ai_prompt", None)
             if analysis.get('error'):
                 record_stock_picker_ai(degraded=True)
-                ai_error = analysis['error']
+                ai_error = sanitize_error(
+                    analysis['error'],
+                    secrets=(api_key, tavily_api_key),
+                )
+                if input_context is None:
+                    input_context = {
+                        "request_status": "failed",
+                        "request_reason": "ai_request_failed",
+                        "symbol": symbol,
+                        "scenario": scenario,
+                        "model": self.AI_MODEL,
+                        "temperature": None,
+                        "style": None,
+                        "system_prompt": None,
+                        "user_prompt": None,
+                        "news_snapshot": None,
+                        "response_format": {"type": "json_object"},
+                    }
+                if output_context is None:
+                    output_context = {
+                        "status": "failed",
+                        "raw_response": None,
+                        "parsed_response": None,
+                        "error_type": "AIRequestError",
+                        "error": ai_error,
+                    }
                 logger.warning(
                     "⚠️ AI分析失败，回退到量化结论: %s - %s",
                     symbol,
@@ -802,10 +938,61 @@ class StockPickerService:
                 )
             else:
                 record_stock_picker_ai(degraded=False)
+                if input_context is None:
+                    input_context = {
+                        "request_status": "completed",
+                        "request_reason": None,
+                        "symbol": symbol,
+                        "scenario": scenario,
+                        "model": self.AI_MODEL,
+                        "temperature": None,
+                        "style": None,
+                        "system_prompt": None,
+                        "user_prompt": None,
+                        "news_snapshot": None,
+                        "response_format": {"type": "json_object"},
+                    }
+                if output_context is None:
+                    output_context = {
+                        "status": "completed",
+                        "raw_response": None,
+                        "parsed_response": {
+                            key: value
+                            for key, value in analysis.items()
+                            if key not in {"indicators", "score"}
+                        },
+                        "error_type": None,
+                        "error": None,
+                    }
         else:
             ai_status = 'disabled' if not api_key else 'skipped'
             if ai_status == 'disabled':
                 logger.warning("⚠️ 未配置DeepSeek API，使用V2量化评分: %s", symbol)
+            request_reason = (
+                "deepseek_not_configured"
+                if ai_status == "disabled"
+                else "outside_ai_top_n"
+            )
+            input_context = {
+                "request_status": "not_requested",
+                "request_reason": request_reason,
+                "symbol": symbol,
+                "scenario": scenario,
+                "model": self.AI_MODEL if api_key else None,
+                "temperature": None,
+                "style": None,
+                "system_prompt": None,
+                "user_prompt": None,
+                "news_snapshot": None,
+                "response_format": None,
+            }
+            output_context = {
+                "status": "not_requested",
+                "raw_response": None,
+                "parsed_response": None,
+                "error_type": None,
+                "error": None,
+            }
             analysis = self._build_quant_analysis(
                 score,
                 indicators,
@@ -825,6 +1012,27 @@ class StockPickerService:
             min_score_to_recommend=config['min_score_to_recommend'],
         )
         analysis['analysis_mode'] = analysis_mode
+        ai_model = self.AI_MODEL if api_key else None
+        (
+            ai_input_snapshot,
+            ai_input_hash,
+            ai_output_snapshot,
+        ) = self._build_ai_snapshot_payloads(
+            symbol=symbol,
+            pool_type=pool_type,
+            klines=klines,
+            indicators=indicators,
+            score=score,
+            config=config,
+            analysis_mode=analysis_mode,
+            api_key=api_key,
+            tavily_api_key=tavily_api_key,
+            score_version=self.SCORE_VERSION,
+            prompt_version=self.PROMPT_VERSION,
+            ai_model=ai_model,
+            input_context=input_context,
+            output_context=output_context,
+        )
         result = self._save_analysis_result(
             pool_id=prepared['pool_id'],
             symbol=symbol,
@@ -835,9 +1043,12 @@ class StockPickerService:
             recommendation_reason=recommendation_reason,
             score_version=self.SCORE_VERSION,
             prompt_version=self.PROMPT_VERSION,
-            ai_model=self.AI_MODEL if api_key else None,
+            ai_model=ai_model,
             analysis_mode=analysis_mode,
             job_id=prepared.get('job_id'),
+            ai_input_snapshot=ai_input_snapshot,
+            ai_input_hash=ai_input_hash,
+            ai_output_snapshot=ai_output_snapshot,
             history_retention_days=config['history_retention_days'],
             max_history_per_stock=config['max_history_per_stock'],
         )
@@ -1753,6 +1964,149 @@ class StockPickerService:
         )
 
         return round(min(100, max(0, recommendation)), 1)
+
+    @staticmethod
+    def _snapshot_config(config: Dict) -> Dict:
+        """Keep only persisted analysis configuration in the immutable input."""
+        return {
+            **{
+                key: config.get(key)
+                for key in StockPickerService.DEFAULT_CONFIG
+            },
+            "updated_at": config.get("updated_at"),
+        }
+
+    def _build_ai_snapshot_payloads(
+        self,
+        *,
+        symbol: str,
+        pool_type: str,
+        klines: List[Dict],
+        indicators: Dict,
+        score: Dict,
+        config: Dict,
+        analysis_mode: str,
+        api_key: Optional[str],
+        tavily_api_key: Optional[str],
+        score_version: str,
+        prompt_version: str,
+        ai_model: Optional[str],
+        input_context: Optional[Dict[str, Any]],
+        output_context: Optional[Dict[str, Any]],
+    ) -> Tuple[str, str, str]:
+        """Build canonical input/output snapshots and the input integrity hash."""
+        captured_at = utc_now_iso()
+        config_snapshot = self._snapshot_config(config)
+        universe_snapshot = config.get("_universe_snapshot") or [{
+            "pool_id": config.get("_pool_id"),
+            "symbol": symbol,
+            "pool_type": pool_type,
+        }]
+        universe_version = config.get("_universe_version") or sha256_json(
+            universe_snapshot
+        )
+        selection_snapshot = config.get("_selection_snapshot") or [{
+            "rank": 1,
+            "pool_id": universe_snapshot[0].get("pool_id"),
+            "symbol": symbol,
+            "score_total": score.get("total"),
+        }]
+        selection_version = config.get("_selection_version") or sha256_json({
+            "pool_type": pool_type,
+            "ai_top_n_per_pool": config.get("ai_top_n_per_pool"),
+            "ranking": selection_snapshot,
+        })
+        config_version = sha256_json(config_snapshot)
+        context = input_context or {}
+        request_status = context.get(
+            "request_status",
+            "not_requested",
+        )
+        input_snapshot = {
+            "version": AI_INPUT_SNAPSHOT_VERSION,
+            "captured_at": captured_at,
+            "request_status": request_status,
+            "request_reason": context.get("request_reason"),
+            "symbol": symbol,
+            "pool_type": pool_type,
+            "scenario": context.get("scenario"),
+            "analysis_mode": analysis_mode,
+            "data_as_of": (
+                str(klines[-1].get("ts"))
+                if klines and klines[-1].get("ts") is not None
+                else None
+            ),
+            "data_definition_version": DATA_DEFINITION_VERSION,
+            "score_version": score_version,
+            "prompt_version": prompt_version,
+            "ai_model": ai_model,
+            "temperature": context.get("temperature"),
+            "style": context.get("style"),
+            "current_positions": context.get("current_positions"),
+            "system_prompt": context.get("system_prompt"),
+            "user_prompt": context.get("user_prompt"),
+            "response_format": context.get(
+                "response_format",
+                {"type": "json_object"} if request_status != "not_requested" else None,
+            ),
+            "news_enabled": bool(tavily_api_key),
+            "news_snapshot": context.get("news_snapshot"),
+            "quant_score": score,
+            "technical_indicators": indicators,
+            "klines_hash": klines_hash(klines),
+            "config_version": config_version,
+            "config": config_snapshot,
+            "universe_version": universe_version,
+            "universe_snapshot": universe_snapshot,
+            "selection_context": config.get(
+                "_selection_context",
+                "single_stock",
+            ),
+            "selection_version": selection_version,
+            "selection": {
+                "quant_rank": config.get("_quant_rank", 1),
+                "ai_top_n_per_pool": config.get(
+                    "ai_top_n_per_pool"
+                ),
+                "ai_selected": config.get(
+                    "_ai_selected",
+                    request_status != "not_requested",
+                ),
+                "ranking": selection_snapshot,
+            },
+        }
+        if api_key is None:
+            input_snapshot["ai_model"] = None
+        input_hash = snapshot_hash(input_snapshot)
+
+        output = output_context or {}
+        output_snapshot = {
+            "version": AI_OUTPUT_SNAPSHOT_VERSION,
+            "captured_at": captured_at,
+            "status": output.get(
+                "status",
+                "not_requested",
+            ),
+            "raw_response": output.get("raw_response"),
+            "parsed_response": output.get("parsed_response"),
+            "error_type": output.get("error_type"),
+            "error": sanitize_error(
+                output.get("error"),
+                secrets=(
+                    secret
+                    for secret in (
+                        api_key,
+                        tavily_api_key,
+                    )
+                    if secret
+                ),
+            ) if output.get("error") else None,
+        }
+        return (
+            canonical_json(input_snapshot),
+            input_hash,
+            canonical_json(output_snapshot),
+        )
     
     def _save_analysis_result(self, **kwargs) -> Dict:
         """保存分析结果"""
@@ -1763,16 +2117,20 @@ class StockPickerService:
         indicators = analysis.get('indicators', {})
         klines = kwargs.get('klines', [])
         data_as_of = klines[-1].get('ts') if klines else None
-        indicators_json = json.dumps(
-            indicators,
-            ensure_ascii=False,
-            default=str,
-        )
-        klines_snapshot_json = json.dumps(
-            klines,
-            ensure_ascii=False,
-            default=str,
-        )
+        indicators_json = canonical_json(indicators)
+        klines_snapshot_json = canonical_json(klines)
+        ai_input_snapshot = kwargs.get("ai_input_snapshot")
+        if ai_input_snapshot is not None and not isinstance(
+            ai_input_snapshot,
+            str,
+        ):
+            ai_input_snapshot = canonical_json(ai_input_snapshot)
+        ai_output_snapshot = kwargs.get("ai_output_snapshot")
+        if ai_output_snapshot is not None and not isinstance(
+            ai_output_snapshot,
+            str,
+        ):
+            ai_output_snapshot = canonical_json(ai_output_snapshot)
         
         with get_connection() as conn:
             conn.execute("""
@@ -1788,11 +2146,14 @@ class StockPickerService:
                     klines_snapshot, data_as_of,
                     score_version, prompt_version, ai_model,
                     analysis_mode, job_id,
-                    score_support_resistance
+                    score_support_resistance,
+                    ai_input_snapshot, ai_input_hash,
+                    ai_output_snapshot
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?
                 )
             """, (
                 kwargs['pool_id'],
@@ -1825,6 +2186,9 @@ class StockPickerService:
                 kwargs.get('analysis_mode'),
                 kwargs.get('job_id'),
                 breakdown.get('support_resistance', 0),
+                ai_input_snapshot,
+                kwargs.get('ai_input_hash'),
+                ai_output_snapshot,
             ))
             self._prune_analysis_history(
                 conn,
@@ -1832,7 +2196,13 @@ class StockPickerService:
                 kwargs.get('history_retention_days', 90),
                 kwargs.get('max_history_per_stock', 30),
             )
-        
+
+        parsed_ai_input, _ = parse_snapshot(ai_input_snapshot)
+        ai_snapshot_metadata = (
+            parsed_ai_input
+            if isinstance(parsed_ai_input, dict)
+            else {}
+        )
         return {
             'symbol': kwargs['symbol'],
             'pool_type': kwargs['pool_type'],
@@ -1846,6 +2216,16 @@ class StockPickerService:
             'ai_model': kwargs.get('ai_model'),
             'analysis_mode': kwargs.get('analysis_mode'),
             'job_id': kwargs.get('job_id'),
+            'ai_snapshot': {
+                'version': (
+                    ai_snapshot_metadata.get('version')
+                ),
+                'request_status': ai_snapshot_metadata.get(
+                    'request_status'
+                ),
+                'input_hash': kwargs.get('ai_input_hash'),
+                'available': ai_input_snapshot is not None,
+            },
         }
 
     def _prune_analysis_history(
@@ -1924,7 +2304,16 @@ class StockPickerService:
                     a.prompt_version,
                     a.ai_model,
                     a.analysis_mode,
-                    a.job_id
+                    a.job_id,
+                    a.ai_input_hash,
+                    json_extract_string(
+                        TRY_CAST(a.ai_input_snapshot AS JSON),
+                        '$.version'
+                    ),
+                    json_extract_string(
+                        TRY_CAST(a.ai_input_snapshot AS JSON),
+                        '$.request_status'
+                    )
                 FROM stock_picker_analysis a
                 JOIN stock_picker_pools p ON a.pool_id = p.id
                 WHERE p.is_active = TRUE
@@ -2006,6 +2395,12 @@ class StockPickerService:
                         'ai_model': row[31],
                         'analysis_mode': row[32],
                         'job_id': row[33],
+                        'ai_snapshot_version': row[35],
+                        'ai_request_status': row[36],
+                        'ai_input_hash': row[34],
+                        'ai_snapshot_available': bool(
+                            row[34] and row[35]
+                        ),
                     },
                 }
                 
@@ -2042,7 +2437,16 @@ class StockPickerService:
                 score_total, score_grade, recommendation_score,
                 recommendation_reason, ai_action, ai_confidence,
                 ai_status, ai_error, data_as_of, score_version,
-                prompt_version, ai_model, analysis_mode, job_id
+                prompt_version, ai_model, analysis_mode, job_id,
+                ai_input_hash,
+                json_extract_string(
+                    TRY_CAST(ai_input_snapshot AS JSON),
+                    '$.version'
+                ),
+                json_extract_string(
+                    TRY_CAST(ai_input_snapshot AS JSON),
+                    '$.request_status'
+                )
             FROM stock_picker_analysis
             WHERE symbol = ?
         """
@@ -2053,8 +2457,9 @@ class StockPickerService:
         query += f" ORDER BY analysis_time DESC, id DESC LIMIT {safe_limit}"
         with get_connection() as conn:
             rows = conn.execute(query, params).fetchall()
-        return [
-            {
+        history = []
+        for row in rows:
+            history.append({
                 'id': row[0],
                 'pool_id': row[1],
                 'symbol': row[2],
@@ -2074,9 +2479,102 @@ class StockPickerService:
                 'ai_model': row[16],
                 'analysis_mode': row[17],
                 'job_id': row[18],
-            }
-            for row in rows
-        ]
+                'ai_input_hash': row[19],
+                'ai_snapshot_version': row[20],
+                'ai_request_status': row[21],
+            })
+        return history
+
+    def get_analysis_snapshot(self, analysis_id: int) -> Optional[Dict]:
+        """Return one immutable AI snapshot with server-side integrity checks."""
+        if int(analysis_id) <= 0:
+            raise ValueError("analysis_id 必须为正整数")
+        with get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    id, pool_id, symbol, pool_type, analysis_time,
+                    indicators, klines_snapshot,
+                    ai_input_snapshot, ai_input_hash,
+                    ai_output_snapshot
+                FROM stock_picker_analysis
+                WHERE id = ?
+                """,
+                (int(analysis_id),),
+            ).fetchone()
+        if not row:
+            return None
+
+        indicators, indicators_error = parse_snapshot(row[5])
+        klines, klines_error = parse_snapshot(row[6])
+        input_snapshot, input_error = parse_snapshot(row[7])
+        output_snapshot, output_error = parse_snapshot(row[9])
+        stored_input_hash = row[8]
+
+        recomputed_input_hash = None
+        input_hash_valid = None
+        expected_klines_hash = None
+        actual_klines_hash = None
+        klines_hash_valid = None
+        indicators_match = None
+        if isinstance(input_snapshot, dict):
+            recomputed_input_hash = snapshot_hash(input_snapshot)
+            if stored_input_hash:
+                input_hash_valid = (
+                    recomputed_input_hash == stored_input_hash
+                )
+            expected_klines_hash = input_snapshot.get("klines_hash")
+            if klines is not None and expected_klines_hash:
+                actual_klines_hash = klines_hash(klines)
+                klines_hash_valid = (
+                    actual_klines_hash == expected_klines_hash
+                )
+            snapshot_indicators = input_snapshot.get(
+                "technical_indicators"
+            )
+            if indicators is not None and snapshot_indicators is not None:
+                indicators_match = (
+                    sha256_json(indicators)
+                    == sha256_json(snapshot_indicators)
+                )
+
+        validation_values = (
+            input_hash_valid,
+            klines_hash_valid,
+            indicators_match,
+        )
+        hash_valid = None
+        if stored_input_hash or input_snapshot is not None:
+            hash_valid = all(value is True for value in validation_values)
+
+        return {
+            "analysis_id": row[0],
+            "pool_id": row[1],
+            "symbol": row[2],
+            "pool_type": row[3],
+            "analysis_time": str(row[4]),
+            "legacy_record": input_snapshot is None,
+            "ai_input_hash": stored_input_hash,
+            "hash_valid": hash_valid,
+            "integrity": {
+                "recomputed_input_hash": recomputed_input_hash,
+                "input_hash_valid": input_hash_valid,
+                "expected_klines_hash": expected_klines_hash,
+                "actual_klines_hash": actual_klines_hash,
+                "klines_hash_valid": klines_hash_valid,
+                "indicators_match": indicators_match,
+                "parse_errors": {
+                    "indicators": indicators_error,
+                    "klines": klines_error,
+                    "ai_input": input_error,
+                    "ai_output": output_error,
+                },
+            },
+            "ai_input_snapshot": input_snapshot,
+            "ai_output_snapshot": output_snapshot,
+            "indicators_snapshot": indicators,
+            "klines_snapshot": klines,
+        }
 
 
 # 全局实例

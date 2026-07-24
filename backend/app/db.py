@@ -184,6 +184,9 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     _ensure_column(conn, "stock_picker_analysis", "ai_model", "TEXT")
     _ensure_column(conn, "stock_picker_analysis", "analysis_mode", "TEXT")
     _ensure_column(conn, "stock_picker_analysis", "job_id", "TEXT")
+    _ensure_column(conn, "stock_picker_analysis", "ai_input_snapshot", "TEXT")
+    _ensure_column(conn, "stock_picker_analysis", "ai_input_hash", "TEXT")
+    _ensure_column(conn, "stock_picker_analysis", "ai_output_snapshot", "TEXT")
     _ensure_column(conn, "stock_picker_config", "analysis_lookback", "INTEGER DEFAULT 250")
     _ensure_column(conn, "stock_picker_config", "ai_top_n_per_pool", "INTEGER DEFAULT 10")
     _ensure_column(conn, "stock_picker_config", "history_retention_days", "INTEGER DEFAULT 90")
@@ -451,7 +454,10 @@ CREATE TABLE IF NOT EXISTS stock_picker_analysis (
     prompt_version TEXT,
     ai_model TEXT,
     analysis_mode TEXT,
-    job_id TEXT
+    job_id TEXT,
+    ai_input_snapshot TEXT,
+    ai_input_hash TEXT,
+    ai_output_snapshot TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_pool ON stock_picker_analysis(pool_id);
 CREATE INDEX IF NOT EXISTS idx_analysis_time ON stock_picker_analysis(analysis_time);

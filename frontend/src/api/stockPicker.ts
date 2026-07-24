@@ -45,6 +45,10 @@ export interface AnalysisMetadata {
   ai_model?: string;
   analysis_mode?: 'ai' | 'quant';
   job_id?: string;
+  ai_snapshot_version?: string;
+  ai_request_status?: string;
+  ai_input_hash?: string;
+  ai_snapshot_available?: boolean;
 }
 
 export interface Analysis {
@@ -65,6 +69,73 @@ export interface Analysis {
   metadata?: AnalysisMetadata;
   name?: string;
   added_reason?: string;
+}
+
+export interface StockPickerAIInputSnapshot {
+  version: string;
+  captured_at?: string;
+  request_status: string;
+  request_reason?: string | null;
+  symbol: string;
+  pool_type: 'LONG' | 'SHORT';
+  scenario?: string | null;
+  analysis_mode?: 'ai' | 'quant';
+  data_as_of?: string | null;
+  data_definition_version?: string;
+  score_version?: string;
+  prompt_version?: string;
+  ai_model?: string | null;
+  temperature?: number | null;
+  style?: string | null;
+  system_prompt?: string | null;
+  user_prompt?: string | null;
+  news_enabled?: boolean;
+  news_snapshot?: Record<string, unknown> | null;
+  klines_hash?: string;
+  config_version?: string;
+  universe_version?: string;
+  selection_version?: string;
+  selection_context?: string;
+  selection?: {
+    quant_rank?: number;
+    ai_top_n_per_pool?: number;
+    ai_selected?: boolean;
+    ranking?: Array<Record<string, unknown>>;
+  };
+}
+
+export interface StockPickerAIOutputSnapshot {
+  version: string;
+  captured_at?: string;
+  status: string;
+  raw_response?: string | null;
+  parsed_response?: Record<string, unknown> | null;
+  error_type?: string | null;
+  error?: string | null;
+}
+
+export interface StockPickerAnalysisSnapshot {
+  analysis_id: number;
+  pool_id: number;
+  symbol: string;
+  pool_type: 'LONG' | 'SHORT';
+  analysis_time: string;
+  legacy_record: boolean;
+  ai_input_hash?: string | null;
+  hash_valid?: boolean | null;
+  integrity: {
+    recomputed_input_hash?: string | null;
+    input_hash_valid?: boolean | null;
+    expected_klines_hash?: string | null;
+    actual_klines_hash?: string | null;
+    klines_hash_valid?: boolean | null;
+    indicators_match?: boolean | null;
+    parse_errors: Record<string, string | null>;
+  };
+  ai_input_snapshot?: StockPickerAIInputSnapshot | null;
+  ai_output_snapshot?: StockPickerAIOutputSnapshot | null;
+  indicators_snapshot?: Record<string, unknown> | null;
+  klines_snapshot?: Array<Record<string, unknown>> | null;
 }
 
 export interface PoolsResponse {
@@ -874,6 +945,22 @@ export async function getAnalysisResults(params?: {
     throw new Error('获取分析结果失败');
   }
   
+  return response.json();
+}
+
+/**
+ * 按需获取单条分析的不可变 AI/新闻输入输出快照。
+ */
+export async function getAnalysisSnapshot(
+  analysisId: number,
+): Promise<StockPickerAnalysisSnapshot> {
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/analysis-snapshots/${analysisId}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取分析快照失败');
+  }
   return response.json();
 }
 

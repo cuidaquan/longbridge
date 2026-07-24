@@ -6,6 +6,11 @@ import logging
 from datetime import datetime, timedelta
 
 from .external_service_resilience import run_external_call
+from .stock_picker_ai_snapshots import (
+    NEWS_SNAPSHOT_VERSION,
+    sanitize_error,
+    utc_now_iso,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +68,21 @@ class NewsAnalyzer:
                 "impact_score": 8.5  # 0-10，新闻对股价的影响程度
             }
         """
+        query = self._build_search_query(symbol, company_name)
+        observed_at = utc_now_iso()
+        snapshot_metadata = {
+            "snapshot_version": NEWS_SNAPSHOT_VERSION,
+            "status": "available",
+            "observed_at": observed_at,
+            "symbol": symbol,
+            "query": query,
+            "window_days": days,
+            "source": "tavily",
+            "search_depth": "advanced",
+            "max_results": 10,
+        }
+
         try:
-            # 构建搜索查询
-            query = self._build_search_query(symbol, company_name)
-            
             logger.info(f"🔍 搜索新闻: {query}")
             
             # 调用Tavily搜索
@@ -91,6 +107,7 @@ class NewsAnalyzer:
             
             # 解析搜索结果
             analysis = self._analyze_search_results(response, symbol)
+            analysis.update(snapshot_metadata)
             
             logger.info(
                 f"✅ 新闻分析: {symbol} - "
@@ -102,16 +119,20 @@ class NewsAnalyzer:
             return analysis
             
         except Exception as e:
-            logger.error(f"❌ 新闻搜索失败: {symbol} - {e}")
+            safe_error = sanitize_error(e)
+            logger.error(f"❌ 新闻搜索失败: {symbol} - {safe_error}")
             return {
+                **snapshot_metadata,
+                "status": "error",
                 "news_count": 0,
                 "sentiment_score": 0,
                 "sentiment_label": "NEUTRAL",
                 "key_topics": [],
                 "news_items": [],
-                "summary": f"搜索失败: {str(e)}",
+                "summary": "新闻搜索失败",
                 "impact_score": 0,
-                "error": str(e)
+                "error": safe_error,
+                "error_type": type(e).__name__,
             }
     
     def _build_search_query(self, symbol: str, company_name: Optional[str]) -> str:
@@ -149,6 +170,7 @@ class NewsAnalyzer:
             news_items.append({
                 "title": item.get('title', ''),
                 "url": item.get('url', ''),
+                "published_date": item.get('published_date'),
                 "content": item.get('content', '')[:500],  # 摘要限制500字
                 "score": item.get('score', 0)
             })
@@ -326,8 +348,5 @@ def get_news_analyzer(api_key: str) -> Optional[NewsAnalyzer]:
     except Exception as e:
         logger.error(f"❌ 无法初始化新闻分析器: {e}")
         return None
-
-
-
 
 

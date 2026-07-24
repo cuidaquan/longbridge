@@ -858,6 +858,28 @@ async def get_analysis_results(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/analysis-snapshots/{analysis_id}")
+async def get_analysis_snapshot(analysis_id: int):
+    """Return persisted AI/news input and output for one analysis record."""
+    try:
+        snapshot = get_stock_picker_service().get_analysis_snapshot(
+            analysis_id
+        )
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="分析快照不存在")
+        return snapshot
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("获取分析快照失败: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="获取分析快照失败",
+        ) from exc
+
+
 @router.get("/analysis/{symbol}/history")
 async def get_symbol_analysis_history(
     symbol: str,

@@ -33,6 +33,7 @@ import {
 import {
   getPools,
   getAnalysisResults,
+  getAnalysisSnapshot,
   addStock,
   batchAddStocks,
   removeStock,
@@ -52,6 +53,7 @@ import {
   type Analysis,
   type PoolsResponse,
   type AnalysisResponse,
+  type StockPickerAnalysisSnapshot,
   type SecurityMarket,
   type SecuritySearchItem,
   type ScreenerMarket,
@@ -573,6 +575,35 @@ function StockItem({
   onToggle: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [snapshotExpanded, setSnapshotExpanded] = useState(false);
+  const [snapshot, setSnapshot] = useState<StockPickerAnalysisSnapshot | null>(null);
+  const [snapshotLoading, setSnapshotLoading] = useState(false);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSnapshot(null);
+    setSnapshotExpanded(false);
+    setSnapshotError(null);
+  }, [analysis?.id]);
+
+  const handleSnapshotToggle = async () => {
+    if (!analysis) return;
+    if (snapshot) {
+      setSnapshotExpanded(!snapshotExpanded);
+      return;
+    }
+    setSnapshotLoading(true);
+    setSnapshotError(null);
+    try {
+      const loaded = await getAnalysisSnapshot(analysis.id);
+      setSnapshot(loaded);
+      setSnapshotExpanded(true);
+    } catch (err) {
+      setSnapshotError(err instanceof Error ? err.message : '获取分析快照失败');
+    } finally {
+      setSnapshotLoading(false);
+    }
+  };
 
   if (!analysis) {
     return (
@@ -629,6 +660,18 @@ function StockItem({
   const aiStatusVariant: 'success' | 'warning' | 'default' = aiStatus === 'available'
     ? 'success'
     : aiStatus === 'fallback' || aiStatus === 'error'
+      ? 'warning'
+      : 'default';
+  const snapshotHash = analysis.metadata?.ai_input_hash;
+  const hashStatus = snapshot?.hash_valid;
+  const hashStatusLabel = hashStatus === true
+    ? '完整性已验证'
+    : hashStatus === false
+      ? '完整性校验失败'
+      : '待校验';
+  const hashStatusVariant: 'success' | 'warning' | 'default' = hashStatus === true
+    ? 'success'
+    : hashStatus === false
       ? 'warning'
       : 'default';
 
@@ -736,11 +779,18 @@ function StockItem({
               </Badge>
             </div>
             {analysis.metadata && (
-              <p className="mb-2 text-xs text-slate-500">
-                数据截止 {analysis.metadata.data_as_of || '-'}
-                {' · '}评分 {analysis.metadata.score_version || '-'}
-                {' · '}模式 {analysis.metadata.analysis_mode || '-'}
-              </p>
+              <div className="mb-2 space-y-1 text-xs text-slate-500">
+                <p>
+                  数据截止 {analysis.metadata.data_as_of || '-'}
+                  {' · '}评分 {analysis.metadata.score_version || '-'}
+                  {' · '}模式 {analysis.metadata.analysis_mode || '-'}
+                </p>
+                <p>
+                  AI 输入 {analysis.metadata.ai_snapshot_version || '历史记录无快照'}
+                  {' · '}状态 {analysis.metadata.ai_request_status || '-'}
+                  {' · '}哈希 {snapshotHash ? snapshotHash.slice(0, 12) : '-'}
+                </p>
+              </div>
             )}
             <ul className="space-y-1">
               {analysis.ai_decision.reasoning.map((reason, i) => (
@@ -750,6 +800,114 @@ function StockItem({
                 </li>
               ))}
             </ul>
+            {analysis.metadata?.ai_snapshot_available ? (
+              <div className="mt-3">
+                <button
+                  type="button"
+                  onClick={handleSnapshotToggle}
+                  disabled={snapshotLoading}
+                  className="flex items-center gap-1 text-xs font-medium text-cyan-600 hover:text-cyan-700 disabled:opacity-50 dark:text-cyan-400"
+                >
+                  {snapshotExpanded ? <ExpandLess className="w-4 h-4" /> : <ExpandMore className="w-4 h-4" />}
+                  {snapshotLoading
+                    ? '加载快照...'
+                    : snapshotExpanded
+                      ? '收起 AI/新闻快照'
+                      : '查看 AI/新闻快照'}
+                </button>
+                {snapshotError && (
+                  <p className="mt-2 text-xs text-red-600 dark:text-red-400">
+                    {snapshotError}
+                  </p>
+                )}
+                {snapshotExpanded && snapshot && (
+                  <div className="mt-3 space-y-3 rounded-lg border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900/40">
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <Badge variant={hashStatusVariant}>{hashStatusLabel}</Badge>
+                      <span className="text-slate-500">
+                        {snapshot.ai_input_snapshot?.version || '-'}
+                      </span>
+                      <span className="text-slate-500">
+                        请求 {snapshot.ai_input_snapshot?.request_status || '-'}
+                      </span>
+                      <span className="break-all font-mono text-slate-500">
+                        {snapshot.ai_input_hash || '-'}
+                      </span>
+                    </div>
+                    <div className="grid gap-2 text-xs text-slate-500 sm:grid-cols-2">
+                      <p>模型：{snapshot.ai_input_snapshot?.ai_model || '-'}</p>
+                      <p>风格：{snapshot.ai_input_snapshot?.style || '-'}</p>
+                      <p>新闻观测：{
+                        typeof snapshot.ai_input_snapshot?.news_snapshot?.observed_at === 'string'
+                          ? snapshot.ai_input_snapshot.news_snapshot.observed_at
+                          : '-'
+                      }</p>
+                      <p>K 线哈希：{snapshot.ai_input_snapshot?.klines_hash?.slice(0, 12) || '-'}</p>
+                      <p>配置版本：{snapshot.ai_input_snapshot?.config_version?.slice(0, 12) || '-'}</p>
+                      <p>股票宇宙：{snapshot.ai_input_snapshot?.universe_version?.slice(0, 12) || '-'}</p>
+                      <p>量化排名：{snapshot.ai_input_snapshot?.selection_version?.slice(0, 12) || '-'}</p>
+                      <p>
+                        Top N 状态：排名 {snapshot.ai_input_snapshot?.selection?.quant_rank || '-'}
+                        {' · '}{snapshot.ai_input_snapshot?.request_reason === 'deepseek_not_configured'
+                          ? 'AI 未配置'
+                          : snapshot.ai_input_snapshot?.selection?.ai_selected
+                            ? '已入选'
+                            : '未入选'}
+                      </p>
+                    </div>
+                    {snapshot.ai_input_snapshot?.system_prompt && (
+                      <details>
+                        <summary className="cursor-pointer text-xs font-medium text-slate-700 dark:text-slate-300">
+                          System prompt
+                        </summary>
+                        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-100 p-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                          {snapshot.ai_input_snapshot.system_prompt}
+                        </pre>
+                      </details>
+                    )}
+                    {snapshot.ai_input_snapshot?.user_prompt && (
+                      <details>
+                        <summary className="cursor-pointer text-xs font-medium text-slate-700 dark:text-slate-300">
+                          User prompt
+                        </summary>
+                        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-100 p-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                          {snapshot.ai_input_snapshot.user_prompt}
+                        </pre>
+                      </details>
+                    )}
+                    {snapshot.ai_input_snapshot?.news_snapshot && (
+                      <details>
+                        <summary className="cursor-pointer text-xs font-medium text-slate-700 dark:text-slate-300">
+                          新闻输入
+                        </summary>
+                        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-100 p-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                          {JSON.stringify(snapshot.ai_input_snapshot.news_snapshot, null, 2)}
+                        </pre>
+                      </details>
+                    )}
+                    {snapshot.ai_output_snapshot && (
+                      <details>
+                        <summary className="cursor-pointer text-xs font-medium text-slate-700 dark:text-slate-300">
+                          AI 输出（{snapshot.ai_output_snapshot.status}）
+                        </summary>
+                        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-100 p-2 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                          {JSON.stringify({
+                            raw_response: snapshot.ai_output_snapshot.raw_response,
+                            parsed_response: snapshot.ai_output_snapshot.parsed_response,
+                            error_type: snapshot.ai_output_snapshot.error_type,
+                            error: snapshot.ai_output_snapshot.error,
+                          }, null, 2)}
+                        </pre>
+                      </details>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p className="mt-3 text-xs text-slate-500">
+                此历史记录创建于 AI/新闻快照功能之前。
+              </p>
+            )}
           </div>
         </div>
       )}

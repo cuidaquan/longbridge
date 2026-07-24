@@ -136,7 +136,7 @@ class StockPickerPersistenceTest(unittest.TestCase):
 
         statement, parameters = connection.statements[0]
         self.assertIn("score_support_resistance", statement)
-        self.assertEqual(parameters[-1], 12)
+        self.assertEqual(parameters[-4], 12)
 
     def test_analysis_response_returns_support_resistance_score(self) -> None:
         row = (
@@ -146,6 +146,7 @@ class StockPickerPersistenceTest(unittest.TestCase):
             12.0, "Test", "reason",
             "available", None, "2026-07-23", "stock-picker-v2.1",
             "stock-picker-v2", "deepseek-chat", "ai", "job-1",
+            None, None, None,
         )
         connection = _FakeConnection([row])
         service = StockPickerService()
@@ -205,6 +206,9 @@ class StockPickerConfigAndSnapshotTest(unittest.TestCase):
             "ai_model",
             "analysis_mode",
             "job_id",
+            "ai_input_snapshot",
+            "ai_input_hash",
+            "ai_output_snapshot",
         }.issubset(analysis_columns))
         self.assertTrue({
             "analysis_lookback",
@@ -804,13 +808,16 @@ class StockPickerPerformanceFlowTest(unittest.TestCase):
                 "symbol": symbol,
                 "pool_type": pool_type,
                 "score": {"total": pool_id},
+                "config": config,
             }
 
         self.service._prepare_single_stock = MagicMock(side_effect=prepare)
         ai_flags = {}
+        selection_configs = {}
 
         async def finalize(prepared, use_ai, progress_callback=None):
             ai_flags[prepared["pool_id"]] = use_ai
+            selection_configs[prepared["pool_id"]] = prepared["config"]
             return {"symbol": prepared["symbol"]}
 
         self.service._finalize_prepared_analysis = AsyncMock(side_effect=finalize)
@@ -840,6 +847,17 @@ class StockPickerPerformanceFlowTest(unittest.TestCase):
             set(range(9, 13)),
         )
         self.assertEqual(sum(ai_flags.values()), 4)
+        self.assertEqual(selection_configs[12]["_quant_rank"], 1)
+        self.assertTrue(selection_configs[12]["_ai_selected"])
+        self.assertEqual(selection_configs[9]["_quant_rank"], 4)
+        self.assertTrue(selection_configs[9]["_ai_selected"])
+        self.assertEqual(selection_configs[8]["_quant_rank"], 5)
+        self.assertFalse(selection_configs[8]["_ai_selected"])
+        self.assertEqual(
+            selection_configs[12]["_selection_snapshot"][0]["symbol"],
+            "TEST12.US",
+        )
+        self.assertTrue(selection_configs[12]["_selection_version"])
 
     def test_quant_only_result_cache_reuses_same_data_and_version(self) -> None:
         saved_result = {"symbol": "TEST.US", "cached": True}

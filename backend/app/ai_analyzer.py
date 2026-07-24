@@ -18,6 +18,11 @@ import pandas as pd
 import numpy as np
 
 from .external_service_resilience import run_external_call
+from .stock_picker_ai_snapshots import (
+    NEWS_SNAPSHOT_VERSION,
+    sanitize_error,
+    utc_now_iso,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -144,14 +149,34 @@ class DeepSeekAnalyzer:
         
         # 🔍 集成新闻分析器
         self.news_analyzer = None
+        self.news_initialization_error = None
+        self.news_initialization_error_type = None
         if tavily_api_key:
             try:
                 from .news_analyzer import get_news_analyzer
                 self.news_analyzer = get_news_analyzer(tavily_api_key)
                 if self.news_analyzer:
                     logger.info("✅ 新闻分析器已集成")
+                else:
+                    self.news_initialization_error = (
+                        "新闻分析器初始化后不可用"
+                    )
+                    self.news_initialization_error_type = (
+                        "InitializationError"
+                    )
             except Exception as e:
-                logger.warning(f"⚠️ 新闻分析器初始化失败: {e}")
+                safe_initialization_error = sanitize_error(
+                    e,
+                    secrets=(tavily_api_key,),
+                )
+                self.news_initialization_error = (
+                    safe_initialization_error
+                )
+                self.news_initialization_error_type = type(e).__name__
+                logger.warning(
+                    "⚠️ 新闻分析器初始化失败: %s",
+                    safe_initialization_error,
+                )
     
     def analyze_trading_opportunity(
         self,
@@ -194,6 +219,12 @@ class DeepSeekAnalyzer:
         """
         indicators = dict(technical_indicators or {})
         score = dict(quant_score or {})
+        news_analysis = None
+        prompt = None
+        system_prompt = None
+        ai_response = None
+        input_context = None
+        output_context = None
         try:
             # 1. 复用调用方快照；其他业务未传入时保持向后兼容。
             if not indicators:
@@ -210,8 +241,49 @@ class DeepSeekAnalyzer:
                     )
                     logger.info(f"✅ 新闻分析完成: {news_analysis['news_count']}条新闻")
                 except Exception as e:
-                    logger.warning(f"⚠️ 新闻分析失败: {e}")
-                    news_analysis = None
+                    safe_news_error = sanitize_error(e)
+                    logger.warning(f"⚠️ 新闻分析失败: {safe_news_error}")
+                    news_analysis = {
+                        "snapshot_version": NEWS_SNAPSHOT_VERSION,
+                        "status": "error",
+                        "observed_at": utc_now_iso(),
+                        "symbol": symbol,
+                        "query": None,
+                        "window_days": 7,
+                        "source": "tavily",
+                        "error": safe_news_error,
+                        "error_type": type(e).__name__,
+                        "news_count": 0,
+                        "news_items": [],
+                        "summary": "新闻搜索失败",
+                        "sentiment_score": 0,
+                        "sentiment_label": "NEUTRAL",
+                        "key_topics": [],
+                        "impact_score": 0,
+                    }
+            elif getattr(self, "news_initialization_error", None):
+                news_analysis = {
+                    "snapshot_version": NEWS_SNAPSHOT_VERSION,
+                    "status": "error",
+                    "observed_at": utc_now_iso(),
+                    "symbol": symbol,
+                    "query": None,
+                    "window_days": 7,
+                    "source": "tavily",
+                    "error": self.news_initialization_error,
+                    "error_type": getattr(
+                        self,
+                        "news_initialization_error_type",
+                        "InitializationError",
+                    ),
+                    "news_count": 0,
+                    "news_items": [],
+                    "summary": "新闻分析器初始化失败",
+                    "sentiment_score": 0,
+                    "sentiment_label": "NEUTRAL",
+                    "key_topics": [],
+                    "impact_score": 0,
+                }
             
             # 3. 选股业务传入统一机会分；其他业务继续使用分析器内置评分。
             if not score:
@@ -219,6 +291,20 @@ class DeepSeekAnalyzer:
             
             # 4. 构建提示词（包含新闻信息）
             prompt = self._build_prompt(symbol, klines, indicators, current_positions, scenario, score, news_analysis)
+            system_prompt = self._get_system_prompt(scenario)
+            input_context = {
+                "request_status": "requested",
+                "symbol": symbol,
+                "scenario": scenario,
+                "model": getattr(self, "model", None),
+                "temperature": getattr(self, "temperature", None),
+                "style": getattr(self, "style", None),
+                "current_positions": current_positions,
+                "system_prompt": system_prompt,
+                "user_prompt": prompt,
+                "news_snapshot": news_analysis,
+                "response_format": {"type": "json_object"},
+            }
             
             # 4. 调用 DeepSeek
             logger.info(f"🤖 调用 DeepSeek 分析 {symbol} (场景: {scenario})...")
@@ -231,7 +317,7 @@ class DeepSeekAnalyzer:
                 messages=[
                     {
                         "role": "system",
-                        "content": self._get_system_prompt(scenario),
+                        "content": system_prompt,
                     },
                     {
                         "role": "user",
@@ -244,6 +330,14 @@ class DeepSeekAnalyzer:
             
             ai_response = response.choices[0].message.content
             result = self._parse_ai_response(ai_response, klines[-1].get('close', 0))
+            output_context = {
+                "status": "completed",
+                "raw_response": ai_response,
+                "parsed_response": dict(result),
+                "error_type": None,
+                "error": None,
+            }
+            input_context["request_status"] = "completed"
             
             # 添加指标和评分到结果中
             result['indicators'] = indicators
@@ -251,6 +345,8 @@ class DeepSeekAnalyzer:
             result['ai_status'] = 'available'
             result['ai_raw_response'] = ai_response
             result['ai_prompt'] = prompt
+            result['_ai_input_context'] = input_context
+            result['_ai_output_context'] = output_context
             
             logger.info(
                 f"✅ AI 决策: {symbol} -> {result['action']} "
@@ -260,15 +356,41 @@ class DeepSeekAnalyzer:
             return result
             
         except Exception as e:
-            logger.error(f"❌ AI 分析失败 {symbol}: {e}", exc_info=True)
+            safe_error = sanitize_error(e)
+            if input_context is None:
+                input_context = {
+                    "request_status": "failed",
+                    "symbol": symbol,
+                    "scenario": scenario,
+                    "model": getattr(self, "model", None),
+                    "temperature": getattr(self, "temperature", None),
+                    "style": getattr(self, "style", None),
+                    "current_positions": current_positions,
+                    "system_prompt": system_prompt,
+                    "user_prompt": prompt,
+                    "news_snapshot": news_analysis,
+                    "response_format": {"type": "json_object"},
+                }
+            else:
+                input_context["request_status"] = "failed"
+            output_context = {
+                "status": "failed",
+                "raw_response": ai_response,
+                "parsed_response": None,
+                "error_type": type(e).__name__,
+                "error": safe_error,
+            }
+            logger.error(f"❌ AI 分析失败 {symbol}: {safe_error}")
             return {
                 "action": "HOLD",
                 "confidence": 0.0,
-                "reasoning": [f"AI 分析失败: {str(e)}"],
-                "error": str(e),
+                "reasoning": [f"AI 分析失败: {safe_error}"],
+                "error": safe_error,
                 "ai_status": "error",
                 "indicators": indicators,
                 "score": score,
+                "_ai_input_context": input_context,
+                "_ai_output_context": output_context,
             }
     
     def _calculate_indicators(self, klines: List[Dict]) -> Dict:
