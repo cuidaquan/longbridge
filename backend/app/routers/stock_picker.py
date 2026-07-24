@@ -1,7 +1,7 @@
 """
 选股系统 API 路由
 """
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Path, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Literal, Optional, AsyncGenerator
@@ -30,6 +30,7 @@ from ..stock_picker_reliability import (
     get_stock_picker_reliability_service,
 )
 from ..stock_screener import get_stock_screener_service
+from ..stock_screener_snapshots import get_stock_screener_snapshot_service
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +173,9 @@ class ScreenerSearchRequest(BaseModel):
         le=365,
     )
     include_corporate_actions: bool = False
+    capture_snapshot: bool = False
+    strategy_name: Optional[str] = Field(default=None, max_length=200)
+    strategy_source: Optional[Literal["recommended", "user"]] = None
 
 
 class ScreenerImportItem(BaseModel):
@@ -504,6 +508,9 @@ async def search_screener_candidates(request: ScreenerSearchRequest):
             include_corporate_actions=(
                 request.include_corporate_actions
             ),
+            capture_snapshot=request.capture_snapshot,
+            strategy_name=request.strategy_name,
+            strategy_source=request.strategy_source,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -511,6 +518,55 @@ async def search_screener_candidates(request: ScreenerSearchRequest):
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except LongbridgeAPIError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error(
+            "保存 Screener 扫描快照失败: %s",
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="保存扫描快照失败") from exc
+
+
+@router.get("/screener/snapshots")
+async def get_screener_snapshots(
+    market: Optional[Literal["US", "HK", "CN", "SG"]] = None,
+    target_direction: Optional[Literal["LONG", "SHORT"]] = None,
+    strategy_id: Optional[int] = Query(default=None, gt=0),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    try:
+        return await asyncio.to_thread(
+            get_stock_screener_snapshot_service().get_history,
+            market=market,
+            target_direction=target_direction,
+            strategy_id=strategy_id,
+            limit=limit,
+            offset=offset,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("获取 Screener 扫描快照失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="获取扫描快照失败") from exc
+
+
+@router.get("/screener/snapshots/{snapshot_id}")
+async def get_screener_snapshot(
+    snapshot_id: str = Path(min_length=1, max_length=64),
+):
+    try:
+        return await asyncio.to_thread(
+            get_stock_screener_snapshot_service().get_snapshot,
+            snapshot_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="扫描快照不存在") from exc
+    except Exception as exc:
+        logger.error("获取 Screener 扫描快照详情失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="获取扫描快照详情失败") from exc
 
 
 @router.post("/screener/import")

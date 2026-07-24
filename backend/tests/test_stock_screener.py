@@ -30,6 +30,7 @@ class _ServiceWithContext(StockScreenerService):
         fundamental_loader=None,
         margin_loader=None,
         short_capacity_loader=None,
+        snapshot_service=None,
     ) -> None:
         super().__init__(
             index_loader=index_loader or (lambda _symbols: {}),
@@ -64,6 +65,7 @@ class _ServiceWithContext(StockScreenerService):
                 short_capacity_loader
                 or (lambda _symbols: {})
             ),
+            snapshot_service=snapshot_service,
         )
         self.context = context
 
@@ -290,6 +292,145 @@ class StockScreenerServiceTest(unittest.TestCase):
         fundamental_loader.assert_not_called()
         margin_loader.assert_not_called()
         short_capacity_loader.assert_not_called()
+
+    def test_snapshot_capture_preserves_universe_dedup_and_filter_outcomes(
+        self,
+    ) -> None:
+        context = MagicMock()
+
+        def search_page(_market, _strategy_id, _conditions, _show, page, _size):
+            pages = {
+                0: {
+                    "total": 4,
+                    "has_more": True,
+                    "items": [
+                        {
+                            "symbol": "AAA.US",
+                            "name": "AAA",
+                            "indicators": {"industry": "Technology"},
+                        },
+                        {
+                            "symbol": "BBB.US",
+                            "name": "BBB",
+                            "indicators": {"industry": "Technology"},
+                        },
+                    ],
+                },
+                1: {
+                    "total": 4,
+                    "has_more": False,
+                    "items": [
+                        {
+                            "symbol": "BBB.US",
+                            "name": "BBB duplicate",
+                            "indicators": {"industry": "Technology"},
+                        },
+                        {
+                            "symbol": "CCC.US",
+                            "name": "CCC",
+                            "indicators": {"industry": "Technology"},
+                        },
+                    ],
+                },
+            }
+            return _Response(pages[page])
+
+        context.screener_search.side_effect = search_page
+
+        def indexes(symbols):
+            turnovers = {
+                "AAA.US": 100.0,
+                "BBB.US": 200.0,
+                "CCC.US": 300.0,
+                "SPY.US": 1_000.0,
+            }
+            changes = {
+                "AAA.US": 0.1,
+                "BBB.US": 0.2,
+                "CCC.US": 0.3,
+                "SPY.US": 0.05,
+            }
+            return {
+                symbol: {
+                    "turnover": turnovers[symbol],
+                    "ten_day_change_rate": changes[symbol],
+                    "half_year_change_rate": changes[symbol],
+                }
+                for symbol in symbols
+            }
+
+        snapshot_service = MagicMock()
+        snapshot_service.capture.side_effect = lambda payload: {
+            "status": "captured",
+            "snapshot_id": "snapshot-1",
+            "captured_at": "2026-07-24T00:00:00+00:00",
+            "snapshot_version": "stock-screener-scan-snapshot-v1",
+            "payload_hash": "hash",
+            "candidates_unique": len(payload["universe"]),
+        }
+        service = _ServiceWithContext(
+            context,
+            index_loader=indexes,
+            snapshot_service=snapshot_service,
+        )
+
+        result = service.search(
+            "US",
+            101,
+            scan_pages=2,
+            size=2,
+            filters={"min_turnover": 150},
+            capture_snapshot=True,
+            strategy_name="Growth",
+            strategy_source="recommended",
+        )
+
+        self.assertEqual(
+            [item["symbol"] for item in result["items"]],
+            ["BBB.US", "CCC.US"],
+        )
+        self.assertEqual(result["snapshot"]["snapshot_id"], "snapshot-1")
+        payload = snapshot_service.capture.call_args.args[0]
+        self.assertEqual(payload["request"]["strategy"]["name"], "Growth")
+        self.assertEqual(payload["pages"][0]["symbols"], ["AAA.US", "BBB.US"])
+        self.assertEqual(len(payload["occurrences"]), 4)
+        duplicate = payload["occurrences"][2]
+        self.assertFalse(duplicate["retained"])
+        self.assertEqual(duplicate["duplicate_of_scan_order"], 2)
+        self.assertEqual(
+            [item["candidate"]["symbol"] for item in payload["universe"]],
+            ["AAA.US", "BBB.US", "CCC.US"],
+        )
+        self.assertEqual(
+            payload["universe"][0]["exclusion_reason"],
+            "below_min_turnover",
+        )
+        self.assertFalse(payload["universe"][0]["selected"])
+        self.assertEqual(
+            payload["universe"][1]["candidate"]["relative_strength"][
+                "industry_peer_count"
+            ],
+            3,
+        )
+        self.assertEqual(payload["selected_symbols"], ["BBB.US", "CCC.US"])
+
+    def test_snapshot_capture_is_disabled_by_default(self) -> None:
+        context = MagicMock()
+        context.screener_search.return_value = _Response({
+            "total": 0,
+            "has_more": False,
+            "items": [],
+        })
+        snapshot_service = MagicMock()
+        service = _ServiceWithContext(
+            context,
+            snapshot_service=snapshot_service,
+        )
+
+        result = service.search("US", 101)
+
+        self.assertEqual(result["snapshot"], {"status": "disabled"})
+        snapshot_service.capture.assert_not_called()
 
     def test_bounded_scan_aggregates_filters_and_exposes_next_page(self) -> None:
         context = MagicMock()
@@ -1562,6 +1703,9 @@ class StockScreenerRouteTest(unittest.TestCase):
                         "include_short_capacity": True,
                         "fundamental_event_window_days": 60,
                         "include_corporate_actions": True,
+                        "capture_snapshot": True,
+                        "strategy_name": "盈利增长",
+                        "strategy_source": "recommended",
                     },
                 )
                 invalid = client.post(
@@ -1611,6 +1755,9 @@ class StockScreenerRouteTest(unittest.TestCase):
             include_short_capacity=True,
             fundamental_event_window_days=60,
             include_corporate_actions=True,
+            capture_snapshot=True,
+            strategy_name="盈利增长",
+            strategy_source="recommended",
         )
 
     def test_import_keeps_manual_pool_and_records_strategy_source(self) -> None:

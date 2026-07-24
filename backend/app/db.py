@@ -162,6 +162,7 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_STOCK_PICKER_FACTOR_EXPERIMENT_TABLE_SQL)
     conn.execute(_STOCK_PICKER_FACTOR_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_PICKER_FACTOR_SNAPSHOT_RUN_TABLE_SQL)
+    conn.execute(_STOCK_SCREENER_SCAN_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_ALERT_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_DELIVERY_TABLE_SQL)
@@ -593,6 +594,37 @@ CREATE TABLE IF NOT EXISTS stock_picker_factor_snapshot_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_stock_picker_factor_snapshot_run_status
 ON stock_picker_factor_snapshot_runs(status, started_at);
+"""
+
+_STOCK_SCREENER_SCAN_SNAPSHOT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS stock_screener_scan_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    captured_at TIMESTAMPTZ NOT NULL,
+    snapshot_version TEXT NOT NULL,
+    market TEXT NOT NULL,
+    target_direction TEXT NOT NULL,
+    strategy_id BIGINT NOT NULL,
+    strategy_name TEXT,
+    strategy_source TEXT,
+    scan_mode TEXT NOT NULL,
+    first_page INTEGER NOT NULL,
+    last_page INTEGER NOT NULL,
+    pages_scanned INTEGER NOT NULL,
+    candidates_scanned INTEGER NOT NULL,
+    candidates_unique INTEGER NOT NULL,
+    candidates_returned INTEGER NOT NULL,
+    duplicates_removed INTEGER NOT NULL,
+    payload_hash TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    CHECK (target_direction IN ('LONG', 'SHORT')),
+    CHECK (scan_mode IN ('single_page', 'bounded'))
+);
+CREATE INDEX IF NOT EXISTS idx_stock_screener_snapshot_captured
+ON stock_screener_scan_snapshots(captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_stock_screener_snapshot_scope
+ON stock_screener_scan_snapshots(
+    market, target_direction, strategy_id, captured_at DESC
+);
 """
 
 _STOCK_PICKER_RELIABILITY_SNAPSHOT_TABLE_SQL = """

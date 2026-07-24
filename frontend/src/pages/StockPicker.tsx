@@ -17,6 +17,7 @@ import {
   Search as SearchIcon,
   Refresh,
   Storage,
+  History,
 } from '@mui/icons-material';
 import {
   PageHeader,
@@ -45,6 +46,8 @@ import {
   searchSecurities,
   getScreenerStrategies,
   searchScreenerCandidates,
+  getScreenerSnapshots,
+  getScreenerSnapshot,
   importScreenerCandidates,
   runStockPickerBacktest,
   getStockPickerBacktests,
@@ -64,6 +67,8 @@ import {
   type ScreenerStrategy,
   type ScreenerCandidate,
   type ScreenerSearchResponse,
+  type ScreenerSnapshotSummary,
+  type ScreenerSnapshotDetail,
   type ScreenerIndexFilters,
   type StockPickerBacktestReport,
   type StockPickerBacktestHistoryItem,
@@ -2708,7 +2713,13 @@ function StockDiscoveryDialog({
   const [includeFundamentalDetails, setIncludeFundamentalDetails] = useState(false);
   const [includeMarginDetails, setIncludeMarginDetails] = useState(false);
   const [includeShortCapacity, setIncludeShortCapacity] = useState(false);
+  const [captureSnapshot, setCaptureSnapshot] = useState(false);
   const [scanPages, setScanPages] = useState(1);
+  const [showSnapshotHistory, setShowSnapshotHistory] = useState(false);
+  const [snapshotHistory, setSnapshotHistory] = useState<ScreenerSnapshotSummary[]>([]);
+  const [snapshotDetail, setSnapshotDetail] = useState<ScreenerSnapshotDetail | null>(null);
+  const [loadingSnapshots, setLoadingSnapshots] = useState(false);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [filterInputs, setFilterInputs] = useState({
     min_turnover: '',
     min_market_value: '',
@@ -2769,9 +2780,52 @@ function StockDiscoveryDialog({
     };
   }, [market]);
 
+  useEffect(() => {
+    setShowSnapshotHistory(false);
+    setSnapshotHistory([]);
+    setSnapshotDetail(null);
+    setSnapshotError(null);
+  }, [market, poolType, selectedStrategyId]);
+
   const selectedStrategy = strategies.find(
     (strategy) => strategy.id === selectedStrategyId,
   );
+
+  const loadSnapshotHistory = async () => {
+    setLoadingSnapshots(true);
+    setSnapshotError(null);
+    try {
+      const history = await getScreenerSnapshots({
+        market,
+        targetDirection: poolType,
+        strategyId: selectedStrategy?.id,
+        limit: 20,
+      });
+      setSnapshotHistory(history.items);
+      if (
+        snapshotDetail
+        && !history.items.some((item) => item.snapshot_id === snapshotDetail.snapshot_id)
+      ) {
+        setSnapshotDetail(null);
+      }
+    } catch (err) {
+      setSnapshotError(err instanceof Error ? err.message : '获取扫描快照失败');
+    } finally {
+      setLoadingSnapshots(false);
+    }
+  };
+
+  const loadSnapshotDetail = async (snapshotId: string) => {
+    setLoadingSnapshots(true);
+    setSnapshotError(null);
+    try {
+      setSnapshotDetail(await getScreenerSnapshot(snapshotId));
+    } catch (err) {
+      setSnapshotError(err instanceof Error ? err.message : '获取扫描快照详情失败');
+    } finally {
+      setLoadingSnapshots(false);
+    }
+  };
 
   const runSearch = async (page = 0) => {
     if (!selectedStrategy) {
@@ -2802,9 +2856,15 @@ function StockDiscoveryDialog({
           market === 'US' && poolType === 'SHORT' && includeShortCapacity
         ),
         includeCorporateActions: includeFundamentalDetails,
+        captureSnapshot,
+        strategyName: selectedStrategy.name,
+        strategySource: selectedStrategy.source,
       });
       setResult(response);
       setSelectedSymbols(new Set(response.items.map((item) => item.symbol)));
+      if (showSnapshotHistory && response.snapshot.status === 'captured') {
+        await loadSnapshotHistory();
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '主动选股失败');
     } finally {
@@ -3178,6 +3238,22 @@ function StockDiscoveryDialog({
               </span>
             </label>
           )}
+          <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+            <input
+              type="checkbox"
+              checked={captureSnapshot}
+              onChange={(event) => setCaptureSnapshot(event.target.checked)}
+              className="mt-0.5 h-4 w-4 rounded border-slate-300 text-cyan-600 focus:ring-cyan-500"
+            />
+            <span>
+              <span className="block text-sm text-slate-700 dark:text-slate-300">
+                保存点时扫描快照
+              </span>
+              <span className="block text-xs text-slate-500">
+                默认关闭；保存本次候选、口径、排除原因与最终结果
+              </span>
+            </span>
+          </label>
         </div>
 
         <div className="mt-3 rounded-lg border border-slate-200 dark:border-slate-700">
@@ -3261,6 +3337,103 @@ function StockDiscoveryDialog({
           )}
         </div>
 
+        <div className="mt-3 flex justify-end">
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            icon={<History className="h-4 w-4" />}
+            loading={loadingSnapshots}
+            onClick={async () => {
+              if (showSnapshotHistory) {
+                setShowSnapshotHistory(false);
+                setSnapshotDetail(null);
+                return;
+              }
+              setShowSnapshotHistory(true);
+              await loadSnapshotHistory();
+            }}
+          >
+            {showSnapshotHistory ? '收起扫描快照' : '最近扫描快照'}
+          </Button>
+        </div>
+
+        {showSnapshotHistory && (
+          <section className="mt-3 border-y border-slate-200 py-3 dark:border-slate-700">
+            {snapshotError && <Alert type="error">{snapshotError}</Alert>}
+            {!snapshotError && !loadingSnapshots && snapshotHistory.length === 0 && (
+              <p className="text-sm text-slate-500">当前市场、方向和策略还没有扫描快照。</p>
+            )}
+            {snapshotHistory.length > 0 && (
+              <div className="grid gap-3 md:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+                <div className="max-h-52 space-y-1 overflow-y-auto">
+                  {snapshotHistory.map((snapshot) => (
+                    <button
+                      key={snapshot.snapshot_id}
+                      type="button"
+                      onClick={() => loadSnapshotDetail(snapshot.snapshot_id)}
+                      className={`w-full border-l-2 px-3 py-2 text-left text-xs transition-colors ${
+                        snapshotDetail?.snapshot_id === snapshot.snapshot_id
+                          ? 'border-cyan-500 bg-cyan-50 text-cyan-800 dark:bg-cyan-900/20 dark:text-cyan-200'
+                          : 'border-slate-200 text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700/50'
+                      }`}
+                    >
+                      <span className="block truncate font-medium">
+                        {snapshot.strategy_name || `策略 ${snapshot.strategy_id}`}
+                      </span>
+                      <span className="block text-slate-500">
+                        {new Date(snapshot.captured_at).toLocaleString('zh-CN')} ·
+                        {' '}{snapshot.candidates_returned}/{snapshot.candidates_unique} 入选
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <div className="min-w-0 border-t border-slate-200 pt-3 md:border-l md:border-t-0 md:pl-3 md:pt-0 dark:border-slate-700">
+                  {!snapshotDetail ? (
+                    <p className="text-sm text-slate-500">选择一条快照查看过滤结果。</p>
+                  ) : (
+                    <>
+                      <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-slate-500">
+                        <span>{snapshotDetail.snapshot_version}</span>
+                        <span>{snapshotDetail.pages_scanned} 页</span>
+                        <span>去重 {snapshotDetail.duplicates_removed} 只</span>
+                        <span title={snapshotDetail.payload_hash}>
+                          哈希 {snapshotDetail.payload_hash.slice(0, 12)}
+                        </span>
+                      </div>
+                      {Object.keys(snapshotDetail.payload.filter_summary.reasons).length > 0 && (
+                        <p className="mt-2 break-words text-xs text-amber-600 dark:text-amber-400">
+                          {Object.entries(snapshotDetail.payload.filter_summary.reasons)
+                            .map(([reason, count]) => `${reason} ${count}`)
+                            .join('；')}
+                        </p>
+                      )}
+                      <div className="mt-2 max-h-36 overflow-y-auto text-xs">
+                        {snapshotDetail.payload.universe.map((item) => (
+                          <div
+                            key={`${item.scan_order}-${item.candidate.symbol}`}
+                            className="flex min-w-0 items-center justify-between gap-3 border-t border-slate-100 py-1.5 first:border-t-0 dark:border-slate-700"
+                          >
+                            <span className="min-w-0 truncate text-slate-700 dark:text-slate-200">
+                              #{item.scan_order} {item.candidate.symbol} · 第 {item.source_page + 1} 页
+                            </span>
+                            <span className={item.selected
+                              ? 'shrink-0 text-emerald-600 dark:text-emerald-400'
+                              : 'max-w-[55%] shrink-0 truncate text-amber-600 dark:text-amber-400'}
+                            >
+                              {item.selected ? '入选' : item.exclusion_reason || '排除'}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
         {error && (
           <div className="mt-4">
             <Alert type="error">{error}</Alert>
@@ -3325,6 +3498,14 @@ function StockDiscoveryDialog({
               </button>
             </div>
 
+            {result.snapshot.status === 'captured' && (
+              <div className="mb-2">
+                <Alert type="success">
+                  已保存点时扫描快照，记录 {result.snapshot.candidates_unique} 只去重候选；
+                  版本 {result.snapshot.snapshot_version}。
+                </Alert>
+              </div>
+            )}
             {result.enrichment.status === 'fallback' && (
               <div className="mb-2">
                 <Alert type="warning">

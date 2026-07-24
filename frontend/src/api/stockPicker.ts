@@ -387,7 +387,81 @@ export interface ScreenerSearchResponse {
     excluded: number;
     reasons: Record<string, number>;
   };
+  snapshot: {
+    status: 'disabled' | 'captured';
+    snapshot_id?: string;
+    captured_at?: string;
+    snapshot_version?: string;
+    payload_hash?: string;
+    candidates_unique?: number;
+  };
   items: ScreenerCandidate[];
+}
+
+export interface ScreenerSnapshotSummary {
+  snapshot_id: string;
+  captured_at: string;
+  snapshot_version: string;
+  market: ScreenerMarket;
+  target_direction: 'LONG' | 'SHORT';
+  strategy_id: number;
+  strategy_name?: string | null;
+  strategy_source?: 'recommended' | 'user' | null;
+  scan_mode: 'single_page' | 'bounded';
+  first_page: number;
+  last_page: number;
+  pages_scanned: number;
+  candidates_scanned: number;
+  candidates_unique: number;
+  candidates_returned: number;
+  duplicates_removed: number;
+  payload_hash: string;
+}
+
+export interface ScreenerSnapshotDetail extends ScreenerSnapshotSummary {
+  payload: {
+    capture: {
+      snapshot_id: string;
+      captured_at: string;
+      snapshot_version: string;
+      filter_version: string;
+      relative_strength_version: string;
+      payload_hash: string;
+    };
+    request: {
+      market: ScreenerMarket;
+      target_direction: 'LONG' | 'SHORT';
+      strategy: {
+        id: number;
+        name?: string | null;
+        source?: 'recommended' | 'user' | null;
+      };
+      filters: ScreenerIndexFilters & {
+        require_normal_trade_status?: boolean;
+      };
+    };
+    scan: ScreenerSearchResponse['scan'];
+    metric_basis: ScreenerSearchResponse['relative_strength'];
+    filter_summary: ScreenerSearchResponse['filters'];
+    universe: Array<{
+      scan_order: number;
+      source_page: number;
+      selected: boolean;
+      exclusion_reason?: string | null;
+      candidate: ScreenerCandidate;
+    }>;
+    selected_symbols: string[];
+  };
+}
+
+export interface ScreenerSnapshotHistoryResponse {
+  snapshot_version: string;
+  items: ScreenerSnapshotSummary[];
+  pagination: {
+    total: number;
+    limit: number;
+    offset: number;
+  };
 }
 
 export interface AnalysisResponse {
@@ -869,6 +943,9 @@ export async function searchScreenerCandidates(params: {
   includeShortCapacity?: boolean;
   fundamentalEventWindowDays?: number;
   includeCorporateActions?: boolean;
+  captureSnapshot?: boolean;
+  strategyName?: string;
+  strategySource?: 'recommended' | 'user';
 }): Promise<ScreenerSearchResponse> {
   const response = await fetch(`${API_BASE}/api/stock-picker/screener/search`, {
     method: 'POST',
@@ -891,11 +968,50 @@ export async function searchScreenerCandidates(params: {
       include_short_capacity: params.includeShortCapacity ?? false,
       fundamental_event_window_days: params.fundamentalEventWindowDays ?? 30,
       include_corporate_actions: params.includeCorporateActions ?? false,
+      capture_snapshot: params.captureSnapshot ?? false,
+      strategy_name: params.strategyName,
+      strategy_source: params.strategySource,
     }),
   });
   if (!response.ok) {
     const error = await response.json().catch(() => null);
     throw new Error(error?.detail || 'Longbridge 主动选股失败');
+  }
+  return response.json();
+}
+
+export async function getScreenerSnapshots(params: {
+  market?: ScreenerMarket;
+  targetDirection?: 'LONG' | 'SHORT';
+  strategyId?: number;
+  limit?: number;
+  offset?: number;
+} = {}): Promise<ScreenerSnapshotHistoryResponse> {
+  const query = new URLSearchParams();
+  if (params.market) query.set('market', params.market);
+  if (params.targetDirection) query.set('target_direction', params.targetDirection);
+  if (params.strategyId != null) query.set('strategy_id', String(params.strategyId));
+  query.set('limit', String(params.limit ?? 20));
+  query.set('offset', String(params.offset ?? 0));
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/screener/snapshots?${query.toString()}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取扫描快照失败');
+  }
+  return response.json();
+}
+
+export async function getScreenerSnapshot(
+  snapshotId: string,
+): Promise<ScreenerSnapshotDetail> {
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/screener/snapshots/${encodeURIComponent(snapshotId)}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取扫描快照详情失败');
   }
   return response.json();
 }

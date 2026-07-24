@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from contextlib import contextmanager
 import logging
 import math
@@ -120,6 +121,7 @@ class StockScreenerService:
         short_capacity_loader: Callable[
             ..., Dict[str, Dict[str, Any]]
         ] = get_short_selling_capacity,
+        snapshot_service: Optional[Any] = None,
     ) -> None:
         self._index_loader = index_loader
         self._short_risk_loader = short_risk_loader
@@ -127,6 +129,7 @@ class StockScreenerService:
         self._fundamental_loader = fundamental_loader
         self._margin_loader = margin_loader
         self._short_capacity_loader = short_capacity_loader
+        self._snapshot_service = snapshot_service
 
     @staticmethod
     def normalize_market(market: str) -> str:
@@ -252,6 +255,9 @@ class StockScreenerService:
         fundamental_event_window_days: int = 30,
         include_corporate_actions: bool = False,
         scan_pages: int = 1,
+        capture_snapshot: bool = False,
+        strategy_name: Optional[str] = None,
+        strategy_source: Optional[str] = None,
     ) -> Dict[str, Any]:
         if page < 0:
             raise ValueError("page 不能小于 0")
@@ -271,7 +277,7 @@ class StockScreenerService:
 
         page_results: List[Dict[str, Any]] = []
         # Cross-page industry peers must be deduplicated before RS and filters.
-        combine_before_filtering = scan_pages > 1
+        combine_before_filtering = scan_pages > 1 or capture_snapshot
         for current_page in range(page, page + scan_pages):
             page_result = self._search_single_page(
                 market=market,
@@ -296,11 +302,75 @@ class StockScreenerService:
             if not page_result["has_more"]:
                 break
 
-        return self._combine_page_results(
+        result = self._combine_page_results(
             page_results,
             scan_pages,
             apply_combined_filters=combine_before_filtering,
+            capture_audit=capture_snapshot,
         )
+        if not capture_snapshot:
+            result["snapshot"] = {"status": "disabled"}
+            return result
+
+        audit = result.pop("_snapshot_audit")
+        snapshot_payload = {
+            "request": {
+                "market": result["market"],
+                "target_direction": result["relative_strength"][
+                    "target_direction"
+                ],
+                "strategy": {
+                    "id": int(strategy_id),
+                    "name": strategy_name.strip() if strategy_name else None,
+                    "source": (
+                        strategy_source.strip() if strategy_source else None
+                    ),
+                },
+                "page": page,
+                "size": size,
+                "scan_pages": scan_pages,
+                "benchmark_symbol": result["relative_strength"][
+                    "benchmark_symbol"
+                ],
+                "include_indexes": include_indexes,
+                "include_short_risk": include_short_risk,
+                "include_tradeability": include_tradeability,
+                "require_normal_trade_status": require_normal_trade_status,
+                "include_fundamentals": include_fundamentals,
+                "include_margin_requirements": include_margin_requirements,
+                "include_short_capacity": include_short_capacity,
+                "fundamental_event_window_days": (
+                    fundamental_event_window_days
+                ),
+                "include_corporate_actions": include_corporate_actions,
+                "filters": result["filters"]["applied"],
+            },
+            "scan": result["scan"],
+            "metric_basis": result["relative_strength"],
+            "statuses": {
+                key: result[key]
+                for key in (
+                    "enrichment",
+                    "short_risk",
+                    "tradeability",
+                    "fundamentals",
+                    "margin_requirements",
+                    "short_capacity",
+                )
+            },
+            "filter_summary": result["filters"],
+            **audit,
+            "selected_symbols": [item["symbol"] for item in result["items"]],
+        }
+        snapshot_service = self._snapshot_service
+        if snapshot_service is None:
+            from .stock_screener_snapshots import (
+                get_stock_screener_snapshot_service,
+            )
+
+            snapshot_service = get_stock_screener_snapshot_service()
+        result["snapshot"] = snapshot_service.capture(snapshot_payload)
+        return result
 
     def _search_single_page(
         self,
@@ -836,7 +906,7 @@ class StockScreenerService:
 
         before_filter_count = len(candidates)
         if apply_filters:
-            candidates, exclusion_reasons = self._apply_candidate_filters(
+            candidates, exclusion_reasons, _ = self._apply_candidate_filters(
                 candidates,
                 normalized_filters,
                 require_normal_trade_status,
@@ -901,6 +971,7 @@ class StockScreenerService:
         page_results: List[Dict[str, Any]],
         requested_pages: int,
         apply_combined_filters: bool,
+        capture_audit: bool = False,
     ) -> Dict[str, Any]:
         first_result = page_results[0]
         last_result = page_results[-1]
@@ -911,6 +982,9 @@ class StockScreenerService:
         duplicates_removed = 0
         exclusion_reasons: Dict[str, int] = {}
         before_count = 0
+        retained_scan_orders: Dict[str, int] = {}
+        occurrences: List[Dict[str, Any]] = []
+        page_audit: List[Dict[str, Any]] = []
 
         for page_result in page_results:
             page_number = int(page_result["page"])
@@ -924,31 +998,72 @@ class StockScreenerService:
                 symbol = candidate["symbol"]
                 if symbol in seen_symbols:
                     duplicates_removed += 1
+                    occurrences.append({
+                        "symbol": symbol,
+                        "source_page": page_number,
+                        "source_rank": candidate.get("rank"),
+                        "retained": False,
+                        "duplicate_of_scan_order": retained_scan_orders[symbol],
+                    })
                     continue
                 seen_symbols.add(symbol)
                 item = dict(candidate)
                 item["source_page"] = page_number
                 items.append(item)
+                retained_scan_orders[symbol] = len(items)
+                occurrences.append({
+                    "symbol": symbol,
+                    "source_page": page_number,
+                    "source_rank": candidate.get("rank"),
+                    "retained": True,
+                    "scan_order": len(items),
+                })
+            page_audit.append({
+                "page": page_number,
+                "total": int(page_result["total"]),
+                "has_more": bool(page_result["has_more"]),
+                "candidate_count": int(page_filters["before"]),
+                "symbols": [
+                    candidate["symbol"]
+                    for candidate in page_result["items"]
+                ],
+            })
 
         pages_scanned = len(page_results)
+        filter_outcomes: List[Dict[str, Any]] = []
+        audit_candidates: List[Dict[str, Any]] = []
         if apply_combined_filters:
             self._attach_industry_relative_strength(
                 items,
                 first_result["relative_strength"]["target_direction"],
             )
+            if capture_audit:
+                audit_candidates = deepcopy(items)
             applied_filters = dict(first_result["filters"]["applied"])
             require_normal_trade_status = bool(
                 applied_filters.pop("require_normal_trade_status", False)
             )
-            items, combined_filter_reasons = self._apply_candidate_filters(
-                items,
-                applied_filters,
-                require_normal_trade_status,
+            items, combined_filter_reasons, filter_outcomes = (
+                self._apply_candidate_filters(
+                    items,
+                    applied_filters,
+                    require_normal_trade_status,
+                )
             )
             for reason, count in combined_filter_reasons.items():
                 exclusion_reasons[reason] = (
                     exclusion_reasons.get(reason, 0) + count
                 )
+        elif capture_audit:
+            audit_candidates = deepcopy(items)
+            filter_outcomes = [
+                {
+                    "symbol": candidate["symbol"],
+                    "selected": True,
+                    "exclusion_reason": None,
+                }
+                for candidate in items
+            ]
 
         if duplicates_removed:
             exclusion_reasons["duplicate_symbol"] = duplicates_removed
@@ -996,6 +1111,32 @@ class StockScreenerService:
             "duplicates_removed": duplicates_removed,
             "stopped_reason": "page_limit" if has_more else "source_exhausted",
         }
+        if capture_audit:
+            outcome_by_symbol = {
+                item["symbol"]: item
+                for item in filter_outcomes
+            }
+            combined["_snapshot_audit"] = {
+                "pages": page_audit,
+                "occurrences": occurrences,
+                "universe": [
+                    {
+                        "scan_order": index,
+                        "source_page": candidate["source_page"],
+                        "selected": outcome_by_symbol[candidate["symbol"]][
+                            "selected"
+                        ],
+                        "exclusion_reason": outcome_by_symbol[
+                            candidate["symbol"]
+                        ]["exclusion_reason"],
+                        "candidate": deepcopy(candidate),
+                    }
+                    for index, candidate in enumerate(
+                        audit_candidates,
+                        start=1,
+                    )
+                ],
+            }
         return combined
 
     @staticmethod
@@ -1118,9 +1259,20 @@ class StockScreenerService:
         candidates: List[Dict[str, Any]],
         filters: Dict[str, float],
         require_normal_trade_status: bool,
-    ) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
+    ) -> tuple[
+        List[Dict[str, Any]],
+        Dict[str, int],
+        List[Dict[str, Any]],
+    ]:
         if not filters and not require_normal_trade_status:
-            return candidates, {}
+            return candidates, {}, [
+                {
+                    "symbol": candidate["symbol"],
+                    "selected": True,
+                    "exclusion_reason": None,
+                }
+                for candidate in candidates
+            ]
 
         rules = (
             ("min_turnover", "indexes", "turnover", "min"),
@@ -1239,6 +1391,7 @@ class StockScreenerService:
         )
         kept = []
         reasons: Dict[str, int] = {}
+        outcomes: List[Dict[str, Any]] = []
         for candidate in candidates:
             failure_reason = None
             if require_normal_trade_status:
@@ -1270,7 +1423,12 @@ class StockScreenerService:
                 reasons[failure_reason] = reasons.get(failure_reason, 0) + 1
             else:
                 kept.append(candidate)
-        return kept, reasons
+            outcomes.append({
+                "symbol": candidate["symbol"],
+                "selected": failure_reason is None,
+                "exclusion_reason": failure_reason,
+            })
+        return kept, reasons, outcomes
 
     def _attach_relative_strength(
         self,
