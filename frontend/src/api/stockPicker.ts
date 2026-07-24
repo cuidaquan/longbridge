@@ -199,6 +199,7 @@ export interface SecurityUniverseCaptureRun {
 
 export interface SecurityUniverseSnapshotHistory {
   snapshot_version: string;
+  classification_version: string;
   source: string;
   items: SecurityUniverseSnapshotSummary[];
   capture_runs: SecurityUniverseCaptureRun[];
@@ -244,6 +245,108 @@ export interface SecurityUniverseSnapshotDetail
     captured_at: string;
     observation_date: string;
     items: SecuritySearchItem[];
+  } | null;
+}
+
+export type SecurityUniverseClassificationReadinessReason =
+  | 'incomplete_static_info'
+  | 'unknown_board'
+  | 'board_market_mismatch';
+
+export interface SecurityUniverseClassificationSummary {
+  classification_snapshot_id: string;
+  source_snapshot_id: string;
+  captured_at: string;
+  observation_date: string;
+  classification_version: string;
+  market: SecurityMarket;
+  source_snapshot_version: string;
+  security_count: number;
+  classified_count: number;
+  resolved_board_count: number;
+  eligible_count: number;
+  ready_for_research_universe: boolean;
+  payload_hash: string;
+}
+
+export interface SecurityUniverseClassificationCoverageMarket {
+  market: SecurityMarket;
+  source_snapshot_count: number;
+  classification_snapshot_count: number;
+  unclassified_snapshot_count: number;
+  observation_dates: number;
+  ready_observation_dates: number;
+  latest: SecurityUniverseClassificationSummary | null;
+  payload_integrity_checked: false;
+}
+
+export interface SecurityUniverseClassificationCoverage {
+  coverage_version: string;
+  classification_version: string;
+  source_snapshot_version: string;
+  source: string;
+  markets: SecurityUniverseClassificationCoverageMarket[];
+}
+
+export interface SecurityUniverseClassificationItem {
+  symbol: string;
+  static_info_status: 'available' | 'missing';
+  board: string | null;
+  board_raw: string | null;
+  exchange: string;
+  currency: string;
+  lot_size: number | null;
+  board_category: string;
+  research_eligible: boolean;
+  exclusion_reason: string | null;
+}
+
+export interface SecurityUniverseClassificationDetail
+  extends SecurityUniverseClassificationSummary {
+  computed_payload_hash: string | null;
+  integrity_valid: boolean;
+  integrity_errors: string[];
+  payload: {
+    classification_version: string;
+    source: string;
+    source_request: {
+      method: 'SDK';
+      operation: 'QuoteContext.static_info';
+      batch_size: number;
+    };
+    source_snapshot: {
+      snapshot_id: string;
+      snapshot_version: string;
+      payload_hash: string;
+      security_count: number;
+    };
+    market: SecurityMarket;
+    captured_at: string;
+    observation_date: string;
+    policy: {
+      policy_version: string;
+      eligible_boards: string[];
+      eligible_semantics: string;
+      requires_complete_static_info: true;
+      requires_known_board: true;
+      does_not_prove: string[];
+    };
+    counts: {
+      security_count: number;
+      classified_count: number;
+      resolved_board_count: number;
+      eligible_count: number;
+      excluded_count: number;
+      missing_static_info_count: number;
+      unknown_board_count: number;
+      board_market_mismatch_count: number;
+    };
+    board_counts: Record<string, number>;
+    category_counts: Record<string, number>;
+    exclusion_counts: Record<string, number>;
+    ready_for_research_universe: boolean;
+    readiness_reasons: SecurityUniverseClassificationReadinessReason[];
+    items: SecurityUniverseClassificationItem[];
   } | null;
 }
 
@@ -1276,6 +1379,36 @@ export async function getSecurityUniverseSnapshot(
   if (!response.ok) {
     const error = await response.json().catch(() => null);
     throw new Error(error?.detail || '获取证券目录快照详情失败');
+  }
+  return response.json();
+}
+
+export async function getSecurityUniverseClassificationCoverage(
+  market?: SecurityMarket,
+): Promise<SecurityUniverseClassificationCoverage> {
+  const query = new URLSearchParams();
+  if (market) query.set('market', market);
+  const suffix = query.size > 0 ? `?${query.toString()}` : '';
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/security-universe-classifications/coverage${suffix}`,
+  );
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取证券目录分类覆盖失败');
+  }
+  return response.json();
+}
+
+export async function getSecurityUniverseClassification(
+  sourceSnapshotId: string,
+): Promise<SecurityUniverseClassificationDetail | null> {
+  const response = await fetch(
+    `${API_BASE}/api/stock-picker/security-universe-classifications/${encodeURIComponent(sourceSnapshotId)}`,
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    const error = await response.json().catch(() => null);
+    throw new Error(error?.detail || '获取证券目录分类详情失败');
   }
   return response.json();
 }

@@ -14,7 +14,10 @@ from .external_service_resilience import (
     run_external_call,
 )
 from .security_catalog import get_security_catalog_service
-from .stock_candidate_data import is_market_trading_day
+from .stock_candidate_data import (
+    get_security_static_info,
+    is_market_trading_day,
+)
 from .stock_picker_ai_snapshots import sanitize_error
 
 
@@ -22,8 +25,14 @@ SNAPSHOT_VERSION = "security-universe-snapshot-v1"
 SNAPSHOT_SOURCE = "longbridge-official-security-list"
 SNAPSHOT_COVERAGE_VERSION = "security-universe-coverage-v1"
 SNAPSHOT_COMPARISON_VERSION = "security-universe-comparison-v1"
+CLASSIFICATION_VERSION = "security-universe-classification-v1"
+CLASSIFICATION_SOURCE = "longbridge-security-static-info"
+CLASSIFICATION_COVERAGE_VERSION = (
+    "security-universe-classification-coverage-v1"
+)
 SOURCE_PATH = "/v1/quote/get_security_list"
 SOURCE_CATEGORY = "Overnight"
+STATIC_INFO_BATCH_SIZE = 500
 SUPPORTED_MARKETS = ("US", "HK", "CN")
 MARKET_TIMEZONES = {
     "US": "America/New_York",
@@ -39,6 +48,43 @@ AUTO_CAPTURE_MARKETS = ("US", "HK")
 AUTO_CAPTURE_LOCAL_HOUR = 17
 CAPTURE_CLAIM_LEASE_MINUTES = 30
 COMPARISON_METADATA_FIELDS = ("name", "name_en", "name_hk")
+BOARD_CLASSIFICATION = {
+    "usmain": ("listed_equity_board", True, None),
+    "hkequity": ("listed_equity_board", True, None),
+    "shmainconnect": ("listed_equity_board", True, None),
+    "shmainnonconnect": ("listed_equity_board", True, None),
+    "shstar": ("listed_equity_board", True, None),
+    "szmainconnect": ("listed_equity_board", True, None),
+    "szmainnonconnect": ("listed_equity_board", True, None),
+    "szgemconnect": ("listed_equity_board", True, None),
+    "szgemnonconnect": ("listed_equity_board", True, None),
+    "uspink": ("otc_equity_board", False, "otc_board"),
+    "usoption": ("derivative_board", False, "derivative_board"),
+    "usoptions": ("derivative_board", False, "derivative_board"),
+    "hkwarrant": ("derivative_board", False, "derivative_board"),
+    "usdji": ("index_board", False, "index_board"),
+    "usnsdq": ("index_board", False, "index_board"),
+    "hkhs": ("index_board", False, "index_board"),
+    "cnix": ("index_board", False, "index_board"),
+    "spxindex": ("index_board", False, "index_board"),
+    "vixindex": ("index_board", False, "index_board"),
+    "ussector": ("sector_board", False, "sector_board"),
+    "hksector": ("sector_board", False, "sector_board"),
+    "cnsector": ("sector_board", False, "sector_board"),
+    "hkpreipo": ("pre_ipo_board", False, "pre_ipo_board"),
+}
+MARKET_BOARD_ALLOWLIST = {
+    "US": {
+        "usmain", "uspink", "usoption", "usoptions", "usdji",
+        "usnsdq", "ussector", "spxindex", "vixindex",
+    },
+    "HK": {"hkequity", "hkpreipo", "hkwarrant", "hkhs", "hksector"},
+    "CN": {
+        "shmainconnect", "shmainnonconnect", "shstar", "cnix",
+        "cnsector", "szmainconnect", "szmainnonconnect",
+        "szgemconnect", "szgemnonconnect",
+    },
+}
 
 
 class SecurityUniverseSnapshotNotFoundError(LookupError):
@@ -59,6 +105,8 @@ class SecurityUniverseSnapshotService:
         ),
         minimum_security_counts: Optional[Dict[str, int]] = None,
         trading_day_loader: Callable = is_market_trading_day,
+        static_info_loader: Callable = get_security_static_info,
+        static_info_batch_size: int = STATIC_INFO_BATCH_SIZE,
     ) -> None:
         self.catalog_loader = catalog_loader or self._refresh_catalog
         self.connection_factory = connection_factory
@@ -69,6 +117,10 @@ class SecurityUniverseSnapshotService:
             else dict(MINIMUM_SECURITY_COUNTS)
         )
         self.trading_day_loader = trading_day_loader
+        self.static_info_loader = static_info_loader
+        if int(static_info_batch_size) < 1:
+            raise ValueError("static_info_batch_size 必须大于 0")
+        self.static_info_batch_size = int(static_info_batch_size)
         self._trading_day_cache: Dict[tuple[str, date], bool] = {}
 
     def capture_market(
@@ -88,10 +140,15 @@ class SecurityUniverseSnapshotService:
                 observation_date,
             )
             if existing is not None:
+                classification = self.capture_classification(
+                    existing["snapshot_id"],
+                    persist=True,
+                )
                 return {
                     **existing,
                     "status": "already_captured",
                     "persisted": False,
+                    "classification": classification,
                 }
         raw_items = self.catalog_loader(normalized_market)
         items = self._normalize_items(raw_items, normalized_market)
@@ -132,14 +189,19 @@ class SecurityUniverseSnapshotService:
                 )
                 if existing is None:
                     raise RuntimeError("证券目录快照写入状态不一致")
+                classification = self.capture_classification(
+                    existing["snapshot_id"],
+                    persist=True,
+                )
                 return {
                     **existing,
                     "status": "already_captured",
                     "persisted": False,
+                    "classification": classification,
                 }
             snapshot_id = persisted_id
 
-        return {
+        result = {
             "snapshot_id": snapshot_id,
             "snapshot_version": SNAPSHOT_VERSION,
             "source": SNAPSHOT_SOURCE,
@@ -152,6 +214,15 @@ class SecurityUniverseSnapshotService:
             "status": status,
             "persisted": persist and status == "captured",
         }
+        if persist:
+            classification = self.capture_classification(snapshot_id)
+        else:
+            classification = self._capture_classification_payload(
+                source_snapshot=result,
+                source_items=items,
+                persist=False,
+            )
+        return {**result, "classification": classification}
 
     def capture_due(self, *, persist: bool = True) -> Dict[str, Any]:
         now = self._as_utc(self.clock())
@@ -173,26 +244,32 @@ class SecurityUniverseSnapshotService:
                 market,
                 observation_date,
             )
-            if existing:
+            existing_classification = (
+                self._find_classification_summary(existing["snapshot_id"])
+                if existing
+                else None
+            )
+            if existing and existing_classification:
                 if persist:
                     self._reconcile_existing_run(existing, now)
                 skipped.append({**scope, "reason": "already_captured"})
                 continue
-            try:
-                if not self._is_market_trading_day(
-                    market,
-                    observation_date,
-                ):
-                    skipped.append({**scope, "reason": "market_closed"})
+            if existing is None:
+                try:
+                    if not self._is_market_trading_day(
+                        market,
+                        observation_date,
+                    ):
+                        skipped.append({**scope, "reason": "market_closed"})
+                        continue
+                except Exception as exc:
+                    error = sanitize_error(exc)
+                    errors.append({
+                        **scope,
+                        "reason": "trading_calendar_unavailable",
+                        "error": error,
+                    })
                     continue
-            except Exception as exc:
-                error = sanitize_error(exc)
-                errors.append({
-                    **scope,
-                    "reason": "trading_calendar_unavailable",
-                    "error": error,
-                })
-                continue
 
             claim_id = None
             if persist:
@@ -208,7 +285,19 @@ class SecurityUniverseSnapshotService:
                     })
                     continue
             try:
-                result = self.capture_market(market, persist=persist)
+                if existing is not None:
+                    classification = self.capture_classification(
+                        existing["snapshot_id"],
+                        persist=persist,
+                    )
+                    result = {
+                        **existing,
+                        "status": "classification_captured",
+                        "persisted": False,
+                        "classification": classification,
+                    }
+                else:
+                    result = self.capture_market(market, persist=persist)
             except Exception as exc:
                 error = sanitize_error(exc)
                 if claim_id is not None:
@@ -295,6 +384,7 @@ class SecurityUniverseSnapshotService:
             ).fetchall()
         return {
             "snapshot_version": SNAPSHOT_VERSION,
+            "classification_version": CLASSIFICATION_VERSION,
             "source": SNAPSHOT_SOURCE,
             "items": [self._summary(row) for row in rows],
             "capture_runs": [self._run_summary(row) for row in run_rows],
@@ -488,6 +578,289 @@ class SecurityUniverseSnapshotService:
         })
         return result
 
+    def capture_classification(
+        self,
+        source_snapshot_id: str,
+        *,
+        persist: bool = True,
+    ) -> Dict[str, Any]:
+        normalized_id = source_snapshot_id.strip()
+        if not normalized_id:
+            raise ValueError("source_snapshot_id 不能为空")
+        if persist:
+            existing = self._find_classification_summary(normalized_id)
+            if existing is not None:
+                return {
+                    **existing,
+                    "status": "already_classified",
+                    "persisted": False,
+                }
+
+        source_snapshot = self.get_snapshot(normalized_id)
+        if source_snapshot is None:
+            raise SecurityUniverseSnapshotNotFoundError(normalized_id)
+        if not source_snapshot["integrity_valid"]:
+            raise ValueError("源证券目录快照完整性校验失败")
+        return self._capture_classification_payload(
+            source_snapshot=source_snapshot,
+            source_items=source_snapshot["payload"]["items"],
+            persist=persist,
+        )
+
+    def get_classification(
+        self,
+        source_snapshot_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_id = source_snapshot_id.strip()
+        if not normalized_id:
+            raise ValueError("source_snapshot_id 不能为空")
+        with self.connection_factory() as connection:
+            row = connection.execute(
+                """
+                SELECT classification_snapshot_id, source_snapshot_id,
+                       captured_at, observation_date,
+                       classification_version, market,
+                       source_snapshot_version, security_count,
+                       classified_count, resolved_board_count,
+                       eligible_count, ready_for_research_universe,
+                       payload_hash, payload
+                FROM security_universe_classification_snapshots
+                WHERE source_snapshot_id = ?
+                  AND classification_version = ?
+                """,
+                [normalized_id, CLASSIFICATION_VERSION],
+            ).fetchone()
+        if row is None:
+            return None
+
+        summary = self._classification_summary(row[:13])
+        try:
+            payload = json.loads(row[13])
+        except (json.JSONDecodeError, TypeError):
+            return {
+                **summary,
+                "computed_payload_hash": None,
+                "integrity_valid": False,
+                "integrity_errors": ["invalid_payload_json"],
+                "payload": None,
+            }
+        computed_hash = self._payload_hash(payload)
+        if not isinstance(payload, dict):
+            return {
+                **summary,
+                "computed_payload_hash": computed_hash,
+                "integrity_valid": False,
+                "integrity_errors": ["payload_not_object"],
+                "payload": payload,
+            }
+
+        integrity_errors = []
+        if computed_hash != row[12]:
+            integrity_errors.append("payload_hash_mismatch")
+        if payload.get("classification_version") != row[4]:
+            integrity_errors.append("payload_version_mismatch")
+        if payload.get("source") != CLASSIFICATION_SOURCE:
+            integrity_errors.append("payload_source_mismatch")
+        if payload.get("market") != row[5]:
+            integrity_errors.append("payload_market_mismatch")
+        if payload.get("observation_date") != row[3].isoformat():
+            integrity_errors.append("payload_date_mismatch")
+        captured_at = row[2].replace(tzinfo=timezone.utc).isoformat()
+        if payload.get("captured_at") != captured_at:
+            integrity_errors.append("payload_captured_at_mismatch")
+        source_request = payload.get("source_request")
+        if (
+            not isinstance(source_request, dict)
+            or source_request.get("method") != "SDK"
+            or source_request.get("operation") != "QuoteContext.static_info"
+            or not isinstance(source_request.get("batch_size"), int)
+            or source_request.get("batch_size") < 1
+        ):
+            integrity_errors.append("source_request_mismatch")
+        if payload.get("policy") != self._classification_policy(row[5]):
+            integrity_errors.append("classification_policy_mismatch")
+
+        source_reference = payload.get("source_snapshot")
+        if (
+            not isinstance(source_reference, dict)
+            or source_reference.get("snapshot_id") != row[1]
+            or source_reference.get("snapshot_version") != row[6]
+            or source_reference.get("security_count") != row[7]
+        ):
+            integrity_errors.append("source_snapshot_reference_mismatch")
+        source_snapshot = self.get_snapshot(row[1])
+        if source_snapshot is None:
+            integrity_errors.append("source_snapshot_missing")
+        else:
+            if not source_snapshot["integrity_valid"]:
+                integrity_errors.append("source_snapshot_integrity_invalid")
+            if (
+                source_snapshot["snapshot_version"] != row[6]
+                or source_snapshot["market"] != row[5]
+                or source_snapshot["observation_date"]
+                != row[3].isoformat()
+                or source_snapshot["security_count"] != row[7]
+            ):
+                integrity_errors.append("source_snapshot_metadata_mismatch")
+            if (
+                not isinstance(source_reference, dict)
+                or source_reference.get("payload_hash")
+                != source_snapshot["payload_hash"]
+            ):
+                integrity_errors.append("source_snapshot_hash_mismatch")
+
+        items = payload.get("items")
+        if (
+            not isinstance(items, list)
+            or len(items) != row[7]
+            or not self._classification_items_are_canonical(
+                items,
+                row[5],
+            )
+        ):
+            integrity_errors.append("non_canonical_classification_items")
+        else:
+            counts = self._classification_counts(items)
+            expected_counts = {
+                "security_count": len(items),
+                "classified_count": counts["classified_count"],
+                "resolved_board_count": counts["resolved_board_count"],
+                "eligible_count": counts["eligible_count"],
+                "excluded_count": len(items) - counts["eligible_count"],
+                "missing_static_info_count": counts[
+                    "missing_static_info_count"
+                ],
+                "unknown_board_count": counts["unknown_board_count"],
+                "board_market_mismatch_count": counts[
+                    "board_market_mismatch_count"
+                ],
+            }
+            if payload.get("counts") != expected_counts:
+                integrity_errors.append("classification_count_mismatch")
+            if (
+                row[8] != counts["classified_count"]
+                or row[9] != counts["resolved_board_count"]
+                or row[10] != counts["eligible_count"]
+            ):
+                integrity_errors.append(
+                    "classification_metadata_count_mismatch"
+                )
+            ready, reasons = self._classification_readiness(counts)
+            if (
+                payload.get("ready_for_research_universe") != ready
+                or payload.get("readiness_reasons") != reasons
+                or bool(row[11]) != ready
+            ):
+                integrity_errors.append("classification_readiness_mismatch")
+            if payload.get("board_counts") != counts["board_counts"]:
+                integrity_errors.append("board_counts_mismatch")
+            if payload.get("category_counts") != counts["category_counts"]:
+                integrity_errors.append("category_counts_mismatch")
+            if payload.get("exclusion_counts") != counts["exclusion_counts"]:
+                integrity_errors.append("exclusion_counts_mismatch")
+
+        return {
+            **summary,
+            "computed_payload_hash": computed_hash,
+            "integrity_valid": not integrity_errors,
+            "integrity_errors": integrity_errors,
+            "payload": payload,
+        }
+
+    def get_classification_coverage(
+        self,
+        market: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        normalized_market = (
+            self._normalize_market(market) if market else None
+        )
+        raw_where = "AND market = ?" if normalized_market else ""
+        classification_where = "AND market = ?" if normalized_market else ""
+        raw_parameters: List[Any] = [SNAPSHOT_VERSION]
+        classification_parameters: List[Any] = [CLASSIFICATION_VERSION]
+        if normalized_market:
+            raw_parameters.append(normalized_market)
+            classification_parameters.append(normalized_market)
+        with self.connection_factory() as connection:
+            raw_rows = connection.execute(
+                f"""
+                SELECT snapshot_id, market, observation_date
+                FROM security_universe_snapshots
+                WHERE snapshot_version = ?
+                {raw_where}
+                ORDER BY market, observation_date, captured_at
+                """,
+                raw_parameters,
+            ).fetchall()
+            classification_rows = connection.execute(
+                f"""
+                SELECT classification_snapshot_id, source_snapshot_id,
+                       captured_at, observation_date,
+                       classification_version, market,
+                       source_snapshot_version, security_count,
+                       classified_count, resolved_board_count,
+                       eligible_count, ready_for_research_universe,
+                       payload_hash
+                FROM security_universe_classification_snapshots
+                WHERE classification_version = ?
+                {classification_where}
+                ORDER BY market, observation_date, captured_at
+                """,
+                classification_parameters,
+            ).fetchall()
+
+        markets = (
+            [normalized_market]
+            if normalized_market
+            else list(SUPPORTED_MARKETS)
+        )
+        result = []
+        for item_market in markets:
+            market_raw = [row for row in raw_rows if row[1] == item_market]
+            market_classifications = [
+                self._classification_summary(row)
+                for row in classification_rows
+                if row[5] == item_market
+            ]
+            classified_source_ids = {
+                item["source_snapshot_id"]
+                for item in market_classifications
+            }
+            latest = (
+                market_classifications[-1]
+                if market_classifications
+                else None
+            )
+            result.append({
+                "market": item_market,
+                "source_snapshot_count": len(market_raw),
+                "classification_snapshot_count": len(
+                    market_classifications
+                ),
+                "unclassified_snapshot_count": sum(
+                    1 for row in market_raw
+                    if row[0] not in classified_source_ids
+                ),
+                "observation_dates": len({
+                    item["observation_date"]
+                    for item in market_classifications
+                }),
+                "ready_observation_dates": len({
+                    item["observation_date"]
+                    for item in market_classifications
+                    if item["ready_for_research_universe"]
+                }),
+                "latest": latest,
+                "payload_integrity_checked": False,
+            })
+        return {
+            "coverage_version": CLASSIFICATION_COVERAGE_VERSION,
+            "classification_version": CLASSIFICATION_VERSION,
+            "source_snapshot_version": SNAPSHOT_VERSION,
+            "source": CLASSIFICATION_SOURCE,
+            "markets": result,
+        }
+
     def get_snapshot(self, snapshot_id: str) -> Optional[Dict[str, Any]]:
         normalized_id = snapshot_id.strip()
         if not normalized_id:
@@ -562,6 +935,336 @@ class SecurityUniverseSnapshotService:
             "integrity_valid": not integrity_errors,
             "integrity_errors": integrity_errors,
             "payload": payload,
+        }
+
+    def _capture_classification_payload(
+        self,
+        source_snapshot: Dict[str, Any],
+        source_items: List[dict],
+        *,
+        persist: bool,
+    ) -> Dict[str, Any]:
+        market = self._normalize_market(source_snapshot["market"])
+        static_items = self._load_static_info(
+            [item["symbol"] for item in source_items]
+        )
+        items = self._normalize_classification_items(
+            source_items,
+            static_items,
+            market,
+        )
+        counts = self._classification_counts(items)
+        ready, readiness_reasons = self._classification_readiness(counts)
+        captured_at = self._as_utc(self.clock())
+        payload = {
+            "classification_version": CLASSIFICATION_VERSION,
+            "source": CLASSIFICATION_SOURCE,
+            "source_request": self._classification_request(),
+            "source_snapshot": {
+                "snapshot_id": source_snapshot["snapshot_id"],
+                "snapshot_version": source_snapshot["snapshot_version"],
+                "payload_hash": source_snapshot["payload_hash"],
+                "security_count": source_snapshot["security_count"],
+            },
+            "market": market,
+            "captured_at": captured_at.isoformat(),
+            "observation_date": source_snapshot["observation_date"],
+            "policy": self._classification_policy(market),
+            "counts": {
+                "security_count": len(items),
+                "classified_count": counts["classified_count"],
+                "resolved_board_count": counts["resolved_board_count"],
+                "eligible_count": counts["eligible_count"],
+                "excluded_count": len(items) - counts["eligible_count"],
+                "missing_static_info_count": counts[
+                    "missing_static_info_count"
+                ],
+                "unknown_board_count": counts["unknown_board_count"],
+                "board_market_mismatch_count": counts[
+                    "board_market_mismatch_count"
+                ],
+            },
+            "board_counts": counts["board_counts"],
+            "category_counts": counts["category_counts"],
+            "exclusion_counts": counts["exclusion_counts"],
+            "ready_for_research_universe": ready,
+            "readiness_reasons": readiness_reasons,
+            "items": items,
+        }
+        payload_hash = self._payload_hash(payload)
+        summary = {
+            "classification_snapshot_id": uuid4().hex,
+            "source_snapshot_id": source_snapshot["snapshot_id"],
+            "captured_at": captured_at.isoformat(),
+            "observation_date": source_snapshot["observation_date"],
+            "classification_version": CLASSIFICATION_VERSION,
+            "market": market,
+            "source_snapshot_version": source_snapshot["snapshot_version"],
+            "security_count": len(items),
+            "classified_count": counts["classified_count"],
+            "resolved_board_count": counts["resolved_board_count"],
+            "eligible_count": counts["eligible_count"],
+            "ready_for_research_universe": ready,
+            "payload_hash": payload_hash,
+        }
+        if persist:
+            classification_id, inserted = self._save_classification({
+                **summary,
+                "captured_at": captured_at,
+                "payload": payload,
+            })
+            if not inserted:
+                existing = self._find_classification_summary(
+                    source_snapshot["snapshot_id"]
+                )
+                if existing is None:
+                    raise RuntimeError("证券目录分类快照写入状态不一致")
+                return {
+                    **existing,
+                    "status": "already_classified",
+                    "persisted": False,
+                }
+            summary["classification_snapshot_id"] = classification_id
+        return {
+            **summary,
+            "status": "classified",
+            "persisted": persist,
+        }
+
+    def _load_static_info(self, symbols: List[str]) -> List[dict]:
+        items = []
+        for index in range(0, len(symbols), self.static_info_batch_size):
+            batch = symbols[index:index + self.static_info_batch_size]
+            loaded = run_external_call(
+                "quote",
+                "security_universe_static_info",
+                self.static_info_loader,
+                batch,
+                retry_if=lambda error: not isinstance(
+                    error,
+                    ExternalServiceTimeoutError,
+                ),
+            )
+            if not isinstance(loaded, list):
+                raise ValueError("证券静态分类响应必须是列表")
+            items.extend(loaded)
+        return items
+
+    @classmethod
+    def _normalize_classification_items(
+        cls,
+        source_items: List[dict],
+        static_items: Iterable[dict],
+        market: str,
+    ) -> List[Dict[str, Any]]:
+        source_symbols = {item["symbol"] for item in source_items}
+        static_by_symbol = {}
+        for item in static_items:
+            if not isinstance(item, dict):
+                raise ValueError("证券静态分类条目必须是对象")
+            symbol = str(item.get("symbol") or "").strip().upper()
+            if not symbol:
+                raise ValueError("证券静态分类存在空 symbol")
+            if symbol not in source_symbols:
+                raise ValueError(f"证券静态分类返回目录外 symbol: {symbol}")
+            if symbol in static_by_symbol:
+                raise ValueError(f"证券静态分类存在重复 symbol: {symbol}")
+            static_by_symbol[symbol] = item
+
+        normalized = []
+        for source_item in source_items:
+            symbol = source_item["symbol"]
+            static_item = static_by_symbol.get(symbol)
+            if static_item is None:
+                normalized.append({
+                    "symbol": symbol,
+                    "static_info_status": "missing",
+                    "board": None,
+                    "board_raw": None,
+                    "exchange": "",
+                    "currency": "",
+                    "lot_size": None,
+                    "board_category": "unknown",
+                    "research_eligible": False,
+                    "exclusion_reason": "missing_static_info",
+                })
+                continue
+
+            board_raw_value = static_item.get("board_raw")
+            board_value = static_item.get("board")
+            board = cls._normalize_board(board_value)
+            board_raw = (
+                str(board_raw_value).strip()
+                if board_raw_value is not None
+                else (
+                    str(board_value).strip()
+                    if board_value is not None
+                    else None
+                )
+            )
+            if board_raw == "":
+                board_raw = None
+            category, eligible, exclusion_reason = cls._classify_board(
+                board,
+                market,
+            )
+            lot_size_value = static_item.get("lot_size")
+            try:
+                lot_size = (
+                    int(lot_size_value)
+                    if lot_size_value is not None
+                    else None
+                )
+            except (TypeError, ValueError):
+                lot_size = None
+            if lot_size is not None and lot_size <= 0:
+                lot_size = None
+            normalized.append({
+                "symbol": symbol,
+                "static_info_status": "available",
+                "board": board,
+                "board_raw": board_raw,
+                "exchange": str(
+                    static_item.get("exchange") or ""
+                ).strip(),
+                "currency": str(
+                    static_item.get("currency") or ""
+                ).strip().upper(),
+                "lot_size": lot_size,
+                "board_category": category,
+                "research_eligible": eligible,
+                "exclusion_reason": exclusion_reason,
+            })
+        normalized.sort(key=lambda item: item["symbol"])
+        return normalized
+
+    @classmethod
+    def _classification_items_are_canonical(
+        cls,
+        items: List[dict],
+        market: str,
+    ) -> bool:
+        if not all(isinstance(item, dict) for item in items):
+            return False
+        source_items = [{"symbol": item.get("symbol")} for item in items]
+        static_items = []
+        for item in items:
+            if item.get("static_info_status") == "available":
+                static_items.append({
+                    "symbol": item.get("symbol"),
+                    "board": item.get("board"),
+                    "board_raw": item.get("board_raw"),
+                    "exchange": item.get("exchange"),
+                    "currency": item.get("currency"),
+                    "lot_size": item.get("lot_size"),
+                })
+            elif item.get("static_info_status") != "missing":
+                return False
+        try:
+            return cls._normalize_classification_items(
+                source_items,
+                static_items,
+                market,
+            ) == items
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _classification_counts(items: List[dict]) -> Dict[str, Any]:
+        board_counts: Dict[str, int] = {}
+        category_counts: Dict[str, int] = {}
+        exclusion_counts: Dict[str, int] = {}
+        for item in items:
+            if item["board"]:
+                board_counts[item["board"]] = (
+                    board_counts.get(item["board"], 0) + 1
+                )
+            category = item["board_category"]
+            category_counts[category] = category_counts.get(category, 0) + 1
+            reason = item["exclusion_reason"]
+            if reason:
+                exclusion_counts[reason] = exclusion_counts.get(reason, 0) + 1
+        return {
+            "classified_count": sum(
+                item["static_info_status"] == "available" for item in items
+            ),
+            "resolved_board_count": sum(
+                item["board_category"] != "unknown" for item in items
+            ),
+            "eligible_count": sum(
+                bool(item["research_eligible"]) for item in items
+            ),
+            "missing_static_info_count": exclusion_counts.get(
+                "missing_static_info", 0
+            ),
+            "unknown_board_count": exclusion_counts.get("unknown_board", 0),
+            "board_market_mismatch_count": exclusion_counts.get(
+                "board_market_mismatch", 0
+            ),
+            "board_counts": dict(sorted(board_counts.items())),
+            "category_counts": dict(sorted(category_counts.items())),
+            "exclusion_counts": dict(sorted(exclusion_counts.items())),
+        }
+
+    @staticmethod
+    def _classification_readiness(
+        counts: Dict[str, Any],
+    ) -> tuple[bool, List[str]]:
+        reasons = []
+        if counts["missing_static_info_count"]:
+            reasons.append("incomplete_static_info")
+        if counts["unknown_board_count"]:
+            reasons.append("unknown_board")
+        if counts["board_market_mismatch_count"]:
+            reasons.append("board_market_mismatch")
+        return not reasons, reasons
+
+    @staticmethod
+    def _normalize_board(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return text.split(".")[-1].replace("'>", "").strip().lower() or None
+
+    @staticmethod
+    def _classify_board(
+        board: Optional[str],
+        market: str,
+    ) -> tuple[str, bool, Optional[str]]:
+        if board is None or board not in BOARD_CLASSIFICATION:
+            return "unknown", False, "unknown_board"
+        if board not in MARKET_BOARD_ALLOWLIST[market]:
+            return "unknown", False, "board_market_mismatch"
+        return BOARD_CLASSIFICATION[board]
+
+    def _classification_request(self) -> Dict[str, Any]:
+        return {
+            "method": "SDK",
+            "operation": "QuoteContext.static_info",
+            "batch_size": self.static_info_batch_size,
+        }
+
+    @staticmethod
+    def _classification_policy(market: str) -> Dict[str, Any]:
+        eligible_boards = sorted(
+            board
+            for board in MARKET_BOARD_ALLOWLIST[market]
+            if BOARD_CLASSIFICATION[board][1]
+        )
+        return {
+            "policy_version": CLASSIFICATION_VERSION,
+            "eligible_boards": eligible_boards,
+            "eligible_semantics": "listed_equity_board_including_funds",
+            "requires_complete_static_info": True,
+            "requires_known_board": True,
+            "does_not_prove": [
+                "ordinary_stock_or_etf_type",
+                "current_trade_status",
+                "account_permission",
+                "liquidity",
+            ],
         }
 
     def _is_market_trading_day(
@@ -748,6 +1451,88 @@ class SecurityUniverseSnapshotService:
             raise RuntimeError("证券目录快照写入失败")
         return existing[0], False
 
+    def _save_classification(
+        self,
+        classification: Dict[str, Any],
+    ) -> tuple[str, bool]:
+        payload_text = self._canonical_json(classification["payload"])
+        with self.connection_factory() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO security_universe_classification_snapshots (
+                    classification_snapshot_id, source_snapshot_id,
+                    captured_at, observation_date,
+                    classification_version, market,
+                    source_snapshot_version, security_count,
+                    classified_count, resolved_board_count,
+                    eligible_count, ready_for_research_universe,
+                    payload_hash, payload
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (source_snapshot_id, classification_version)
+                DO NOTHING
+                RETURNING classification_snapshot_id
+                """,
+                [
+                    classification["classification_snapshot_id"],
+                    classification["source_snapshot_id"],
+                    classification["captured_at"].replace(tzinfo=None),
+                    classification["observation_date"],
+                    CLASSIFICATION_VERSION,
+                    classification["market"],
+                    classification["source_snapshot_version"],
+                    classification["security_count"],
+                    classification["classified_count"],
+                    classification["resolved_board_count"],
+                    classification["eligible_count"],
+                    classification["ready_for_research_universe"],
+                    classification["payload_hash"],
+                    payload_text,
+                ],
+            ).fetchone()
+            if row is not None:
+                return row[0], True
+            existing = connection.execute(
+                """
+                SELECT classification_snapshot_id
+                FROM security_universe_classification_snapshots
+                WHERE source_snapshot_id = ?
+                  AND classification_version = ?
+                """,
+                [
+                    classification["source_snapshot_id"],
+                    CLASSIFICATION_VERSION,
+                ],
+            ).fetchone()
+        if existing is None:
+            raise RuntimeError("证券目录分类快照写入失败")
+        return existing[0], False
+
+    def _find_classification_summary(
+        self,
+        source_snapshot_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self.connection_factory() as connection:
+            row = connection.execute(
+                """
+                SELECT classification_snapshot_id, source_snapshot_id,
+                       captured_at, observation_date,
+                       classification_version, market,
+                       source_snapshot_version, security_count,
+                       classified_count, resolved_board_count,
+                       eligible_count, ready_for_research_universe,
+                       payload_hash
+                FROM security_universe_classification_snapshots
+                WHERE source_snapshot_id = ?
+                  AND classification_version = ?
+                """,
+                [source_snapshot_id, CLASSIFICATION_VERSION],
+            ).fetchone()
+        return (
+            self._classification_summary(row)
+            if row is not None
+            else None
+        )
+
     def _find_existing_summary(
         self,
         market: str,
@@ -889,6 +1674,26 @@ class SecurityUniverseSnapshotService:
             "snapshot_id": row[6],
             "security_count": row[7],
             "error": row[8],
+        }
+
+    @staticmethod
+    def _classification_summary(row: tuple) -> Dict[str, Any]:
+        return {
+            "classification_snapshot_id": row[0],
+            "source_snapshot_id": row[1],
+            "captured_at": row[2].replace(
+                tzinfo=timezone.utc
+            ).isoformat(),
+            "observation_date": row[3].isoformat(),
+            "classification_version": row[4],
+            "market": row[5],
+            "source_snapshot_version": row[6],
+            "security_count": row[7],
+            "classified_count": row[8],
+            "resolved_board_count": row[9],
+            "eligible_count": row[10],
+            "ready_for_research_universe": bool(row[11]),
+            "payload_hash": row[12],
         }
 
     @staticmethod

@@ -2,15 +2,21 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   CompareArrows,
   DatasetOutlined,
+  FactCheckOutlined,
   Refresh,
   Search,
 } from '@mui/icons-material';
 import {
   compareSecurityUniverseSnapshots,
+  getSecurityUniverseClassification,
+  getSecurityUniverseClassificationCoverage,
   getSecurityUniverseCoverage,
   getSecurityUniverseSnapshot,
   getSecurityUniverseSnapshots,
   type SecurityMarket,
+  type SecurityUniverseClassificationCoverage,
+  type SecurityUniverseClassificationDetail,
+  type SecurityUniverseClassificationReadinessReason,
   type SecurityUniverseCaptureRun,
   type SecurityUniverseComparisonReason,
   type SecurityUniverseCoverage,
@@ -55,6 +61,35 @@ const INTEGRITY_ERROR_LABELS: Record<string, string> = {
   source_request_mismatch: '来源请求不一致',
   security_count_mismatch: '证券数量不一致',
   non_canonical_items: '证券条目未规范化',
+  source_snapshot_integrity_invalid: '源目录快照完整性未通过',
+  source_snapshot_hash_mismatch: '源目录快照哈希不一致',
+  source_snapshot_reference_mismatch: '源目录快照引用不一致',
+  source_snapshot_metadata_mismatch: '源目录快照元数据不一致',
+  classification_policy_mismatch: '分类策略不一致',
+  classification_count_mismatch: '分类数量不一致',
+  classification_metadata_count_mismatch: '分类摘要数量不一致',
+  classification_readiness_mismatch: '研究候选门禁不一致',
+  non_canonical_classification_items: '分类条目未规范化',
+};
+
+const READINESS_REASON_LABELS: Record<
+  SecurityUniverseClassificationReadinessReason,
+  string
+> = {
+  incomplete_static_info: '静态信息覆盖不完整',
+  unknown_board: '存在未知板块',
+  board_market_mismatch: '存在跨市场板块',
+};
+
+const EXCLUSION_REASON_LABELS: Record<string, string> = {
+  missing_static_info: '缺少静态信息',
+  unknown_board: '未知板块',
+  board_market_mismatch: '跨市场板块',
+  otc_board: '场外市场',
+  derivative_board: '衍生品',
+  index_board: '指数',
+  sector_board: '行业板块',
+  pre_ipo_board: '上市前证券',
 };
 
 const METADATA_FIELD_LABELS: Record<string, string> = {
@@ -84,8 +119,14 @@ function runBadgeVariant(status: SecurityUniverseCaptureRun['status']) {
 export default function SecurityUniverseSnapshotPanel() {
   const [market, setMarket] = useState<SecurityMarket>('HK');
   const [coverage, setCoverage] = useState<SecurityUniverseCoverage | null>(null);
+  const [classificationCoverage, setClassificationCoverage] = useState<
+    SecurityUniverseClassificationCoverage | null
+  >(null);
   const [history, setHistory] = useState<SecurityUniverseSnapshotHistory | null>(null);
   const [detail, setDetail] = useState<SecurityUniverseSnapshotDetail | null>(null);
+  const [classificationDetail, setClassificationDetail] = useState<
+    SecurityUniverseClassificationDetail | null
+  >(null);
   const [comparison, setComparison] = useState<SecurityUniverseSnapshotComparison | null>(null);
   const [baseSnapshotId, setBaseSnapshotId] = useState('');
   const [targetSnapshotId, setTargetSnapshotId] = useState('');
@@ -99,14 +140,17 @@ export default function SecurityUniverseSnapshotPanel() {
     setLoading(true);
     setError(null);
     setDetail(null);
+    setClassificationDetail(null);
     setDetailQuery('');
     setComparison(null);
     try {
-      const [coverageResult, historyResult] = await Promise.all([
+      const [coverageResult, classificationCoverageResult, historyResult] = await Promise.all([
         getSecurityUniverseCoverage(),
+        getSecurityUniverseClassificationCoverage(),
         getSecurityUniverseSnapshots({ market, limit: 50 }),
       ]);
       setCoverage(coverageResult);
+      setClassificationCoverage(classificationCoverageResult);
       setHistory(historyResult);
       const latest = historyResult.items[0];
       const previous = historyResult.items[1] || latest;
@@ -114,6 +158,7 @@ export default function SecurityUniverseSnapshotPanel() {
       setTargetSnapshotId(latest?.snapshot_id || '');
     } catch (loadError) {
       setCoverage(null);
+      setClassificationCoverage(null);
       setHistory(null);
       setBaseSnapshotId('');
       setTargetSnapshotId('');
@@ -136,9 +181,15 @@ export default function SecurityUniverseSnapshotPanel() {
     setError(null);
     setDetailQuery('');
     try {
-      setDetail(await getSecurityUniverseSnapshot(snapshotId));
+      const [snapshotResult, classificationResult] = await Promise.all([
+        getSecurityUniverseSnapshot(snapshotId),
+        getSecurityUniverseClassification(snapshotId),
+      ]);
+      setDetail(snapshotResult);
+      setClassificationDetail(classificationResult);
     } catch (loadError) {
       setDetail(null);
+      setClassificationDetail(null);
       setError(
         loadError instanceof Error
           ? loadError.message
@@ -200,6 +251,10 @@ export default function SecurityUniverseSnapshotPanel() {
     )).length;
   }, [detail, detailQuery]);
 
+  const classificationBySymbol = useMemo(() => new Map(
+    (classificationDetail?.payload?.items || []).map((item) => [item.symbol, item]),
+  ), [classificationDetail]);
+
   if (loading && !coverage && !history) {
     return <LoadingSpinner size="md" text="加载证券目录审计数据..." />;
   }
@@ -249,37 +304,56 @@ export default function SecurityUniverseSnapshotPanel() {
             <Badge variant="info">{coverage.coverage_version}</Badge>
           </div>
           <div className="grid gap-3 md:grid-cols-3">
-            {coverage.markets.map((item) => (
-              <button
-                type="button"
-                key={item.market}
-                onClick={() => setMarket(item.market)}
-                className={`min-w-0 rounded-lg border p-4 text-left transition-colors ${
-                  market === item.market
-                    ? 'border-cyan-500 bg-cyan-50/70 dark:bg-cyan-950/20'
-                    : 'border-slate-200 hover:border-slate-300 dark:border-slate-700 dark:hover:border-slate-600'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-semibold text-slate-900 dark:text-white">
-                    {item.market}
-                  </span>
-                  <Badge variant={item.snapshot_count > 0 ? 'success' : 'default'}>
-                    {item.snapshot_count > 0 ? '已采集' : '无快照'}
-                  </Badge>
-                </div>
-                <div className="mt-3 grid grid-cols-3 gap-2 text-center">
-                  <AuditMetric label="观测日" value={item.observation_dates} />
-                  <AuditMetric label="自然日跨度" value={item.calendar_span_days} />
-                  <AuditMetric label="可比较" value={item.comparable_transitions} />
-                </div>
-                <div className="mt-3 space-y-1 text-xs text-slate-500 dark:text-slate-400">
-                  <p>最近：{item.latest_observation_date || '-'}</p>
-                  <p>证券记录：{item.latest_security_count.toLocaleString('zh-CN')}</p>
-                  <p>最大自然日间隔：{item.maximum_interval_calendar_days ?? '-'} 天</p>
-                </div>
-              </button>
-            ))}
+            {coverage.markets.map((item) => {
+              const classification = classificationCoverage?.markets.find(
+                (candidate) => candidate.market === item.market,
+              );
+              return (
+                <button
+                  type="button"
+                  key={item.market}
+                  onClick={() => setMarket(item.market)}
+                  className={`min-w-0 rounded-lg border p-4 text-left transition-colors ${
+                    market === item.market
+                      ? 'border-cyan-500 bg-cyan-50/70 dark:bg-cyan-950/20'
+                      : 'border-slate-200 hover:border-slate-300 dark:border-slate-700 dark:hover:border-slate-600'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-slate-900 dark:text-white">
+                      {item.market}
+                    </span>
+                    <Badge variant={item.snapshot_count > 0 ? 'success' : 'default'}>
+                      {item.snapshot_count > 0 ? '已采集' : '无快照'}
+                    </Badge>
+                  </div>
+                  <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                    <AuditMetric label="观测日" value={item.observation_dates} />
+                    <AuditMetric label="目录快照" value={item.snapshot_count} />
+                    <AuditMetric
+                      label="分类快照"
+                      value={classification?.classification_snapshot_count ?? 0}
+                    />
+                  </div>
+                  <div className="mt-3 space-y-1 text-xs text-slate-500 dark:text-slate-400">
+                    <p>最近：{item.latest_observation_date || '-'}</p>
+                    <p>证券记录：{item.latest_security_count.toLocaleString('zh-CN')}</p>
+                    <p>
+                      分类缺口：{classification?.unclassified_snapshot_count ?? item.snapshot_count}
+                    </p>
+                    <p>
+                      最近分类：{
+                        classification?.latest?.ready_for_research_universe
+                          ? '研究候选门禁通过'
+                          : classification?.latest
+                            ? '研究候选门禁未通过'
+                            : '-'
+                      }
+                    </p>
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </section>
       )}
@@ -378,6 +452,98 @@ export default function SecurityUniverseSnapshotPanel() {
                     <p className="break-all">重算哈希：{detail.computed_payload_hash || '-'}</p>
                   </div>
 
+                  {!classificationDetail ? (
+                    <div className="flex items-start gap-2 rounded-lg border border-slate-200 p-3 text-xs text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                      <FactCheckOutlined className="mt-0.5 h-4 w-4 shrink-0" />
+                      <p>此目录快照尚无版本化静态分类。</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3 border-t border-slate-200 pt-3 dark:border-slate-700">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <p className="text-sm font-semibold text-slate-900 dark:text-white">
+                            静态分类覆盖
+                          </p>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            {classificationDetail.classification_version}
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Badge
+                            variant={classificationDetail.integrity_valid ? 'success' : 'danger'}
+                          >
+                            {classificationDetail.integrity_valid ? '分类完整' : '分类损坏'}
+                          </Badge>
+                          <Badge
+                            variant={
+                              classificationDetail.ready_for_research_universe
+                                ? 'success'
+                                : 'danger'
+                            }
+                          >
+                            {classificationDetail.ready_for_research_universe
+                              ? '研究候选就绪'
+                              : '研究候选未就绪'}
+                          </Badge>
+                        </div>
+                      </div>
+
+                      {classificationDetail.payload && (
+                        <>
+                          <div className="grid grid-cols-2 gap-2 text-center sm:grid-cols-4">
+                            <AuditMetric
+                              label="静态信息"
+                              value={`${classificationDetail.classified_count}/${classificationDetail.security_count}`}
+                            />
+                            <AuditMetric
+                              label="板块已解析"
+                              value={`${classificationDetail.resolved_board_count}/${classificationDetail.security_count}`}
+                            />
+                            <AuditMetric
+                              label="研究候选"
+                              value={classificationDetail.eligible_count}
+                              tone="success"
+                            />
+                            <AuditMetric
+                              label="排除"
+                              value={classificationDetail.payload.counts.excluded_count}
+                              tone="danger"
+                            />
+                          </div>
+
+                          {classificationDetail.payload.readiness_reasons.length > 0 && (
+                            <Alert type="error" title="分类门禁未通过">
+                              {classificationDetail.payload.readiness_reasons
+                                .map((reason) => READINESS_REASON_LABELS[reason] || reason)
+                                .join('；')}
+                            </Alert>
+                          )}
+
+                          {!classificationDetail.integrity_valid && (
+                            <Alert type="error" title="分类完整性失败">
+                              {classificationDetail.integrity_errors
+                                .map((reason) => INTEGRITY_ERROR_LABELS[reason] || reason)
+                                .join('；')}
+                            </Alert>
+                          )}
+
+                          <div className="text-xs text-slate-500 dark:text-slate-400">
+                            <p>
+                              板块分布：{
+                                Object.entries(classificationDetail.payload.board_counts)
+                                  .map(([board, count]) => `${board} ${count}`)
+                                  .join(' · ') || '-'
+                              }
+                            </p>
+                            <p className="mt-1">
+                              板块分类不区分普通股与 ETF，也不证明实时交易状态、账户权限或流动性。
+                            </p>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+
                   {detail.payload && (
                     <>
                       <Input
@@ -397,19 +563,36 @@ export default function SecurityUniverseSnapshotPanel() {
                           </p>
                         ) : (
                           <div className="divide-y divide-slate-100 dark:divide-slate-700">
-                            {visibleDetailItems.map((item) => (
-                              <div
-                                key={item.symbol}
-                                className="grid min-w-0 gap-1 px-3 py-2 sm:grid-cols-[120px_minmax(0,1fr)]"
-                              >
-                                <span className="font-mono text-xs font-semibold text-slate-800 dark:text-slate-200">
-                                  {item.symbol}
-                                </span>
-                                <span className="min-w-0 break-words text-xs text-slate-600 dark:text-slate-300">
-                                  {item.name || item.name_hk || item.name_en || '-'}
-                                </span>
-                              </div>
-                            ))}
+                            {visibleDetailItems.map((item) => {
+                              const classification = classificationBySymbol.get(
+                                item.symbol,
+                              );
+                              const classificationLabel = !classification
+                                ? '未分类'
+                                : `${classification.board_raw || '未知板块'} · ${
+                                  classification.research_eligible
+                                    ? '研究候选'
+                                    : EXCLUSION_REASON_LABELS[
+                                      classification.exclusion_reason || ''
+                                    ] || classification.exclusion_reason || '排除'
+                                }`;
+                              return (
+                                <div
+                                  key={item.symbol}
+                                  className="grid min-w-0 gap-1 px-3 py-2 sm:grid-cols-[120px_minmax(0,1fr)_minmax(120px,0.65fr)]"
+                                >
+                                  <span className="font-mono text-xs font-semibold text-slate-800 dark:text-slate-200">
+                                    {item.symbol}
+                                  </span>
+                                  <span className="min-w-0 break-words text-xs text-slate-600 dark:text-slate-300">
+                                    {item.name || item.name_hk || item.name_en || '-'}
+                                  </span>
+                                  <span className="min-w-0 break-words text-[11px] text-slate-500 dark:text-slate-400">
+                                    {classificationLabel}
+                                  </span>
+                                </div>
+                              );
+                            })}
                           </div>
                         )}
                       </div>

@@ -172,6 +172,81 @@ class StockCandidateDataTests(unittest.TestCase):
                 date(2026, 7, 24),
             )
 
+    def test_security_static_info_normalizes_sdk_fields(self) -> None:
+        quote_context = MagicMock()
+        quote_context.static_info.return_value = [
+            _namespace(
+                symbol="aaa.us",
+                board=_namespace(name="USMain"),
+                exchange="NASDAQ",
+                currency="usd",
+                lot_size="100",
+            ),
+            _namespace(
+                symbol="BBB.US",
+                board="USPink",
+                exchange=None,
+                currency=None,
+                lot_size=0,
+            ),
+            _namespace(
+                symbol="OUTSIDE.HK",
+                board="HKEquity",
+                exchange="HKEX",
+                currency="HKD",
+                lot_size=100,
+            ),
+        ]
+
+        @contextmanager
+        def fake_context(kind):
+            self.assertEqual(kind, "quote")
+            yield quote_context
+
+        with patch.object(stock_candidate_data, "_context", fake_context):
+            result = stock_candidate_data.get_security_static_info(
+                ["aaa.us", "BBB.US"]
+            )
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "symbol": "AAA.US",
+                    "board": "usmain",
+                    "board_raw": "USMain",
+                    "exchange": "NASDAQ",
+                    "currency": "USD",
+                    "lot_size": 100,
+                },
+                {
+                    "symbol": "BBB.US",
+                    "board": "uspink",
+                    "board_raw": "USPink",
+                    "exchange": "",
+                    "currency": "",
+                    "lot_size": None,
+                },
+            ],
+        )
+        quote_context.static_info.assert_called_once_with(
+            ["AAA.US", "BBB.US"]
+        )
+
+    def test_security_static_info_wraps_unexpected_sdk_errors(self) -> None:
+        @contextmanager
+        def failing_context(kind):
+            self.assertEqual(kind, "quote")
+            raise RuntimeError("sdk unavailable")
+            yield
+
+        with patch.object(stock_candidate_data, "_context", failing_context):
+            with self.assertRaisesRegex(
+                LongbridgeAPIError,
+                "获取证券静态分类信息失败",
+            ):
+                stock_candidate_data.get_security_static_info(["AAA.US"])
+
     def test_tradeability_normalizes_status_and_calculates_depth(self) -> None:
         quote_context = MagicMock()
         quote_context.quote.return_value = [

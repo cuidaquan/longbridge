@@ -12,6 +12,8 @@ from fastapi import HTTPException
 from app.db import _run_migrations
 from app.routers.stock_picker import (
     compare_security_universe_snapshots,
+    get_security_universe_classification,
+    get_security_universe_classification_coverage,
     get_security_universe_snapshot,
     get_security_universe_snapshot_coverage,
     get_security_universe_snapshots,
@@ -19,6 +21,9 @@ from app.routers.stock_picker import (
 )
 from app.security_universe_snapshots import (
     CAPTURE_CLAIM_LEASE_MINUTES,
+    CLASSIFICATION_COVERAGE_VERSION,
+    CLASSIFICATION_SOURCE,
+    CLASSIFICATION_VERSION,
     SNAPSHOT_COMPARISON_VERSION,
     SNAPSHOT_COVERAGE_VERSION,
     SNAPSHOT_SOURCE,
@@ -59,6 +64,29 @@ def _items(market: str = "US"):
     ]
 
 
+def _static_items(symbols):
+    board_by_market = {
+        "US": "USMain",
+        "HK": "HKEquity",
+        "CN": "SHMainConnect",
+    }
+    return [
+        {
+            "symbol": symbol,
+            "board": board_by_market[symbol.rsplit(".", 1)[-1]],
+            "board_raw": board_by_market[symbol.rsplit(".", 1)[-1]],
+            "exchange": symbol.rsplit(".", 1)[-1],
+            "currency": {
+                "US": "USD",
+                "HK": "HKD",
+                "CN": "CNY",
+            }[symbol.rsplit(".", 1)[-1]],
+            "lot_size": 1,
+        }
+        for symbol in symbols
+    ]
+
+
 class SecurityUniverseSnapshotTests(unittest.TestCase):
     def setUp(self) -> None:
         self.connection = duckdb.connect(":memory:")
@@ -91,6 +119,14 @@ class SecurityUniverseSnapshotTests(unittest.TestCase):
                 "trading_day_loader",
                 lambda market, observation_date: True,
             ),
+            static_info_loader=kwargs.get(
+                "static_info_loader",
+                _static_items,
+            ),
+            static_info_batch_size=kwargs.get(
+                "static_info_batch_size",
+                500,
+            ),
         )
 
     @staticmethod
@@ -122,6 +158,32 @@ class SecurityUniverseSnapshotTests(unittest.TestCase):
                 "payload",
             },
         )
+        classification_columns = {
+            row[1]
+            for row in self.connection.execute(
+                "PRAGMA table_info("
+                "'security_universe_classification_snapshots')"
+            ).fetchall()
+        }
+        self.assertEqual(
+            classification_columns,
+            {
+                "classification_snapshot_id",
+                "source_snapshot_id",
+                "captured_at",
+                "observation_date",
+                "classification_version",
+                "market",
+                "source_snapshot_version",
+                "security_count",
+                "classified_count",
+                "resolved_board_count",
+                "eligible_count",
+                "ready_for_research_universe",
+                "payload_hash",
+                "payload",
+            },
+        )
 
     def test_capture_is_canonical_integrity_checked_and_idempotent(self) -> None:
         loader = MagicMock(side_effect=lambda market: _items(market))
@@ -133,6 +195,9 @@ class SecurityUniverseSnapshotTests(unittest.TestCase):
 
         self.assertEqual(first["status"], "captured")
         self.assertTrue(first["persisted"])
+        self.assertTrue(
+            first["classification"]["ready_for_research_universe"]
+        )
         self.assertEqual(second["status"], "already_captured")
         self.assertFalse(second["persisted"])
         self.assertEqual(first["snapshot_id"], second["snapshot_id"])
@@ -190,6 +255,14 @@ class SecurityUniverseSnapshotTests(unittest.TestCase):
             service,
             "_save_snapshot",
             return_value=("existing-snapshot", False),
+        ), patch.object(
+            service,
+            "capture_classification",
+            return_value={
+                "classification_snapshot_id": "classification-1",
+                "status": "already_classified",
+                "persisted": False,
+            },
         ):
             result = service.capture_market("US")
 
@@ -198,6 +271,342 @@ class SecurityUniverseSnapshotTests(unittest.TestCase):
             {
                 **existing,
                 "status": "already_captured",
+                "persisted": False,
+                "classification": {
+                    "classification_snapshot_id": "classification-1",
+                    "status": "already_classified",
+                    "persisted": False,
+                },
+            },
+        )
+
+    def test_classification_batches_normalizes_and_persists_policy(self) -> None:
+        source_items = [
+            {
+                "symbol": f"{symbol}.US",
+                "name": symbol,
+                "name_en": symbol,
+                "name_hk": "",
+                "market": "US",
+            }
+            for symbol in ("AAA", "BBB", "CCC")
+        ]
+        batches = []
+
+        def load_static_info(symbols):
+            batches.append(list(symbols))
+            return [
+                {
+                    "symbol": symbol.lower(),
+                    "board": "SecurityBoard.USMain",
+                    "board_raw": "USMain",
+                    "exchange": "NASDAQ",
+                    "currency": "usd",
+                    "lot_size": "100",
+                }
+                for symbol in reversed(symbols)
+            ]
+
+        service = self._service(
+            catalog_loader=lambda market: source_items,
+            static_info_loader=load_static_info,
+            static_info_batch_size=2,
+        )
+        with patch(
+            "app.security_universe_snapshots.run_external_call",
+            side_effect=self._call_directly,
+        ):
+            capture = service.capture_market("US")
+
+        classification = service.get_classification(capture["snapshot_id"])
+        self.assertEqual(
+            batches,
+            [["AAA.US", "BBB.US"], ["CCC.US"]],
+        )
+        self.assertTrue(classification["integrity_valid"])
+        self.assertTrue(classification["ready_for_research_universe"])
+        self.assertEqual(classification["eligible_count"], 3)
+        self.assertEqual(
+            classification["payload"]["source_request"]["batch_size"],
+            2,
+        )
+        self.assertEqual(
+            classification["payload"]["policy"]["does_not_prove"],
+            [
+                "ordinary_stock_or_etf_type",
+                "current_trade_status",
+                "account_permission",
+                "liquidity",
+            ],
+        )
+        self.assertEqual(
+            classification["payload"]["items"][0],
+            {
+                "symbol": "AAA.US",
+                "static_info_status": "available",
+                "board": "usmain",
+                "board_raw": "USMain",
+                "exchange": "NASDAQ",
+                "currency": "USD",
+                "lot_size": 100,
+                "board_category": "listed_equity_board",
+                "research_eligible": True,
+                "exclusion_reason": None,
+            },
+        )
+
+    def test_classification_gate_fails_closed_for_incomplete_or_unknown(self) -> None:
+        source_items = [
+            {
+                "symbol": f"{symbol}.US",
+                "name": symbol,
+                "name_en": symbol,
+                "name_hk": "",
+                "market": "US",
+            }
+            for symbol in ("ELIGIBLE", "EXCLUDED", "MISSING", "UNKNOWN", "MISMATCH")
+        ]
+
+        def load_static_info(symbols):
+            boards = {
+                "ELIGIBLE.US": "USMain",
+                "EXCLUDED.US": "USPink",
+                "UNKNOWN.US": "Unknown",
+                "MISMATCH.US": "HKEquity",
+            }
+            return [
+                {"symbol": symbol, "board": board}
+                for symbol, board in boards.items()
+            ]
+
+        service = self._service(
+            catalog_loader=lambda market: source_items,
+            static_info_loader=load_static_info,
+        )
+        with patch(
+            "app.security_universe_snapshots.run_external_call",
+            side_effect=self._call_directly,
+        ):
+            capture = service.capture_market("US")
+        detail = service.get_classification(capture["snapshot_id"])
+
+        self.assertFalse(detail["ready_for_research_universe"])
+        self.assertEqual(detail["classified_count"], 4)
+        self.assertEqual(detail["resolved_board_count"], 2)
+        self.assertEqual(detail["eligible_count"], 1)
+        self.assertEqual(
+            detail["payload"]["readiness_reasons"],
+            [
+                "incomplete_static_info",
+                "unknown_board",
+                "board_market_mismatch",
+            ],
+        )
+        self.assertEqual(
+            detail["payload"]["exclusion_counts"],
+            {
+                "board_market_mismatch": 1,
+                "missing_static_info": 1,
+                "otc_board": 1,
+                "unknown_board": 1,
+            },
+        )
+        self.assertTrue(detail["integrity_valid"])
+
+    def test_known_excluded_board_does_not_block_classification_readiness(
+        self,
+    ) -> None:
+        service = self._service(
+            static_info_loader=lambda symbols: [
+                {"symbol": symbols[0], "board": "USMain"},
+                {"symbol": symbols[1], "board": "USPink"},
+            ],
+        )
+        with patch(
+            "app.security_universe_snapshots.run_external_call",
+            side_effect=self._call_directly,
+        ):
+            capture = service.capture_market("US")
+        detail = service.get_classification(capture["snapshot_id"])
+
+        self.assertTrue(detail["ready_for_research_universe"])
+        self.assertEqual(detail["eligible_count"], 1)
+        self.assertEqual(detail["payload"]["readiness_reasons"], [])
+        self.assertEqual(
+            detail["payload"]["exclusion_counts"],
+            {"otc_board": 1},
+        )
+
+    def test_classification_is_idempotent_and_historical_batch_is_valid(
+        self,
+    ) -> None:
+        loader = MagicMock(side_effect=_static_items)
+        service = self._service(
+            static_info_loader=loader,
+            static_info_batch_size=1,
+        )
+        with patch(
+            "app.security_universe_snapshots.run_external_call",
+            side_effect=self._call_directly,
+        ):
+            capture = service.capture_market("US")
+            repeated = service.capture_classification(capture["snapshot_id"])
+
+        reader = self._service(static_info_batch_size=500)
+        detail = reader.get_classification(capture["snapshot_id"])
+        self.assertEqual(loader.call_count, 2)
+        self.assertEqual(repeated["status"], "already_classified")
+        self.assertFalse(repeated["persisted"])
+        self.assertTrue(detail["integrity_valid"])
+        self.assertEqual(
+            detail["payload"]["source_request"]["batch_size"],
+            1,
+        )
+
+    def test_classification_integrity_detects_payload_and_source_tampering(
+        self,
+    ) -> None:
+        service = self._service()
+        capture = service.capture_market("US")
+        source_id = capture["snapshot_id"]
+        original = service.get_classification(source_id)
+
+        self.connection.execute(
+            """
+            UPDATE security_universe_classification_snapshots
+            SET classified_count = 1
+            WHERE source_snapshot_id = ?
+            """,
+            [source_id],
+        )
+        metadata_tampered = service.get_classification(source_id)
+        self.assertFalse(metadata_tampered["integrity_valid"])
+        self.assertIn(
+            "classification_metadata_count_mismatch",
+            metadata_tampered["integrity_errors"],
+        )
+        self.connection.execute(
+            """
+            UPDATE security_universe_classification_snapshots
+            SET classified_count = 2
+            WHERE source_snapshot_id = ?
+            """,
+            [source_id],
+        )
+
+        self.connection.execute(
+            """
+            UPDATE security_universe_classification_snapshots
+            SET payload = ?
+            WHERE source_snapshot_id = ?
+            """,
+            ["{broken", source_id],
+        )
+        broken = service.get_classification(source_id)
+        self.assertEqual(broken["integrity_errors"], ["invalid_payload_json"])
+
+        self.connection.execute(
+            """
+            UPDATE security_universe_classification_snapshots
+            SET payload = ?
+            WHERE source_snapshot_id = ?
+            """,
+            [
+                json.dumps(original["payload"], ensure_ascii=False),
+                source_id,
+            ],
+        )
+        self.connection.execute(
+            """
+            UPDATE security_universe_snapshots
+            SET payload = ?
+            WHERE snapshot_id = ?
+            """,
+            ["{broken", source_id],
+        )
+        source_tampered = service.get_classification(source_id)
+        self.assertFalse(source_tampered["integrity_valid"])
+        self.assertIn(
+            "source_snapshot_integrity_invalid",
+            source_tampered["integrity_errors"],
+        )
+
+    def test_classification_coverage_reports_missing_and_ready_snapshots(
+        self,
+    ) -> None:
+        first = self._service(
+            clock=lambda: datetime(2026, 7, 23, 12, tzinfo=timezone.utc),
+        ).capture_market("HK")
+        latest = self._service().capture_market("HK")
+        self.connection.execute(
+            """
+            DELETE FROM security_universe_classification_snapshots
+            WHERE source_snapshot_id = ?
+            """,
+            [first["snapshot_id"]],
+        )
+
+        coverage = self._service().get_classification_coverage("HK")
+        item = coverage["markets"][0]
+        self.assertEqual(
+            coverage["coverage_version"],
+            CLASSIFICATION_COVERAGE_VERSION,
+        )
+        self.assertEqual(coverage["source"], CLASSIFICATION_SOURCE)
+        self.assertEqual(item["source_snapshot_count"], 2)
+        self.assertEqual(item["classification_snapshot_count"], 1)
+        self.assertEqual(item["unclassified_snapshot_count"], 1)
+        self.assertEqual(item["ready_observation_dates"], 1)
+        self.assertEqual(
+            item["latest"]["source_snapshot_id"],
+            latest["snapshot_id"],
+        )
+        self.assertFalse(item["payload_integrity_checked"])
+
+    def test_concurrent_classification_insert_returns_persisted_metadata(
+        self,
+    ) -> None:
+        service = self._service()
+        capture = service.capture_market("US")
+        source_id = capture["snapshot_id"]
+        self.connection.execute(
+            """
+            DELETE FROM security_universe_classification_snapshots
+            WHERE source_snapshot_id = ?
+            """,
+            [source_id],
+        )
+        existing = {
+            "classification_snapshot_id": "existing-classification",
+            "source_snapshot_id": source_id,
+            "captured_at": "2026-07-24T12:00:00+00:00",
+            "observation_date": "2026-07-24",
+            "classification_version": CLASSIFICATION_VERSION,
+            "market": "US",
+            "source_snapshot_version": SNAPSHOT_VERSION,
+            "security_count": 2,
+            "classified_count": 2,
+            "resolved_board_count": 2,
+            "eligible_count": 2,
+            "ready_for_research_universe": True,
+            "payload_hash": "existing-hash",
+        }
+        with patch.object(
+            service,
+            "_find_classification_summary",
+            side_effect=[None, existing],
+        ), patch.object(
+            service,
+            "_save_classification",
+            return_value=("existing-classification", False),
+        ):
+            result = service.capture_classification(source_id)
+
+        self.assertEqual(
+            result,
+            {
+                **existing,
+                "status": "already_classified",
                 "persisted": False,
             },
         )
@@ -577,6 +986,54 @@ class SecurityUniverseSnapshotTests(unittest.TestCase):
         self.assertEqual(run["status"], "completed")
         self.assertEqual(run["snapshot_id"], second["captured"][0]["snapshot_id"])
 
+    def test_failed_classification_retries_without_refreshing_catalog(
+        self,
+    ) -> None:
+        catalog_loader = MagicMock(side_effect=lambda market: _items(market))
+        attempts = 0
+
+        def load_static_info(symbols):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("static info failed")
+            return _static_items(symbols)
+
+        static_loader = MagicMock(side_effect=load_static_info)
+        service = self._service(
+            catalog_loader=catalog_loader,
+            static_info_loader=static_loader,
+        )
+        with patch(
+            "app.security_universe_snapshots.run_external_call",
+            side_effect=self._call_directly,
+        ):
+            first = service.capture_due()
+            second = service.capture_due()
+
+        raw_count = self.connection.execute(
+            "SELECT COUNT(*) FROM security_universe_snapshots"
+        ).fetchone()[0]
+        classification_count = self.connection.execute(
+            "SELECT COUNT(*) FROM security_universe_classification_snapshots"
+        ).fetchone()[0]
+        self.assertEqual(first["captured"], [])
+        self.assertIn("static info failed", first["errors"][0]["error"])
+        self.assertEqual(len(second["captured"]), 1)
+        self.assertEqual(
+            second["captured"][0]["status"],
+            "classification_captured",
+        )
+        self.assertTrue(
+            second["captured"][0]["classification"][
+                "ready_for_research_universe"
+            ]
+        )
+        self.assertEqual(raw_count, 1)
+        self.assertEqual(classification_count, 1)
+        catalog_loader.assert_called_once_with("HK")
+        self.assertEqual(static_loader.call_count, 2)
+
     def test_claim_blocks_concurrency_and_stale_owner_cannot_finish(self) -> None:
         service = self._service()
         now = datetime(2026, 7, 24, 12, tzinfo=timezone.utc)
@@ -661,6 +1118,17 @@ class SecurityUniverseSnapshotHttpTests(unittest.TestCase):
             "coverage_version": SNAPSHOT_COVERAGE_VERSION,
             "markets": [{"market": "US", "snapshot_count": 1}],
         }
+        service.get_classification_coverage.return_value = {
+            "coverage_version": CLASSIFICATION_COVERAGE_VERSION,
+            "markets": [{"market": "US", "classification_snapshot_count": 1}],
+        }
+        service.get_classification.side_effect = [
+            {
+                "source_snapshot_id": "snapshot-1",
+                "integrity_valid": True,
+            },
+            None,
+        ]
         service.compare_snapshots.return_value = {
             "comparison_version": SNAPSHOT_COMPARISON_VERSION,
             "ready": True,
@@ -677,6 +1145,9 @@ class SecurityUniverseSnapshotHttpTests(unittest.TestCase):
             coverage = asyncio.run(
                 get_security_universe_snapshot_coverage("US")
             )
+            classification_coverage = asyncio.run(
+                get_security_universe_classification_coverage("US")
+            )
             comparison = asyncio.run(
                 compare_security_universe_snapshots(
                     "snapshot-0",
@@ -687,8 +1158,15 @@ class SecurityUniverseSnapshotHttpTests(unittest.TestCase):
             detail = asyncio.run(
                 get_security_universe_snapshot("snapshot-1")
             )
+            classification = asyncio.run(
+                get_security_universe_classification("snapshot-1")
+            )
             with self.assertRaises(HTTPException) as raised:
                 asyncio.run(get_security_universe_snapshot("missing"))
+            with self.assertRaises(HTTPException) as classification_raised:
+                asyncio.run(
+                    get_security_universe_classification("missing")
+                )
 
         paths = [route.path for route in router.routes]
         self.assertIn(
@@ -706,6 +1184,24 @@ class SecurityUniverseSnapshotHttpTests(unittest.TestCase):
         self.assertIn(
             "/api/stock-picker/security-universe-snapshots/{snapshot_id}",
             paths,
+        )
+        self.assertIn(
+            "/api/stock-picker/security-universe-classifications/coverage",
+            paths,
+        )
+        self.assertIn(
+            "/api/stock-picker/security-universe-classifications/"
+            "{source_snapshot_id}",
+            paths,
+        )
+        self.assertLess(
+            paths.index(
+                "/api/stock-picker/security-universe-classifications/coverage"
+            ),
+            paths.index(
+                "/api/stock-picker/security-universe-classifications/"
+                "{source_snapshot_id}"
+            ),
         )
         self.assertLess(
             paths.index(
@@ -725,11 +1221,20 @@ class SecurityUniverseSnapshotHttpTests(unittest.TestCase):
         )
         self.assertEqual(history["items"][0]["snapshot_id"], "snapshot-1")
         self.assertEqual(coverage["markets"][0]["snapshot_count"], 1)
+        self.assertEqual(
+            classification_coverage["markets"][0][
+                "classification_snapshot_count"
+            ],
+            1,
+        )
         self.assertEqual(comparison["added_count"], 1)
         self.assertTrue(detail["integrity_valid"])
+        self.assertTrue(classification["integrity_valid"])
         self.assertEqual(raised.exception.status_code, 404)
+        self.assertEqual(classification_raised.exception.status_code, 404)
         service.get_history.assert_called_once_with("US", 5)
         service.get_coverage.assert_called_once_with("US")
+        service.get_classification_coverage.assert_called_once_with("US")
         service.compare_snapshots.assert_called_once_with(
             "snapshot-0",
             "snapshot-1",

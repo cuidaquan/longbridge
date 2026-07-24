@@ -165,6 +165,7 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_STOCK_PICKER_FACTOR_EVALUATION_TABLE_SQL)
     conn.execute(_SECURITY_UNIVERSE_SNAPSHOT_TABLE_SQL)
     conn.execute(_SECURITY_UNIVERSE_SNAPSHOT_RUN_TABLE_SQL)
+    conn.execute(_SECURITY_UNIVERSE_CLASSIFICATION_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_SCAN_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_AUTO_CAPTURE_RUN_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_SNAPSHOT_TABLE_SQL)
@@ -649,6 +650,32 @@ CREATE TABLE IF NOT EXISTS security_universe_snapshot_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_security_universe_snapshot_run_status
 ON security_universe_snapshot_runs(status, started_at);
+"""
+
+_SECURITY_UNIVERSE_CLASSIFICATION_SNAPSHOT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS security_universe_classification_snapshots (
+    classification_snapshot_id TEXT PRIMARY KEY,
+    source_snapshot_id TEXT NOT NULL,
+    captured_at TIMESTAMP NOT NULL,
+    observation_date DATE NOT NULL,
+    classification_version TEXT NOT NULL,
+    market TEXT NOT NULL,
+    source_snapshot_version TEXT NOT NULL,
+    security_count INTEGER NOT NULL,
+    classified_count INTEGER NOT NULL,
+    resolved_board_count INTEGER NOT NULL,
+    eligible_count INTEGER NOT NULL,
+    ready_for_research_universe BOOLEAN NOT NULL,
+    payload_hash TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    UNIQUE (source_snapshot_id, classification_version)
+);
+CREATE INDEX IF NOT EXISTS idx_security_universe_classification_captured
+ON security_universe_classification_snapshots(captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_security_universe_classification_scope
+ON security_universe_classification_snapshots(
+    market, observation_date DESC, classification_version
+);
 """
 
 _STOCK_PICKER_FACTOR_EVALUATION_TABLE_SQL = """

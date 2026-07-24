@@ -575,6 +575,42 @@ async def compare_security_universe_snapshots(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.get("/security-universe-classifications/coverage")
+async def get_security_universe_classification_coverage(
+    market: Optional[Literal["US", "HK", "CN"]] = None,
+):
+    try:
+        service = get_security_universe_snapshot_service()
+        return await asyncio.to_thread(
+            service.get_classification_coverage,
+            market,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("获取证券目录分类覆盖失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/security-universe-classifications/{source_snapshot_id}")
+async def get_security_universe_classification(source_snapshot_id: str):
+    try:
+        classification = await asyncio.to_thread(
+            get_security_universe_snapshot_service().get_classification,
+            source_snapshot_id,
+        )
+        if classification is None:
+            raise HTTPException(status_code=404, detail="证券目录分类快照不存在")
+        return classification
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.error("获取证券目录分类快照失败: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.get("/security-universe-snapshots/{snapshot_id}")
 async def get_security_universe_snapshot(snapshot_id: str):
     try:

@@ -227,6 +227,62 @@ def is_market_trading_day(
     }
 
 
+def get_security_static_info(
+    symbols: Iterable[str],
+) -> List[Dict[str, Any]]:
+    """Load classification fields exposed by Longbridge static_info."""
+    symbol_list = _symbols(symbols)
+    if not symbol_list:
+        return []
+
+    try:
+        with _context("quote") as context:
+            response = context.static_info(symbol_list)
+    except (ValueError, LongbridgeDependencyMissing, LongbridgeAPIError):
+        raise
+    except Exception as exc:
+        raise LongbridgeAPIError(
+            f"获取证券静态分类信息失败: {exc}"
+        ) from exc
+
+    items = []
+    requested = set(symbol_list)
+    for value in list(response or []):
+        symbol = str(getattr(value, "symbol", "") or "").strip().upper()
+        if not symbol or symbol not in requested:
+            continue
+        board_value = getattr(value, "board", None)
+        board_raw = (
+            board_value
+            if isinstance(board_value, str)
+            else getattr(board_value, "__name__", None)
+            or getattr(board_value, "name", None)
+            or str(board_value or "")
+        )
+        lot_size = getattr(value, "lot_size", None)
+        try:
+            normalized_lot_size = (
+                int(lot_size) if lot_size is not None else None
+            )
+        except (TypeError, ValueError):
+            normalized_lot_size = None
+        if normalized_lot_size is not None and normalized_lot_size <= 0:
+            normalized_lot_size = None
+        items.append({
+            "symbol": symbol,
+            "board": _enum_name(board_value),
+            "board_raw": str(board_raw).strip() or None,
+            "exchange": str(
+                getattr(value, "exchange", "") or ""
+            ).strip(),
+            "currency": str(
+                getattr(value, "currency", "") or ""
+            ).strip().upper(),
+            "lot_size": normalized_lot_size,
+        })
+    return items
+
+
 def get_security_tradeability(
     symbols: Iterable[str],
     include_depth: bool = False,
