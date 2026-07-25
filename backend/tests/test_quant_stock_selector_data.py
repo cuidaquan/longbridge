@@ -55,6 +55,7 @@ def _record(
 ) -> ProductMetadata:
     return ProductMetadata(
         symbol=symbol,
+        raw_asset_class=asset.value,
         asset_class=asset,
         exchange="NASDAQ",
         exposure_direction=direction,
@@ -63,6 +64,8 @@ def _record(
         effective_to=None,
         source="licensed-vendor",
         source_version="2026-07-24",
+        captured_at="2026-07-24T20:05:00.000Z",
+        mapping_version="asset-map-v1",
     )
 
 
@@ -125,6 +128,8 @@ def _metadata() -> tuple[ProductMetadataBatch, dict[str, list[str]]]:
         data_as_of=DATA_AS_OF.isoformat(),
         source="licensed-vendor",
         source_version="2026-07-24",
+        captured_at="2026-07-24T20:05:00.000Z",
+        mapping_version="asset-map-v1",
         license="internal-research-license",
         refresh_cadence="daily",
         historical_semantics="point_in_time",
@@ -457,6 +462,18 @@ class QuantSourceBundleTests(unittest.TestCase):
             if item.snapshot_kind == "product_metadata"
         )
         self.assertLess(metadata_snapshot.payload["catalog_coverage"], 0.95)
+
+    def test_future_product_metadata_is_rejected_as_lookahead(self):
+        self.metadata_provider.batch = ProductMetadataBatch(**{
+            **self.batch.__dict__,
+            "captured_at": "2026-07-24T20:06:00.000Z",
+        })
+
+        with self.assertRaisesRegex(
+            QuantSourceBundleError,
+            "captured_at cannot exceed bundle captured_at",
+        ):
+            self._provider(_bundle(self.samples)).capture()
 
     def test_completely_missing_catalog_metadata_fails_capture(self):
         bundle = _bundle(self.samples)

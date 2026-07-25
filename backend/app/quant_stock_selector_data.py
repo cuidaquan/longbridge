@@ -359,6 +359,14 @@ class JsonQuantRunInputProvider:
             [*catalog_symbols, *validation_symbols],
             data_as_of=data_as_of,
         )
+        metadata_captured_at = _datetime(
+            metadata_batch.captured_at,
+            field="product_metadata.captured_at",
+        )
+        if metadata_captured_at > captured_at:
+            raise QuantSourceBundleError(
+                "product metadata captured_at cannot exceed bundle captured_at"
+            )
         metadata_gate = evaluate_product_metadata_gate(
             metadata_batch,
             validation_samples,

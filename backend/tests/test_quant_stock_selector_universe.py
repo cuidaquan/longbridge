@@ -13,6 +13,7 @@ from app.quant_stock_selector_metadata import (
     ExposureDirection,
     JsonProductMetadataProvider,
     ProductMetadata,
+    ProductMetadataBatch,
     ProductMetadataError,
     PRODUCT_METADATA_SCHEMA_VERSION,
     REQUIRED_VALIDATION_CATEGORIES,
@@ -108,6 +109,7 @@ def _metadata(
         )
     return ProductMetadata(
         symbol=symbol,
+        raw_asset_class=asset_class.value,
         asset_class=asset_class,
         exchange=exchange,
         exposure_direction=direction,
@@ -116,6 +118,8 @@ def _metadata(
         effective_to=None,
         source="licensed-vendor",
         source_version="2026-07-24",
+        captured_at="2026-07-24T20:05:00.000Z",
+        mapping_version="asset-map-v1",
     )
 
 
@@ -209,6 +213,8 @@ class ProductMetadataProviderTests(unittest.TestCase):
             "schema_version": PRODUCT_METADATA_SCHEMA_VERSION,
             "source": "licensed-vendor",
             "source_version": "2026-07-24",
+            "captured_at": "2026-07-24T20:05:00Z",
+            "mapping_version": "asset-map-v1",
             "license": "internal-research-license",
             "refresh_cadence": "daily",
             "historical_semantics": "point_in_time",
@@ -252,6 +258,8 @@ class ProductMetadataProviderTests(unittest.TestCase):
             ],
         }
         payload.update(overrides)
+        for item in payload.get("items", []):
+            item.setdefault("raw_asset_class", item.get("asset_class"))
         self.path.write_text(json.dumps(payload), encoding="utf-8")
 
     def test_load_selects_point_in_time_records_and_preserves_inverse_context(self) -> None:
@@ -267,6 +275,9 @@ class ProductMetadataProviderTests(unittest.TestCase):
         self.assertEqual(inverse.asset_class, AssetClass.EQUITY_ETF)
         self.assertEqual(inverse.exposure_direction, ExposureDirection.INVERSE)
         self.assertEqual(inverse.leverage, 3.0)
+        self.assertEqual(inverse.raw_asset_class, "equity_etf")
+        self.assertEqual(inverse.captured_at, "2026-07-24T20:05:00.000Z")
+        self.assertEqual(inverse.mapping_version, "asset-map-v1")
         self.assertTrue(inverse.eligible)
         self.assertEqual(batch.missing_symbols, ("MISSING.US",))
         self.assertEqual(len(batch.payload_hash), 64)
@@ -291,6 +302,8 @@ class ProductMetadataProviderTests(unittest.TestCase):
     def test_missing_governance_and_overlapping_records_fail_closed(self) -> None:
         cases = (
             {"license": ""},
+            {"captured_at": ""},
+            {"mapping_version": ""},
             {"historical_semantics": "latest_only"},
             {
                 "items": [
@@ -323,6 +336,18 @@ class ProductMetadataProviderTests(unittest.TestCase):
                         ["AAA.US"],
                         data_as_of=DATA_AS_OF,
                     )
+
+    def test_raw_vendor_asset_class_is_required_per_record(self) -> None:
+        self._write()
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        payload["items"][0]["raw_asset_class"] = ""
+        self.path.write_text(json.dumps(payload), encoding="utf-8")
+
+        with self.assertRaisesRegex(ProductMetadataError, "raw_asset_class"):
+            JsonProductMetadataProvider(self.path).load(
+                ["AAA.US"],
+                data_as_of=DATA_AS_OF,
+            )
 
     def test_common_stock_cannot_be_disguised_as_leveraged_product(self) -> None:
         self._write(items=[{
@@ -388,6 +413,20 @@ class ProductMetadataProviderTests(unittest.TestCase):
             "common_stock:insufficient_samples",
             blocked["failures"],
         )
+
+        incomplete_batch = ProductMetadataBatch(**{
+            **batch.__dict__,
+            "mapping_version": "",
+        })
+        incomplete = evaluate_product_metadata_gate(incomplete_batch, samples)
+        self.assertFalse(incomplete["ready"])
+        self.assertIn(
+            "batch_evidence:mapping_version_missing",
+            incomplete["failures"],
+        )
+        self.assertTrue(any(
+            "evidence_missing:" in failure for failure in incomplete["failures"]
+        ))
 
 
 class HardFilterTests(unittest.TestCase):

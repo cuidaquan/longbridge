@@ -12,7 +12,7 @@ from typing import Any, Mapping, Protocol, Sequence
 from .quant_stock_selector_hashing import canonical_sha256
 
 
-PRODUCT_METADATA_SCHEMA_VERSION = "quant-selector-product-metadata-v1"
+PRODUCT_METADATA_SCHEMA_VERSION = "quant-selector-product-metadata-v2"
 REQUIRED_VALIDATION_CATEGORIES = (
     "common_stock",
     "broad_equity_etf",
@@ -60,6 +60,7 @@ ELIGIBLE_ASSET_CLASSES = frozenset({
 @dataclass(frozen=True)
 class ProductMetadata:
     symbol: str
+    raw_asset_class: str
     asset_class: AssetClass
     exchange: str
     exposure_direction: ExposureDirection
@@ -68,6 +69,8 @@ class ProductMetadata:
     effective_to: str | None
     source: str
     source_version: str
+    captured_at: str
+    mapping_version: str
 
     @property
     def eligible(self) -> bool:
@@ -85,6 +88,8 @@ class ProductMetadataBatch:
     data_as_of: str
     source: str
     source_version: str
+    captured_at: str
+    mapping_version: str
     license: str
     refresh_cadence: str
     historical_semantics: str
@@ -95,8 +100,10 @@ class ProductMetadataBatch:
     def to_manifest(self) -> dict[str, Any]:
         return {
             "data_as_of": self.data_as_of,
+            "captured_at": self.captured_at,
             "historical_semantics": self.historical_semantics,
             "license": self.license,
+            "mapping_version": self.mapping_version,
             "missing_symbols": list(self.missing_symbols),
             "payload_hash": self.payload_hash,
             "record_count": len(self.records),
@@ -124,6 +131,29 @@ def evaluate_product_metadata_gate(
     """Validate the design's ten-category implementation gate."""
     failures = []
     category_results = {}
+
+    try:
+        normalized_captured_at = _as_timestamp(
+            batch.captured_at,
+            field="captured_at",
+        )
+    except ProductMetadataError:
+        normalized_captured_at = None
+        failures.append("batch_evidence:captured_at_invalid")
+    if not str(batch.mapping_version or "").strip():
+        failures.append("batch_evidence:mapping_version_missing")
+
+    def has_complete_evidence(record: ProductMetadata) -> bool:
+        return (
+            bool(str(record.raw_asset_class or "").strip())
+            and bool(str(record.source or "").strip())
+            and bool(str(record.source_version or "").strip())
+            and record.captured_at == normalized_captured_at
+            and bool(str(record.mapping_version or "").strip())
+            and record.mapping_version == batch.mapping_version
+            and record.source == batch.source
+            and record.source_version == batch.source_version
+        )
 
     def matches(category: str, record: ProductMetadata) -> bool:
         if category == "common_stock":
@@ -185,6 +215,8 @@ def evaluate_product_metadata_gate(
                 category_failures.append(f"missing:{symbol}")
             elif not matches(category, record):
                 category_failures.append(f"mismatch:{symbol}")
+            elif not has_complete_evidence(record):
+                category_failures.append(f"evidence_missing:{symbol}")
         category_results[category] = {
             "failures": category_failures,
             "passed": not category_failures,
@@ -200,6 +232,7 @@ def evaluate_product_metadata_gate(
         "minimum_samples_per_category": (
             MINIMUM_VALIDATION_SAMPLES_PER_CATEGORY
         ),
+        "mapping_version": batch.mapping_version,
         "ready": not failures,
         "required_categories": list(REQUIRED_VALIDATION_CATEGORIES),
         "schema_version": PRODUCT_METADATA_SCHEMA_VERSION,
@@ -227,6 +260,28 @@ def _as_date(value: Any, *, field: str) -> date:
         return date.fromisoformat(text)
     except ValueError as exc:
         raise ProductMetadataError(f"{field} must be an ISO date") from exc
+
+
+def _as_timestamp(value: Any, *, field: str) -> str:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = str(value or "").strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ProductMetadataError(
+                f"{field} must be an ISO timezone-aware timestamp"
+            ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ProductMetadataError(
+            f"{field} must be an ISO timezone-aware timestamp"
+        )
+    return parsed.astimezone(timezone.utc).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
 
 
 def _required_text(payload: Mapping[str, Any], field: str) -> str:
@@ -281,6 +336,8 @@ class JsonProductMetadataProvider:
             raise ProductMetadataError("unsupported product metadata schema_version")
         source = _required_text(payload, "source")
         source_version = _required_text(payload, "source_version")
+        captured_at = _as_timestamp(payload.get("captured_at"), field="captured_at")
+        mapping_version = _required_text(payload, "mapping_version")
         license_name = _required_text(payload, "license")
         refresh_cadence = _required_text(payload, "refresh_cadence")
         historical_semantics = _required_text(payload, "historical_semantics")
@@ -345,6 +402,7 @@ class JsonProductMetadataProvider:
                 )
             record = ProductMetadata(
                 symbol=symbol,
+                raw_asset_class=_required_text(raw, "raw_asset_class"),
                 asset_class=asset_class,
                 exchange=_required_text(raw, "exchange").upper(),
                 exposure_direction=exposure,
@@ -355,6 +413,8 @@ class JsonProductMetadataProvider:
                 ),
                 source=source,
                 source_version=source_version,
+                captured_at=captured_at,
+                mapping_version=mapping_version,
             )
             records_by_symbol.setdefault(symbol, []).append(record)
 
@@ -382,8 +442,10 @@ class JsonProductMetadataProvider:
         missing = tuple(symbol for symbol in requested if symbol not in selected)
         hash_payload = {
             "data_as_of": data_as_of,
+            "captured_at": captured_at,
             "historical_semantics": historical_semantics,
             "license": license_name,
+            "mapping_version": mapping_version,
             "missing_symbols": list(missing),
             "records": [selected[symbol].to_dict() for symbol in sorted(selected)],
             "refresh_cadence": refresh_cadence,
@@ -396,6 +458,8 @@ class JsonProductMetadataProvider:
             data_as_of=data_as_of.isoformat(),
             source=source,
             source_version=source_version,
+            captured_at=captured_at,
+            mapping_version=mapping_version,
             license=license_name,
             refresh_cadence=refresh_cadence,
             historical_semantics=historical_semantics,

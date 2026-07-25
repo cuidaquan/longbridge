@@ -351,8 +351,11 @@ class QuantSelectionQualityService:
         return (
             isinstance(metadata, Mapping)
             and metadata.get("asset_class") in {"common_stock", "equity_etf"}
+            and bool(str(metadata.get("raw_asset_class") or "").strip())
             and bool(str(metadata.get("source") or "").strip())
             and bool(str(metadata.get("source_version") or "").strip())
+            and bool(str(metadata.get("captured_at") or "").strip())
+            and bool(str(metadata.get("mapping_version") or "").strip())
         )
 
     @staticmethod

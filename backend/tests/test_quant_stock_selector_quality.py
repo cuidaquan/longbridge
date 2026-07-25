@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import json
 import unittest
 
 import duckdb
@@ -28,6 +29,30 @@ class _ConnectionFactory:
 
 
 class QuantSelectionQualityTests(unittest.TestCase):
+    def test_product_scope_evidence_requires_raw_mapping_and_capture_fields(self):
+        complete = {
+            "metadata": {
+                "asset_class": "common_stock",
+                "raw_asset_class": "Common Stock",
+                "source": "licensed-metadata",
+                "source_version": "2026-07-24",
+                "captured_at": "2026-07-24T20:05:00.000Z",
+                "mapping_version": "asset-map-v1",
+            }
+        }
+        self.assertTrue(
+            QuantSelectionQualityService._has_product_scope_evidence(complete)
+        )
+        for field in ("raw_asset_class", "captured_at", "mapping_version"):
+            with self.subTest(field=field):
+                incomplete = json.loads(json.dumps(complete))
+                incomplete["metadata"][field] = ""
+                self.assertFalse(
+                    QuantSelectionQualityService._has_product_scope_evidence(
+                        incomplete
+                    )
+                )
+
     def setUp(self) -> None:
         self.factory = _ConnectionFactory()
         self.addCleanup(self.factory.close)
@@ -120,10 +145,13 @@ class QuantSelectionQualityTests(unittest.TestCase):
             "symbol": "AAA.US",
             "metadata": {
                 "asset_class": "equity_etf",
+                "raw_asset_class": "ETF",
                 "exposure_direction": "unknown",
                 "leverage": None,
                 "source": "licensed-metadata",
                 "source_version": "2026-07-24",
+                "captured_at": "2026-07-24T20:05:00.000Z",
+                "mapping_version": "asset-map-v1",
             },
             "hard_filters": {
                 f"H{index}": {"status": "pass"} for index in range(1, 12)
