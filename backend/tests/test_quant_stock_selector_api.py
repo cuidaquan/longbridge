@@ -7,7 +7,10 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.quant_stock_selector_service import QuantSelectionRunNotFound
-from app.routers.quant_stock_selector import configure_quant_selection_service
+from app.routers.quant_stock_selector import (
+    configure_quant_selection_evaluation_service,
+    configure_quant_selection_service,
+)
 
 
 def _run(run_id="qsr_test", status="queued", **overrides):
@@ -100,15 +103,37 @@ class _Service:
             raise QuantSelectionRunNotFound(run_id) from exc
 
 
+class _EvaluationService:
+    def __init__(self) -> None:
+        self.run_calls = []
+
+    def run(self, *, persist=True):
+        self.run_calls.append(persist)
+        return {
+            "id": 1,
+            "evaluation_version": "quant-selector-effect-v1",
+            "ready": False,
+            "gate": {"ready": False, "reasons": ["insufficient_completed_run_dates"]},
+            "coverage": {"distinct_completed_run_dates": 1},
+            "metrics": None,
+        }
+
+    def get_history(self, limit=20):
+        return [{"id": 1, "ready": False, "limit": limit}]
+
+
 class QuantStockSelectorApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = _Service()
+        self.evaluation_service = _EvaluationService()
         configure_quant_selection_service(self.service)
+        configure_quant_selection_evaluation_service(self.evaluation_service)
         self.client = TestClient(app)
 
     def tearDown(self) -> None:
         self.client.close()
         configure_quant_selection_service(None)
+        configure_quant_selection_evaluation_service(None)
 
     def test_create_accepts_only_force_refresh_and_runs_in_background(self) -> None:
         response = self.client.post(
@@ -186,6 +211,34 @@ class QuantStockSelectorApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 503)
         self.assertIn("产品元数据", response.json()["detail"])
+
+    def test_fixed_evaluation_and_history_contracts(self) -> None:
+        evaluation = self.client.post(
+            "/api/quant-stock-selector/evaluation",
+            json={},
+        )
+        self.assertEqual(evaluation.status_code, 200)
+        self.assertFalse(evaluation.json()["ready"])
+        self.assertEqual(self.evaluation_service.run_calls, [True])
+
+        invalid = self.client.post(
+            "/api/quant-stock-selector/evaluation",
+            json={"bootstrap_samples": 10},
+        )
+        self.assertEqual(invalid.status_code, 422)
+
+        history = self.client.get("/api/quant-stock-selector/evaluations?limit=7")
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(history.json()["items"][0]["limit"], 7)
+
+    def test_unconfigured_evaluation_fails_closed(self) -> None:
+        configure_quant_selection_evaluation_service(None)
+        response = self.client.post(
+            "/api/quant-stock-selector/evaluation",
+            json={},
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("总回报价格", response.json()["detail"])
 
 
 if __name__ == "__main__":

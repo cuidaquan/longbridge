@@ -173,6 +173,7 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_QUANT_SELECTION_CANDIDATE_TABLE_SQL)
     conn.execute(_QUANT_SELECTION_INPUT_SNAPSHOT_TABLE_SQL)
     conn.execute(_QUANT_SELECTION_AI_SNAPSHOT_TABLE_SQL)
+    conn.execute(_QUANT_SELECTION_EVALUATION_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_SCAN_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_AUTO_CAPTURE_RUN_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_SNAPSHOT_TABLE_SQL)
@@ -877,6 +878,23 @@ CREATE TABLE IF NOT EXISTS quant_selection_ai_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_quant_selection_ai_snapshots_run
 ON quant_selection_ai_snapshots(run_id, request_status, symbol);
+"""
+
+_QUANT_SELECTION_EVALUATION_TABLE_SQL = """
+CREATE SEQUENCE IF NOT EXISTS quant_selection_evaluation_seq START 1;
+CREATE TABLE IF NOT EXISTS quant_selection_evaluations (
+    id INTEGER PRIMARY KEY DEFAULT nextval('quant_selection_evaluation_seq'),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    evaluation_version TEXT NOT NULL,
+    parameters TEXT NOT NULL,
+    result TEXT NOT NULL,
+    ready BOOLEAN NOT NULL,
+    data_as_of DATE,
+    outcome_snapshot_hash TEXT NOT NULL,
+    outcome_snapshot TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_quant_selection_evaluations_created
+ON quant_selection_evaluations(created_at DESC, id DESC);
 """
 
 _STOCK_PICKER_FACTOR_EVALUATION_TABLE_SQL = """

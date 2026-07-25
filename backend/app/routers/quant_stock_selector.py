@@ -11,6 +11,11 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
+from ..quant_stock_selector_evaluation import (
+    JsonQuantOutcomeProvider,
+    QuantOutcomeError,
+    QuantSelectionEvaluationService,
+)
 from ..quant_stock_selector_service import (
     TERMINAL_STATUSES,
     QuantSelectionRunConflict,
@@ -32,7 +37,12 @@ class CreateQuantSelectionRunRequest(BaseModel):
     force_refresh: bool = False
 
 
+class RunQuantSelectionEvaluationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 _service: QuantSelectionService | None = None
+_evaluation_service: QuantSelectionEvaluationService | None = None
 
 
 def configure_quant_selection_service(
@@ -41,6 +51,14 @@ def configure_quant_selection_service(
     """Install the runtime service after its gated data providers are ready."""
     global _service
     _service = service
+
+
+def configure_quant_selection_evaluation_service(
+    service: QuantSelectionEvaluationService | None,
+) -> None:
+    """Install the outcome evaluation service for tests or runtime overrides."""
+    global _evaluation_service
+    _evaluation_service = service
 
 
 def get_quant_selection_service() -> QuantSelectionService:
@@ -62,6 +80,35 @@ def get_quant_selection_service() -> QuantSelectionService:
                 ),
             ) from exc
     return _service
+
+
+def get_quant_selection_evaluation_service(
+    *, require_outcome: bool = True,
+) -> QuantSelectionEvaluationService:
+    global _evaluation_service
+    if _evaluation_service is None:
+        from ..config import get_settings
+
+        settings = get_settings()
+        _evaluation_service = QuantSelectionEvaluationService(
+            (
+                JsonQuantOutcomeProvider(settings.quant_selector_outcome_bundle_path)
+                if settings.quant_selector_outcome_bundle_path is not None
+                else None
+            )
+        )
+    if (
+        require_outcome
+        and getattr(_evaluation_service, "outcome_provider", object()) is None
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "量化优选效果评估数据源尚未就绪：需要配置经验证的总回报价格、"
+                "NYSE 交易日历及退市结算数据包"
+            ),
+        )
+    return _evaluation_service
 
 
 def _public_run(run: dict) -> dict:
@@ -119,6 +166,32 @@ def get_latest():
     payload = service.repository.get_results(run["run_id"])
     payload["run"] = _public_run(payload["run"])
     return payload
+
+
+@router.post("/evaluation")
+async def run_evaluation(_payload: RunQuantSelectionEvaluationRequest):
+    service = get_quant_selection_evaluation_service()
+    try:
+        return await asyncio.to_thread(service.run, persist=True)
+    except QuantOutcomeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("quant selection evaluation failed")
+        raise HTTPException(status_code=500, detail="量化优选效果评估失败") from exc
+
+
+@router.get("/evaluations")
+async def list_evaluations(limit: int = Query(default=20, ge=1, le=100)):
+    service = get_quant_selection_evaluation_service(require_outcome=False)
+    try:
+        return {
+            "items": await asyncio.to_thread(service.get_history, limit)
+        }
+    except Exception as exc:
+        logger.exception("loading quant selection evaluations failed")
+        raise HTTPException(status_code=500, detail="获取量化优选效果评估历史失败") from exc
 
 
 @router.get("/runs/{run_id}")
