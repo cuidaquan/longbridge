@@ -536,6 +536,12 @@ class QuantUniverseSelector:
                         symbol,
                         "nbbo_unresolved",
                     )
+                    state["filters"]["H8"] = _filter(
+                        "unresolved",
+                        state["nbbo_error"],
+                    )
+                    state["filters"]["H10"] = _filter("not_evaluated")
+                    state["exclusion_reasons"].append(state["nbbo_error"])
                     state["selection_status"] = "nbbo_unresolved"
                     unresolved.append(state)
                     continue
@@ -549,6 +555,9 @@ class QuantUniverseSelector:
                 state["spread_bps"] = spread_bps
                 if quote_status == "unresolved":
                     state["nbbo_error"] = reason
+                    state["filters"]["H8"] = _filter("unresolved", reason)
+                    state["filters"]["H10"] = _filter("not_evaluated")
+                    state["exclusion_reasons"].append(reason)
                     state["selection_status"] = "nbbo_unresolved"
                     unresolved.append(state)
                     continue
@@ -598,6 +607,24 @@ class QuantUniverseSelector:
             pending + unresolved,
             policy=self.policy,
         )
+        if not boundary_proven:
+            elapsed = self.monotonic() - started
+            pending_reason = (
+                "nbbo_deadline_exceeded"
+                if elapsed >= self.policy.deadline_seconds
+                else "nbbo_budget_exhausted"
+                if request_units >= self.policy.max_nbbo_request_units
+                else "nbbo_boundary_unproven"
+            )
+            for state in pending:
+                state["nbbo_error"] = pending_reason
+                state["filters"]["H8"] = _filter(
+                    "unresolved",
+                    pending_reason,
+                )
+                state["filters"]["H10"] = _filter("not_evaluated")
+                state["exclusion_reasons"].append(pending_reason)
+                state["selection_status"] = "nbbo_not_evaluated"
         ranked = sorted(selected, key=_quant_rank_key)
         top_states = ranked[: self.policy.top_n] if boundary_proven else []
         top_symbols = {

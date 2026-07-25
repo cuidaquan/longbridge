@@ -26,7 +26,7 @@ def _run(run_id="qsr_test", status="queued", **overrides):
         "universe_version": "quant-selector-universe-v1.1",
         "filter_version": "quant-selector-filter-v1.1",
         "score_version": "quant-selector-score-v1.1",
-        "prompt_version": "quant-selector-ai-prompt-v1.1",
+        "prompt_version": "quant-selector-ai-prompt-v1",
         "model_policy_version": "quant-selector-deepseek-flash-v1",
         "model_alias": "deepseek-v4-flash",
         "resolved_model_id": None,

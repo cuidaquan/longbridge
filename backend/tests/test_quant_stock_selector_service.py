@@ -283,6 +283,38 @@ class QuantSelectionServiceTests(unittest.TestCase):
         self.assertEqual(len(results["candidates"]), 2)
         self.assertEqual(provider.complete_calls, 1)
 
+    def test_display_scores_are_rounded_without_changing_hash_inputs(self) -> None:
+        captured = _captured()
+        candidate = captured.quant_selection["candidates"][0]
+        candidate["quant_score"].update({
+            "total": 90.123456789,
+            "liquidity": 24.123456789,
+            "trend": 23.987654321,
+        })
+        captured.ai_contexts["AAA.US"].quant_score.update(
+            candidate["quant_score"]
+        )
+        service, _provider = self._service(captured)
+
+        result = service.execute_run(service.create_run()["run_id"])
+        persisted = self.repository.get_results(result["run_id"])
+        aaa = next(
+            item for item in persisted["candidates"]
+            if item["symbol"] == "AAA.US"
+        )
+
+        self.assertEqual(aaa["quant_score"]["total"], 90.123457)
+        self.assertEqual(aaa["quant_score"]["liquidity"], 24.123457)
+        self.assertEqual(aaa["quant_score"]["trend"], 23.987654)
+        self.assertEqual(aaa["result"]["quant_score"], 90.123457)
+        self.assertEqual(aaa["result"]["ai_score"], 90.0)
+        self.assertEqual(aaa["result"]["final_score"], 90.08642)
+        raw_candidate = next(
+            item for item in result["quant_manifest"]["candidates"]
+            if item["symbol"] == "AAA.US"
+        )
+        self.assertEqual(raw_candidate["quant_score"]["total"], 90.123456789)
+
     def test_cache_reuse_keeps_new_run_identity_and_new_snapshots(self) -> None:
         service, provider = self._service(_captured())
         first = service.create_run()

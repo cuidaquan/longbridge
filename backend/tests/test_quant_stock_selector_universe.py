@@ -599,6 +599,9 @@ class QuantUniverseSelectionTests(unittest.TestCase):
         self.assertEqual(result["unresolved_symbols"], ["AAA.US"])
         self.assertEqual(result["ai_candidate_symbols"], [])
         self.assertEqual(result["nbbo_request_units"], 2)
+        candidate = result["candidates"][0]
+        self.assertEqual(candidate["hard_filters"]["H8"]["status"], "unresolved")
+        self.assertIn("rate_limited", candidate["exclusion_reasons"])
 
     def test_retry_can_resolve_transient_provider_failure(self) -> None:
         provider = _FakeNbboProvider({
@@ -671,6 +674,15 @@ class QuantUniverseSelectionTests(unittest.TestCase):
         self.assertEqual(result["nbbo_request_units"], 20)
         self.assertEqual(result["ai_candidate_symbols"], [])
         self.assertFalse(result["boundary_proven"])
+        pending = [
+            item for item in result["candidates"]
+            if item["selection_status"] == "nbbo_not_evaluated"
+        ]
+        self.assertEqual(len(pending), 11)
+        self.assertTrue(all(
+            "nbbo_budget_exhausted" in item["exclusion_reasons"]
+            for item in pending
+        ))
 
     def test_low_upper_bound_candidates_need_no_nbbo_call(self) -> None:
         provider = _FakeNbboProvider()

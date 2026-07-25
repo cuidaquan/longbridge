@@ -239,7 +239,16 @@ def _bundle(samples, *, include_quote=True, quote_timestamp="2026-07-24T19:59:00
                 "unadjusted_bars": spy_bars,
             },
         },
-        "nbbo": {"source": "licensed-batch-nbbo", "quotes": quotes},
+        "nbbo": {
+            "source": "licensed-batch-nbbo",
+            "source_version": "2026-07-24",
+            "license": "internal-research-license",
+            "authorization_constraints": "research-only",
+            "historical_semantics": "point_in_time",
+            "max_batch_size": 50,
+            "qps_limit": 10,
+            "quotes": quotes,
+        },
     }
 
 
@@ -322,6 +331,148 @@ class QuantSourceBundleTests(unittest.TestCase):
         self.assertFalse(captured.required_inputs_complete)
         self.assertEqual(captured.quant_selection["ai_candidate_symbols"], [])
         self.assertEqual(captured.quant_selection["unresolved_symbols"], ["AAA.US"])
+        aaa = next(
+            item for item in captured.quant_selection["candidates"]
+            if item["symbol"] == "AAA.US"
+        )
+        self.assertEqual(aaa["hard_filters"]["H8"]["status"], "unresolved")
+        self.assertIn("provider_missing_symbol", aaa["exclusion_reasons"])
+
+    def test_news_is_point_in_time_filtered_deduplicated_and_limited(self):
+        bundle = _bundle(self.samples)
+        news_items = [
+            {
+                "title": f"News {index}",
+                "source": "Wire",
+                "published_at": (
+                    CAPTURED_AT - timedelta(hours=index + 1)
+                ).isoformat(),
+                "summary": f"Summary {index}",
+            }
+            for index in range(12)
+        ]
+        news_items.extend(
+            [
+                {
+                    "title": "  NEWS 0 ",
+                    "source": "wire",
+                    "published_at": (
+                        CAPTURED_AT - timedelta(minutes=30)
+                    ).isoformat(),
+                    "summary": "Newer duplicate",
+                },
+                {
+                    "title": "Future",
+                    "source": "Wire",
+                    "published_at": (
+                        CAPTURED_AT + timedelta(minutes=1)
+                    ).isoformat(),
+                    "summary": "Must not leak",
+                },
+                {
+                    "title": "Old",
+                    "source": "Wire",
+                    "published_at": (
+                        CAPTURED_AT - timedelta(days=8)
+                    ).isoformat(),
+                    "summary": "Outside window",
+                },
+            ]
+        )
+        bundle["market_data"]["AAA.US"]["news"]["news_items"] = news_items
+
+        captured = self._provider(bundle).capture()
+        items = captured.ai_contexts["AAA.US"].news_snapshot["news_items"]
+
+        self.assertEqual(len(items), 10)
+        self.assertEqual(items[0]["summary"], "Newer duplicate")
+        self.assertNotIn("Future", {item["title"] for item in items})
+        self.assertNotIn("Old", {item["title"] for item in items})
+
+    def test_nbbo_governance_fields_fail_closed(self):
+        for field in (
+            "source_version",
+            "license",
+            "authorization_constraints",
+            "historical_semantics",
+            "max_batch_size",
+            "qps_limit",
+        ):
+            with self.subTest(field=field):
+                bundle = _bundle(self.samples)
+                bundle["nbbo"].pop(field)
+                with self.assertRaises(QuantSourceBundleError):
+                    self._provider(bundle).capture()
+
+    def test_provider_batch_limit_is_respected(self):
+        bundle = _bundle(self.samples)
+        aaa = bundle["market_data"]["AAA.US"]
+        bundle["catalog"].append(
+            {
+                "symbol": "BBB.US",
+                "name": "BBB",
+                "market": "US",
+                "exchange": "NASDAQ",
+            }
+        )
+        bundle["market_data"]["BBB.US"] = json.loads(json.dumps(aaa))
+        bundle["nbbo"]["quotes"]["BBB.US"] = {
+            **bundle["nbbo"]["quotes"]["AAA.US"],
+        }
+        bundle["nbbo"]["max_batch_size"] = 1
+        records = dict(self.batch.records)
+        records["BBB.US"] = _record(
+            "BBB.US",
+            AssetClass.COMMON_STOCK,
+            ExposureDirection.NOT_APPLICABLE,
+        )
+        self.metadata_provider.batch = ProductMetadataBatch(
+            **{**self.batch.__dict__, "records": records}
+        )
+
+        captured = self._provider(bundle).capture()
+
+        self.assertEqual(captured.quant_selection["nbbo_batch_calls"], 2)
+        self.assertEqual(captured.quant_selection["status"], "completed")
+
+    def test_low_metadata_coverage_makes_capture_partial(self):
+        bundle = _bundle(self.samples)
+        bundle["catalog"].append(
+            {
+                "symbol": "MISSING.US",
+                "name": "Missing",
+                "market": "US",
+                "exchange": "NASDAQ",
+            }
+        )
+        captured = self._provider(bundle).capture()
+
+        self.assertFalse(captured.required_inputs_complete)
+        self.assertIn(
+            "product_metadata_catalog_coverage_below_slo",
+            captured.errors,
+        )
+        metadata_snapshot = next(
+            item for item in captured.input_snapshots
+            if item.snapshot_kind == "product_metadata"
+        )
+        self.assertLess(metadata_snapshot.payload["catalog_coverage"], 0.95)
+
+    def test_completely_missing_catalog_metadata_fails_capture(self):
+        bundle = _bundle(self.samples)
+        bundle["catalog"] = [
+            {
+                "symbol": "MISSING.US",
+                "name": "Missing",
+                "market": "US",
+                "exchange": "NASDAQ",
+            }
+        ]
+        with self.assertRaisesRegex(
+            QuantSourceBundleError,
+            "metadata is unavailable",
+        ):
+            self._provider(bundle).capture()
 
     def test_stale_quote_is_deterministic_hard_filter_failure(self):
         captured = self._provider(_bundle(

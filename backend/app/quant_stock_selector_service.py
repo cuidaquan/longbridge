@@ -82,6 +82,34 @@ def _json(value: Any) -> str:
     return canonical_json(value)
 
 
+def _display_score(value: Any) -> float | None:
+    if value is None:
+        return None
+    return round(float(value), 6)
+
+
+def _candidate_display_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    payload = json.loads(_json(value))
+    quant_score = payload.get("quant_score")
+    if isinstance(quant_score, dict):
+        for key in (
+            "total",
+            "liquidity",
+            "trend",
+            "relative_strength",
+            "momentum",
+            "risk",
+        ):
+            if key in quant_score:
+                quant_score[key] = _display_score(quant_score[key])
+    result = payload.get("result")
+    if isinstance(result, dict):
+        for key in ("quant_score", "ai_score", "final_score"):
+            if key in result:
+                result[key] = _display_score(result[key])
+    return payload
+
+
 def _row_dict(cursor: Any, row: Sequence[Any] | None) -> dict[str, Any] | None:
     if row is None:
         return None
@@ -293,7 +321,7 @@ class QuantSelectionRunRepository:
             connection.execute("BEGIN TRANSACTION")
             try:
                 for raw in quant_selection.get("candidates", []):
-                    candidate = json.loads(_json(raw))
+                    candidate = _candidate_display_payload(raw)
                     symbol = normalize_symbol(candidate["symbol"])
                     score = candidate.get("quant_score") or {}
                     connection.execute(
@@ -311,7 +339,7 @@ class QuantSelectionRunRepository:
                             candidate["candidate_quant_input_hash"],
                             canonical_sha256(candidate),
                             _json(candidate),
-                            score.get("total"),
+                            _display_score(score.get("total")),
                             ranks.get(symbol),
                             bool(candidate.get("selected_for_ai")),
                         ],
@@ -390,6 +418,7 @@ class QuantSelectionRunRepository:
                 }
                 if item is not None:
                     payload["result"] = json.loads(_json(item))
+                payload = _candidate_display_payload(payload)
                 connection.execute(
                     """
                     UPDATE quant_selection_candidates
@@ -400,8 +429,8 @@ class QuantSelectionRunRepository:
                     [
                         _json(payload),
                         canonical_sha256(payload),
-                        item.get("ai_score") if item else None,
-                        item.get("final_score") if item else None,
+                        _display_score(item.get("ai_score")) if item else None,
+                        _display_score(item.get("final_score")) if item else None,
                         final_ranks.get(symbol) if completed_run else None,
                         completed_run and symbol in final_ranks,
                         run_id,

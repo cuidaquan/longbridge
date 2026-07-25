@@ -17,7 +17,7 @@ from .quant_stock_selector_metadata import normalize_symbol
 from .stock_picker_ai_snapshots import sanitize_error
 
 
-AI_PROMPT_VERSION = "quant-selector-ai-prompt-v1.1"
+AI_PROMPT_VERSION = "quant-selector-ai-prompt-v1"
 AI_INPUT_SCHEMA_VERSION = "quant-selector-ai-input-v1"
 AI_OUTPUT_SCHEMA_VERSION = "quant-selector-ai-output-v1"
 MODEL_POLICY_VERSION = "quant-selector-deepseek-flash-v1"
