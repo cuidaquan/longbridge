@@ -9,6 +9,7 @@ const VALID_TABS = new Set<TabType>([
   "ai-trading",
   "smart-position",
   "stock-picker",
+  "quant-selector",
   "sector-rotation",
   "strategy-watch",
   "monitoring",

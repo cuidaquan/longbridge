@@ -8,6 +8,7 @@ const PositionKLinesPage = lazy(() => import("./pages/PositionKLines"));
 const SmartPositionPage = lazy(() => import("./pages/SmartPosition"));
 const AiTradingPage = lazy(() => import("./pages/AiTrading"));
 const StockPickerPage = lazy(() => import("./pages/StockPicker"));
+const QuantStockSelectorPage = lazy(() => import("./pages/QuantStockSelector"));
 const SectorRotationPage = lazy(() => import("./pages/SectorRotation"));
 
 function renderPage(activeTab: TabType) {
@@ -18,6 +19,8 @@ function renderPage(activeTab: TabType) {
       return <SmartPositionPage />;
     case "stock-picker":
       return <StockPickerPage />;
+    case "quant-selector":
+      return <QuantStockSelectorPage />;
     case "sector-rotation":
       return <SectorRotationPage />;
     case "strategy-watch":

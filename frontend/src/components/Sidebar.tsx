@@ -2,6 +2,7 @@ import {
   SmartToy,
   Calculate,
   FilterList,
+  QueryStats,
   Whatshot,
   Visibility,
   MonitorHeart,
@@ -18,6 +19,7 @@ export type TabType =
   | "ai-trading"
   | "smart-position"
   | "stock-picker"
+  | "quant-selector"
   | "sector-rotation"
   | "strategy-watch"
   | "monitoring"
@@ -47,6 +49,7 @@ const navGroups: NavGroup[] = [
     title: "分析工具",
     items: [
       { id: "stock-picker", label: "智能选股", icon: <FilterList /> },
+      { id: "quant-selector", label: "量化优选", icon: <QueryStats /> },
       { id: "sector-rotation", label: "板块轮动", icon: <Whatshot /> },
       { id: "strategy-watch", label: "策略盯盘", icon: <Visibility /> },
     ],
@@ -89,6 +92,7 @@ export default function Sidebar({
       <button
         key={item.id}
         onClick={() => onTabChange(item.id)}
+        aria-label={item.label}
         aria-current={isActive ? "page" : undefined}
         className={`
           w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium
