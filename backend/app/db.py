@@ -169,6 +169,10 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_SECURITY_UNIVERSE_TRADEABILITY_SNAPSHOT_TABLE_SQL)
     conn.execute(_MARKET_BAR_SNAPSHOT_TABLE_SQL)
     conn.execute(_MARKET_BAR_SNAPSHOT_ROWS_TABLE_SQL)
+    conn.execute(_QUANT_SELECTION_RUN_TABLE_SQL)
+    conn.execute(_QUANT_SELECTION_CANDIDATE_TABLE_SQL)
+    conn.execute(_QUANT_SELECTION_INPUT_SNAPSHOT_TABLE_SQL)
+    conn.execute(_QUANT_SELECTION_AI_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_SCAN_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_AUTO_CAPTURE_RUN_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_SNAPSHOT_TABLE_SQL)
@@ -762,6 +766,117 @@ CREATE TABLE IF NOT EXISTS market_bar_snapshot_rows (
 );
 CREATE INDEX IF NOT EXISTS idx_market_bar_snapshot_rows_time
 ON market_bar_snapshot_rows(snapshot_id, ts);
+"""
+
+_QUANT_SELECTION_RUN_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS quant_selection_runs (
+    run_id TEXT PRIMARY KEY,
+    runtime_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    force_refresh BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    data_as_of DATE,
+    universe_version TEXT NOT NULL,
+    filter_version TEXT NOT NULL,
+    score_version TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    model_policy_version TEXT NOT NULL,
+    model_alias TEXT NOT NULL,
+    resolved_model_id TEXT,
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    ai_planned_count INTEGER NOT NULL DEFAULT 0,
+    ai_completed_count INTEGER NOT NULL DEFAULT 0,
+    final_count INTEGER NOT NULL DEFAULT 0,
+    error_summary TEXT NOT NULL DEFAULT '[]',
+    quant_manifest TEXT,
+    run_manifest TEXT,
+    quant_input_hash TEXT,
+    run_input_hash TEXT,
+    cache_key TEXT,
+    reused_from_run_id TEXT,
+    CHECK (status IN (
+        'queued', 'loading_universe', 'scoring_quant', 'analyzing_ai',
+        'completed', 'partial', 'failed', 'cancelled'
+    )),
+    CHECK (candidate_count >= 0),
+    CHECK (ai_planned_count >= 0),
+    CHECK (ai_completed_count >= 0),
+    CHECK (final_count >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_quant_selection_runs_created
+ON quant_selection_runs(created_at DESC, run_id DESC);
+CREATE INDEX IF NOT EXISTS idx_quant_selection_runs_cache
+ON quant_selection_runs(cache_key, status, completed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_quant_selection_runs_latest
+ON quant_selection_runs(status, completed_at DESC);
+"""
+
+_QUANT_SELECTION_CANDIDATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS quant_selection_candidates (
+    run_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    selection_status TEXT NOT NULL,
+    candidate_quant_input_hash TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    quant_score DOUBLE,
+    ai_score DOUBLE,
+    final_score DOUBLE,
+    quant_rank INTEGER,
+    final_rank INTEGER,
+    selected_for_ai BOOLEAN NOT NULL DEFAULT FALSE,
+    final_selected BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (run_id, symbol),
+    CHECK (quant_rank IS NULL OR quant_rank > 0),
+    CHECK (final_rank IS NULL OR final_rank > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_quant_selection_candidates_result
+ON quant_selection_candidates(run_id, final_selected, final_rank, symbol);
+"""
+
+_QUANT_SELECTION_INPUT_SNAPSHOT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS quant_selection_input_snapshots (
+    run_id TEXT NOT NULL,
+    snapshot_id TEXT NOT NULL,
+    snapshot_kind TEXT NOT NULL,
+    symbol TEXT,
+    source TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    captured_at TIMESTAMPTZ NOT NULL,
+    data_as_of TIMESTAMPTZ NOT NULL,
+    payload_hash TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    PRIMARY KEY (run_id, snapshot_id)
+);
+CREATE INDEX IF NOT EXISTS idx_quant_selection_input_snapshots_run
+ON quant_selection_input_snapshots(run_id, snapshot_kind, symbol);
+"""
+
+_QUANT_SELECTION_AI_SNAPSHOT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS quant_selection_ai_snapshots (
+    run_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    request_status TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    ai_input_hash TEXT NOT NULL,
+    input_snapshot TEXT NOT NULL,
+    raw_output TEXT,
+    raw_attempt_outputs TEXT NOT NULL,
+    parsed_output TEXT,
+    model_alias TEXT NOT NULL,
+    resolved_model_id TEXT,
+    prompt_version TEXT NOT NULL,
+    model_policy_version TEXT NOT NULL,
+    error TEXT,
+    reused_from_run_id TEXT,
+    PRIMARY KEY (run_id, symbol),
+    CHECK (request_status IN ('completed', 'failed', 'reused')),
+    CHECK (attempts >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_quant_selection_ai_snapshots_run
+ON quant_selection_ai_snapshots(run_id, request_status, symbol);
 """
 
 _STOCK_PICKER_FACTOR_EVALUATION_TABLE_SQL = """

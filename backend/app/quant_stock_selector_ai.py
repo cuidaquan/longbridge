@@ -97,6 +97,9 @@ class AICompletionProvider(Protocol):
     model_alias: str
     temperature: float
 
+    def resolve_model_id(self) -> str:
+        ...
+
     def complete(
         self,
         *,
@@ -131,6 +134,20 @@ class DeepSeekQuantSelectorProvider:
             timeout=25.0,
             max_retries=0,
         )
+
+    def resolve_model_id(self) -> str:
+        """Resolve the configured alias before cache lookup and AI calls."""
+        model = run_external_call(
+            "ai",
+            "quant_selector_resolve_model",
+            self.client.models.retrieve,
+            self.model_alias,
+            retry_if=lambda _error: False,
+        )
+        resolved = str(getattr(model, "id", None) or "").strip()
+        if not resolved:
+            raise AIDecisionError("DeepSeek did not return an immutable model ID")
+        return resolved
 
     def complete(
         self,

@@ -439,6 +439,33 @@ class AISelectionServiceTests(unittest.TestCase):
 
 
 class DeepSeekProviderTests(unittest.TestCase):
+    def test_provider_resolves_immutable_model_id_without_retry(self) -> None:
+        client = MagicMock()
+        model = MagicMock()
+        model.id = "deepseek-v4-flash-20260701"
+        with (
+            patch("app.quant_stock_selector_ai.OpenAI", return_value=client),
+            patch(
+                "app.quant_stock_selector_ai.run_external_call",
+                return_value=model,
+            ) as external_call,
+        ):
+            provider = DeepSeekQuantSelectorProvider("secret-key")
+            resolved = provider.resolve_model_id()
+
+        self.assertEqual(resolved, "deepseek-v4-flash-20260701")
+        self.assertEqual(
+            external_call.call_args.args[:2],
+            ("ai", "quant_selector_resolve_model"),
+        )
+        self.assertIs(
+            external_call.call_args.args[2],
+            client.models.retrieve,
+        )
+        self.assertFalse(
+            external_call.call_args.kwargs["retry_if"](RuntimeError("test"))
+        )
+
     def test_provider_uses_json_mode_and_disables_runtime_retry(self) -> None:
         client = MagicMock()
         response = MagicMock()
