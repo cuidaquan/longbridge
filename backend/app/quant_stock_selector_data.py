@@ -35,7 +35,7 @@ from .quant_stock_selector_universe import (
 )
 
 
-SOURCE_BUNDLE_SCHEMA_VERSION = "quant-selector-source-bundle-v1"
+SOURCE_BUNDLE_SCHEMA_VERSION = "quant-selector-source-bundle-v2"
 MINIMUM_PRODUCT_METADATA_COVERAGE = 0.95
 NEWS_LOOKBACK_DAYS = 7
 NEWS_LIMIT = 10
@@ -336,6 +336,72 @@ class JsonQuantRunInputProvider:
         )
         if official_close.date() != data_as_of:
             raise QuantSourceBundleError("official_close date must equal data_as_of")
+        exchange_calendar = _mapping(
+            payload.get("exchange_calendar"),
+            field="exchange_calendar",
+        )
+        calendar_source = _required_text(
+            exchange_calendar,
+            "source",
+            field="exchange_calendar.source",
+        )
+        _required_text(
+            exchange_calendar,
+            "source_version",
+            field="exchange_calendar.source_version",
+        )
+        _required_text(
+            exchange_calendar,
+            "license",
+            field="exchange_calendar.license",
+        )
+        if exchange_calendar.get("historical_semantics") != "point_in_time":
+            raise QuantSourceBundleError(
+                "exchange_calendar.historical_semantics must be point_in_time"
+            )
+        if str(exchange_calendar.get("market_calendar") or "").strip().upper() != "XNYS":
+            raise QuantSourceBundleError(
+                "exchange_calendar.market_calendar must be XNYS"
+            )
+        if _date(
+            exchange_calendar.get("session_date"),
+            field="exchange_calendar.session_date",
+        ) != data_as_of:
+            raise QuantSourceBundleError(
+                "exchange_calendar.session_date must equal data_as_of"
+            )
+        calendar_open = _datetime(
+            exchange_calendar.get("official_open"),
+            field="exchange_calendar.official_open",
+        )
+        calendar_close = _datetime(
+            exchange_calendar.get("official_close"),
+            field="exchange_calendar.official_close",
+        )
+        calendar_captured_at = _datetime(
+            exchange_calendar.get("captured_at"),
+            field="exchange_calendar.captured_at",
+        )
+        if calendar_open >= calendar_close:
+            raise QuantSourceBundleError(
+                "exchange_calendar official_open must precede official_close"
+            )
+        if calendar_close != official_close:
+            raise QuantSourceBundleError(
+                "official_close must match exchange_calendar.official_close"
+            )
+        if str(exchange_calendar.get("session_status") or "").strip().lower() != "completed":
+            raise QuantSourceBundleError(
+                "exchange_calendar.session_status must be completed"
+            )
+        if exchange_calendar.get("is_latest_completed_session") is not True:
+            raise QuantSourceBundleError(
+                "exchange_calendar must identify the latest completed session"
+            )
+        if calendar_captured_at < calendar_close or calendar_captured_at > captured_at:
+            raise QuantSourceBundleError(
+                "exchange_calendar captured_at is outside the valid capture window"
+            )
         catalog = [
             dict(_mapping(item, field="catalog item"))
             for item in _sequence(payload.get("catalog"), field="catalog")
@@ -534,6 +600,14 @@ class JsonQuantRunInputProvider:
                 captured_at=captured_at,
                 data_as_of=official_close,
                 payload=catalog,
+            ),
+            CapturedInputSnapshot(
+                snapshot_kind="exchange_calendar",
+                source=calendar_source,
+                schema_version=SOURCE_BUNDLE_SCHEMA_VERSION,
+                captured_at=calendar_captured_at,
+                data_as_of=official_close,
+                payload=exchange_calendar,
             ),
             CapturedInputSnapshot(
                 snapshot_kind="product_metadata",

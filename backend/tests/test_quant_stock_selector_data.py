@@ -196,6 +196,19 @@ def _bundle(samples, *, include_quote=True, quote_timestamp="2026-07-24T19:59:00
         "captured_at": CAPTURED_AT.isoformat(),
         "data_as_of": DATA_AS_OF.isoformat(),
         "official_close": "2026-07-24T20:00:00Z",
+        "exchange_calendar": {
+            "source": "licensed-nyse-calendar",
+            "source_version": "2026-07-24",
+            "license": "internal-research-license",
+            "historical_semantics": "point_in_time",
+            "market_calendar": "XNYS",
+            "session_date": DATA_AS_OF.isoformat(),
+            "official_open": "2026-07-24T13:30:00Z",
+            "official_close": "2026-07-24T20:00:00Z",
+            "session_status": "completed",
+            "is_latest_completed_session": True,
+            "captured_at": "2026-07-24T20:01:00Z",
+        },
         "catalog_source": "longbridge-usmain",
         "tradeability_source": "longbridge-quote",
         "bar_source": "longbridge-history",
@@ -325,6 +338,15 @@ class QuantSourceBundleTests(unittest.TestCase):
             if item.snapshot_kind == "market_bar_reference"
         ]
         self.assertEqual(len(bar_refs), 4)
+        calendar = next(
+            item for item in captured.input_snapshots
+            if item.snapshot_kind == "exchange_calendar"
+        )
+        self.assertEqual(calendar.source, "licensed-nyse-calendar")
+        self.assertEqual(
+            calendar.payload["official_close"],
+            "2026-07-24T20:00:00Z",
+        )
         self.assertIn("AAA.US", self.metadata_provider.requested)
         self.assertIn(self.samples["unit"][0], self.metadata_provider.requested)
 
@@ -408,6 +430,47 @@ class QuantSourceBundleTests(unittest.TestCase):
                 bundle["nbbo"].pop(field)
                 with self.assertRaises(QuantSourceBundleError):
                     self._provider(bundle).capture()
+
+    def test_exchange_calendar_governance_and_close_must_be_verified(self):
+        cases = (
+            ("source", None),
+            ("source_version", None),
+            ("license", None),
+            ("historical_semantics", "latest_only"),
+            ("market_calendar", "NASDAQ"),
+            ("session_status", "scheduled"),
+            ("is_latest_completed_session", False),
+            ("official_close", "2026-07-24T17:00:00Z"),
+            ("captured_at", "2026-07-24T19:59:00Z"),
+        )
+        for field, value in cases:
+            with self.subTest(field=field):
+                bundle = _bundle(self.samples)
+                if value is None:
+                    bundle["exchange_calendar"].pop(field)
+                else:
+                    bundle["exchange_calendar"][field] = value
+                with self.assertRaises(QuantSourceBundleError):
+                    self._provider(bundle).capture()
+
+    def test_verified_early_close_moves_nbbo_window(self):
+        bundle = _bundle(
+            self.samples,
+            quote_timestamp="2026-07-24T16:59:00Z",
+        )
+        bundle["official_close"] = "2026-07-24T17:00:00Z"
+        bundle["exchange_calendar"].update({
+            "official_close": "2026-07-24T17:00:00Z",
+            "captured_at": "2026-07-24T17:01:00Z",
+        })
+
+        captured = self._provider(bundle).capture()
+
+        self.assertEqual(captured.quant_selection["status"], "completed")
+        self.assertEqual(
+            captured.quant_selection["official_close"],
+            "2026-07-24T17:00:00.000Z",
+        )
 
     def test_provider_batch_limit_is_respected(self):
         bundle = _bundle(self.samples)
