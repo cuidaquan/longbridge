@@ -22,6 +22,7 @@ from ..quant_stock_selector_service import (
     QuantSelectionRunNotFound,
     QuantSelectionService,
 )
+from ..quant_stock_selector_quality import QuantSelectionQualityService
 
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class RunQuantSelectionEvaluationRequest(BaseModel):
 
 _service: QuantSelectionService | None = None
 _evaluation_service: QuantSelectionEvaluationService | None = None
+_quality_service: QuantSelectionQualityService | None = None
 
 
 def configure_quant_selection_service(
@@ -59,6 +61,20 @@ def configure_quant_selection_evaluation_service(
     """Install the outcome evaluation service for tests or runtime overrides."""
     global _evaluation_service
     _evaluation_service = service
+
+
+def configure_quant_selection_quality_service(
+    service: QuantSelectionQualityService | None,
+) -> None:
+    global _quality_service
+    _quality_service = service
+
+
+def get_quant_selection_quality_service() -> QuantSelectionQualityService:
+    global _quality_service
+    if _quality_service is None:
+        _quality_service = QuantSelectionQualityService()
+    return _quality_service
 
 
 def get_quant_selection_service() -> QuantSelectionService:
@@ -166,6 +182,17 @@ def get_latest():
     payload = service.repository.get_results(run["run_id"])
     payload["run"] = _public_run(payload["run"])
     return payload
+
+
+@router.get("/quality")
+def get_quality(limit: int = Query(default=100, ge=1, le=1000)):
+    try:
+        return get_quant_selection_quality_service().report(limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("loading quant selection quality report failed")
+        raise HTTPException(status_code=500, detail="获取量化优选运行质量失败") from exc
 
 
 @router.post("/evaluation")

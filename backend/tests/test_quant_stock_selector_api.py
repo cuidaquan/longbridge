@@ -9,6 +9,7 @@ from app.main import app
 from app.quant_stock_selector_service import QuantSelectionRunNotFound
 from app.routers.quant_stock_selector import (
     configure_quant_selection_evaluation_service,
+    configure_quant_selection_quality_service,
     configure_quant_selection_service,
 )
 
@@ -122,18 +123,35 @@ class _EvaluationService:
         return [{"id": 1, "ready": False, "limit": limit}]
 
 
+class _QualityService:
+    def __init__(self) -> None:
+        self.limits = []
+
+    def report(self, *, limit=100):
+        self.limits.append(limit)
+        return {
+            "quality_report_version": "quant-selector-quality-v1",
+            "ready": False,
+            "sample": {"terminal_runs": 1},
+            "metrics": {"ai_completion_rate": {"value": 1.0}},
+        }
+
+
 class QuantStockSelectorApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = _Service()
         self.evaluation_service = _EvaluationService()
+        self.quality_service = _QualityService()
         configure_quant_selection_service(self.service)
         configure_quant_selection_evaluation_service(self.evaluation_service)
+        configure_quant_selection_quality_service(self.quality_service)
         self.client = TestClient(app)
 
     def tearDown(self) -> None:
         self.client.close()
         configure_quant_selection_service(None)
         configure_quant_selection_evaluation_service(None)
+        configure_quant_selection_quality_service(None)
 
     def test_create_accepts_only_force_refresh_and_runs_in_background(self) -> None:
         response = self.client.post(
@@ -230,6 +248,16 @@ class QuantStockSelectorApiTests(unittest.TestCase):
         history = self.client.get("/api/quant-stock-selector/evaluations?limit=7")
         self.assertEqual(history.status_code, 200)
         self.assertEqual(history.json()["items"][0]["limit"], 7)
+
+    def test_quality_report_contract(self) -> None:
+        response = self.client.get("/api/quant-stock-selector/quality?limit=25")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["quality_report_version"],
+            "quant-selector-quality-v1",
+        )
+        self.assertEqual(self.quality_service.limits, [25])
 
     def test_unconfigured_evaluation_fails_closed(self) -> None:
         configure_quant_selection_evaluation_service(None)
