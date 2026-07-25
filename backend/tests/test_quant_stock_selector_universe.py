@@ -516,6 +516,28 @@ class QuantUniverseSelectionTests(unittest.TestCase):
             f"S{index:03d}.US" for index in range(30)
         ])
         self.assertEqual(len(result["selection_manifest_hash"]), 64)
+        manifest = result["selection_manifest"]
+        manifest_records = {
+            item["symbol"]: item for item in manifest["candidates"]
+        }
+        selected = manifest_records["S000.US"]
+        self.assertEqual(selected["final_rank"], 1)
+        self.assertEqual(selected["final_q"], result["quant_ranking"][0]["q"])
+        self.assertEqual(selected["stable_sort_key"], {
+            "median_turnover_20d_desc": 100_000_000.0,
+            "q_desc": result["quant_ranking"][0]["q"],
+            "symbol_asc": "S000.US",
+        })
+        self.assertTrue(selected["nbbo_queried"])
+        self.assertIsNone(selected["prune_reason"])
+        proof = manifest["boundary_proof"]
+        self.assertTrue(proof["proven"])
+        self.assertEqual(proof["frontier"]["kind"], "top_n_stable_sort_key")
+        self.assertEqual(proof["frontier"]["symbol_asc"], "S029.US")
+        self.assertEqual(
+            [item["symbol_asc"] for item in proof["obstacles"]],
+            ["S030.US", "S031.US"],
+        )
         pruned = {
             item["symbol"]: item for item in result["candidates"]
         }["S030.US"]
@@ -524,6 +546,13 @@ class QuantUniverseSelectionTests(unittest.TestCase):
             "quant_upper_bound_below_frontier",
         )
         self.assertEqual(pruned["hard_filters"]["H8"]["status"], "not_evaluated")
+        manifest_pruned = manifest_records["S030.US"]
+        self.assertFalse(manifest_pruned["nbbo_queried"])
+        self.assertIsNone(manifest_pruned["final_q"])
+        self.assertEqual(
+            manifest_pruned["prune_reason"],
+            "quant_upper_bound_below_frontier",
+        )
 
     def test_stock_and_inverse_etf_receive_same_score_and_ranking_contract(self) -> None:
         candidates = [
@@ -654,6 +683,16 @@ class QuantUniverseSelectionTests(unittest.TestCase):
             "quant_upper_bound_below_frontier",
         )
         self.assertEqual(low["nbbo_error"], "timeout")
+        manifest_low = {
+            item["symbol"]: item
+            for item in result["selection_manifest"]["candidates"]
+        }["ZZZ.US"]
+        self.assertTrue(manifest_low["nbbo_queried"])
+        self.assertIsNone(manifest_low["final_q"])
+        self.assertEqual(
+            manifest_low["prune_reason"],
+            "quant_upper_bound_below_frontier",
+        )
 
     def test_budget_exhaustion_cannot_publish_unproven_top_30(self) -> None:
         candidates = [
@@ -683,6 +722,17 @@ class QuantUniverseSelectionTests(unittest.TestCase):
             "nbbo_budget_exhausted" in item["exclusion_reasons"]
             for item in pending
         ))
+        manifest = result["selection_manifest"]
+        self.assertFalse(manifest["boundary_proof"]["proven"])
+        self.assertEqual(len(manifest["boundary_proof"]["obstacles"]), 11)
+        pending_manifest = [
+            item for item in manifest["candidates"]
+            if item["selection_status"] == "nbbo_not_evaluated"
+        ]
+        self.assertTrue(all(
+            not item["nbbo_queried"] and item["prune_reason"] is None
+            for item in pending_manifest
+        ))
 
     def test_low_upper_bound_candidates_need_no_nbbo_call(self) -> None:
         provider = _FakeNbboProvider()
@@ -698,6 +748,17 @@ class QuantUniverseSelectionTests(unittest.TestCase):
         self.assertEqual(
             record["selection_status"],
             "quant_upper_bound_below_threshold",
+        )
+        manifest_record = result["selection_manifest"]["candidates"][0]
+        self.assertFalse(manifest_record["nbbo_queried"])
+        self.assertIsNone(manifest_record["final_q"])
+        self.assertEqual(
+            manifest_record["prune_reason"],
+            "quant_upper_bound_below_threshold",
+        )
+        self.assertEqual(
+            result["selection_manifest"]["boundary_proof"]["frontier"],
+            {"kind": "q_threshold", "q_minimum": 65.0},
         )
 
     def test_input_order_does_not_change_selection_manifest(self) -> None:

@@ -424,6 +424,7 @@ class QuantUniverseSelector:
                 "q_upper_bound": None,
                 "quant_score": None,
                 "nbbo": None,
+                "nbbo_queried": False,
                 "spread_bps": None,
                 "selection_status": (
                     "hard_filter_failed" if reasons else "pending_nbbo"
@@ -489,6 +490,8 @@ class QuantUniverseSelector:
                     normalize_symbol(item["candidate"].symbol)
                     for item in attempt_states
                 ]
+                for state in attempt_states:
+                    state["nbbo_queried"] = True
                 request_units += len(symbols)
                 batch_calls += 1
                 try:
@@ -607,6 +610,7 @@ class QuantUniverseSelector:
             pending + unresolved,
             policy=self.policy,
         )
+        boundary_obstacles = list(pending + unresolved)
         if not boundary_proven:
             elapsed = self.monotonic() - started
             pending_reason = (
@@ -670,6 +674,7 @@ class QuantUniverseSelector:
                 "name": candidate.name,
                 "nbbo": quote.to_dict() if quote is not None else None,
                 "nbbo_error": state["nbbo_error"],
+                "nbbo_queried": state["nbbo_queried"],
                 "price_data_as_of": _date_value(candidate.price_data_as_of),
                 "quant_input_schema": "quant-selector-candidate-input-v1",
                 "symbol": symbol,
@@ -705,16 +710,71 @@ class QuantUniverseSelector:
             }
             for index, item in enumerate(ranked)
         ]
+        ranking_by_symbol = {item["symbol"]: item for item in ranking}
+        manifest_candidates = []
+        for item in candidate_payloads:
+            rank_item = ranking_by_symbol.get(item["symbol"])
+            selection_status = item["selection_status"]
+            manifest_candidates.append({
+                "final_q": rank_item["q"] if rank_item is not None else None,
+                "final_rank": (
+                    rank_item["rank"] if rank_item is not None else None
+                ),
+                "nbbo_queried": item["nbbo_queried"],
+                "prune_reason": (
+                    selection_status
+                    if selection_status in {
+                        "quant_upper_bound_below_frontier",
+                        "quant_upper_bound_below_threshold",
+                    }
+                    else None
+                ),
+                "q_upper_bound": item["q_upper_bound"],
+                "selection_status": selection_status,
+                "stable_sort_key": {
+                    "median_turnover_20d_desc": (
+                        rank_item["median_turnover_20d"]
+                        if rank_item is not None else None
+                    ),
+                    "q_desc": rank_item["q"] if rank_item is not None else None,
+                    "symbol_asc": item["symbol"],
+                },
+                "symbol": item["symbol"],
+            })
+
+        if len(ranked) >= self.policy.top_n:
+            frontier_item = ranking[self.policy.top_n - 1]
+            frontier = {
+                "kind": "top_n_stable_sort_key",
+                "median_turnover_20d_desc": frontier_item["median_turnover_20d"],
+                "q_desc": frontier_item["q"],
+                "symbol_asc": frontier_item["symbol"],
+            }
+        else:
+            frontier = {
+                "kind": "q_threshold",
+                "q_minimum": self.policy.q_threshold,
+            }
+        boundary_proof = {
+            "eligible_count": len(ranked),
+            "frontier": frontier,
+            "method": "quant-upper-bound-vs-stable-frontier-v1",
+            "obstacles": [
+                {
+                    "median_turnover_20d_desc": (
+                        item["candidate"].indicators.median_turnover_20d
+                    ),
+                    "q_upper_bound_desc": item["q_upper_bound"],
+                    "symbol_asc": normalize_symbol(item["candidate"].symbol),
+                }
+                for item in sorted(boundary_obstacles, key=_upper_rank_key)
+            ],
+            "proven": boundary_proven,
+        }
         selection_manifest = {
             "boundary_proven": boundary_proven,
-            "candidates": [
-                {
-                    "q_upper_bound": item["q_upper_bound"],
-                    "selection_status": item["selection_status"],
-                    "symbol": item["symbol"],
-                }
-                for item in candidate_payloads
-            ],
+            "boundary_proof": boundary_proof,
+            "candidates": manifest_candidates,
             "filter_version": FILTER_VERSION,
             "q_threshold": self.policy.q_threshold,
             "ranking": ranking,
