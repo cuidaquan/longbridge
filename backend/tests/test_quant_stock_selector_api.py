@@ -11,6 +11,7 @@ from app.routers.quant_stock_selector import (
     configure_quant_selection_evaluation_service,
     configure_quant_selection_quality_service,
     configure_quant_selection_service,
+    configure_quant_shadow_evaluation_service,
 )
 
 
@@ -137,14 +138,58 @@ class _QualityService:
         }
 
 
+class _ShadowRepository:
+    def __init__(self, owner) -> None:
+        self.owner = owner
+
+    def list(self, *, limit=20):
+        self.owner.limits.append(limit)
+        return list(self.owner.evaluations.values())
+
+    def get(self, shadow_id):
+        from app.quant_stock_selector_shadow import QuantShadowEvaluationError
+
+        try:
+            return self.owner.evaluations[shadow_id]
+        except KeyError as exc:
+            raise QuantShadowEvaluationError("shadow evaluation not found") from exc
+
+
+class _ShadowService:
+    def __init__(self) -> None:
+        self.evaluations = {}
+        self.executed = []
+        self.limits = []
+        self.repository = _ShadowRepository(self)
+
+    def start(self, source_run_id):
+        item = {
+            "shadow_id": "qse_1",
+            "source_run_id": source_run_id,
+            "status": "running",
+        }
+        self.evaluations[item["shadow_id"]] = item
+        return item
+
+    def execute(self, shadow_id):
+        self.executed.append(shadow_id)
+        self.evaluations[shadow_id] = {
+            **self.evaluations[shadow_id],
+            "status": "completed",
+        }
+        return self.evaluations[shadow_id]
+
+
 class QuantStockSelectorApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = _Service()
         self.evaluation_service = _EvaluationService()
         self.quality_service = _QualityService()
+        self.shadow_service = _ShadowService()
         configure_quant_selection_service(self.service)
         configure_quant_selection_evaluation_service(self.evaluation_service)
         configure_quant_selection_quality_service(self.quality_service)
+        configure_quant_shadow_evaluation_service(self.shadow_service)
         self.client = TestClient(app)
 
     def tearDown(self) -> None:
@@ -152,6 +197,7 @@ class QuantStockSelectorApiTests(unittest.TestCase):
         configure_quant_selection_service(None)
         configure_quant_selection_evaluation_service(None)
         configure_quant_selection_quality_service(None)
+        configure_quant_shadow_evaluation_service(None)
 
     def test_create_accepts_only_force_refresh_and_runs_in_background(self) -> None:
         response = self.client.post(
@@ -258,6 +304,34 @@ class QuantStockSelectorApiTests(unittest.TestCase):
             "quant-selector-quality-v1",
         )
         self.assertEqual(self.quality_service.limits, [25])
+
+    def test_shadow_evaluation_contracts(self) -> None:
+        created = self.client.post(
+            "/api/quant-stock-selector/shadow-evaluations",
+            json={"source_run_id": "qsr_source"},
+        )
+        self.assertEqual(created.status_code, 202)
+        self.assertEqual(created.json()["status"], "running")
+        self.assertEqual(self.shadow_service.executed, ["qse_1"])
+
+        detail = self.client.get(
+            "/api/quant-stock-selector/shadow-evaluations/qse_1"
+        )
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["status"], "completed")
+
+        history = self.client.get(
+            "/api/quant-stock-selector/shadow-evaluations?limit=7"
+        )
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(history.json()["items"][0]["shadow_id"], "qse_1")
+        self.assertEqual(self.shadow_service.limits, [7])
+
+        invalid = self.client.post(
+            "/api/quant-stock-selector/shadow-evaluations",
+            json={"source_run_id": "qsr_source", "model": "pro"},
+        )
+        self.assertEqual(invalid.status_code, 422)
 
     def test_unconfigured_evaluation_fails_closed(self) -> None:
         configure_quant_selection_evaluation_service(None)

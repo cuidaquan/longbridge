@@ -28,6 +28,23 @@ class Settings(BaseSettings):
     quant_selector_bundle_path: Optional[Path] = None
     quant_selector_product_metadata_path: Optional[Path] = None
     quant_selector_outcome_bundle_path: Optional[Path] = None
+    quant_selector_shadow_enabled: bool = False
+    quant_selector_shadow_pro_latency_budget_ms: Optional[float] = Field(
+        default=None,
+        gt=0,
+    )
+    quant_selector_shadow_pro_cost_budget_usd: Optional[float] = Field(
+        default=None,
+        gt=0,
+    )
+    quant_selector_shadow_pro_input_cost_per_million_usd: Optional[float] = Field(
+        default=None,
+        ge=0,
+    )
+    quant_selector_shadow_pro_output_cost_per_million_usd: Optional[float] = Field(
+        default=None,
+        ge=0,
+    )
     deepseek_base_url: str = "https://api.deepseek.com"
 
     def ensure_dirs(self) -> None:

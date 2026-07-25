@@ -174,6 +174,8 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_QUANT_SELECTION_INPUT_SNAPSHOT_TABLE_SQL)
     conn.execute(_QUANT_SELECTION_AI_SNAPSHOT_TABLE_SQL)
     conn.execute(_QUANT_SELECTION_EVALUATION_TABLE_SQL)
+    conn.execute(_QUANT_SELECTION_SHADOW_EVALUATION_TABLE_SQL)
+    conn.execute(_QUANT_SELECTION_SHADOW_OBSERVATION_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_SCAN_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_AUTO_CAPTURE_RUN_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_SNAPSHOT_TABLE_SQL)
@@ -895,6 +897,62 @@ CREATE TABLE IF NOT EXISTS quant_selection_evaluations (
 );
 CREATE INDEX IF NOT EXISTS idx_quant_selection_evaluations_created
 ON quant_selection_evaluations(created_at DESC, id DESC);
+"""
+
+_QUANT_SELECTION_SHADOW_EVALUATION_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS quant_selection_shadow_evaluations (
+    shadow_id TEXT PRIMARY KEY,
+    source_run_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    completed_at TIMESTAMPTZ,
+    flash_model_alias TEXT NOT NULL,
+    pro_model_alias TEXT NOT NULL,
+    flash_resolved_model_id TEXT,
+    pro_resolved_model_id TEXT,
+    paired_input_count INTEGER NOT NULL DEFAULT 0,
+    flash_completed_count INTEGER NOT NULL DEFAULT 0,
+    pro_completed_count INTEGER NOT NULL DEFAULT 0,
+    result TEXT,
+    error_summary TEXT NOT NULL DEFAULT '[]',
+    CHECK (status IN ('running', 'completed', 'partial', 'failed')),
+    CHECK (paired_input_count >= 0),
+    CHECK (flash_completed_count >= 0),
+    CHECK (pro_completed_count >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_quant_shadow_created
+ON quant_selection_shadow_evaluations(created_at DESC, shadow_id DESC);
+CREATE INDEX IF NOT EXISTS idx_quant_shadow_source
+ON quant_selection_shadow_evaluations(source_run_id, created_at DESC);
+"""
+
+_QUANT_SELECTION_SHADOW_OBSERVATION_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS quant_selection_shadow_observations (
+    shadow_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    model_role TEXT NOT NULL,
+    model_alias TEXT NOT NULL,
+    resolved_model_id TEXT,
+    production_ai_input_hash TEXT NOT NULL,
+    paired_input_hash TEXT NOT NULL,
+    request_status TEXT NOT NULL,
+    attempts INTEGER NOT NULL,
+    latency_ms DOUBLE NOT NULL,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    raw_attempt_outputs TEXT NOT NULL,
+    parsed_output TEXT,
+    error TEXT,
+    PRIMARY KEY (shadow_id, symbol, model_role),
+    CHECK (model_role IN ('flash', 'pro')),
+    CHECK (request_status IN ('completed', 'failed')),
+    CHECK (attempts >= 0),
+    CHECK (latency_ms >= 0),
+    CHECK (input_tokens IS NULL OR input_tokens >= 0),
+    CHECK (output_tokens IS NULL OR output_tokens >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_quant_shadow_observation
+ON quant_selection_shadow_observations(shadow_id, model_role, request_status);
 """
 
 _STOCK_PICKER_FACTOR_EVALUATION_TABLE_SQL = """

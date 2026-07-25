@@ -91,6 +91,8 @@ class AIDecisionError(ValueError):
 class AICompletion:
     raw_text: str
     resolved_model_id: str
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 class AICompletionProvider(Protocol):
@@ -177,6 +179,18 @@ class DeepSeekQuantSelectorProvider:
         return AICompletion(
             raw_text=raw_text,
             resolved_model_id=resolved_model,
+            input_tokens=(
+                int(response.usage.prompt_tokens)
+                if getattr(response, "usage", None) is not None
+                and getattr(response.usage, "prompt_tokens", None) is not None
+                else None
+            ),
+            output_tokens=(
+                int(response.usage.completion_tokens)
+                if getattr(response, "usage", None) is not None
+                and getattr(response.usage, "completion_tokens", None) is not None
+                else None
+            ),
         )
 
     def safe_error(self, error: Any) -> str:

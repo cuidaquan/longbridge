@@ -23,6 +23,11 @@ from ..quant_stock_selector_service import (
     QuantSelectionService,
 )
 from ..quant_stock_selector_quality import QuantSelectionQualityService
+from ..quant_stock_selector_shadow import (
+    QuantShadowEvaluationError,
+    QuantShadowEvaluationService,
+    build_configured_quant_shadow_service,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -42,9 +47,16 @@ class RunQuantSelectionEvaluationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class RunQuantShadowEvaluationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_run_id: str
+
+
 _service: QuantSelectionService | None = None
 _evaluation_service: QuantSelectionEvaluationService | None = None
 _quality_service: QuantSelectionQualityService | None = None
+_shadow_service: QuantShadowEvaluationService | None = None
 
 
 def configure_quant_selection_service(
@@ -75,6 +87,28 @@ def get_quant_selection_quality_service() -> QuantSelectionQualityService:
     if _quality_service is None:
         _quality_service = QuantSelectionQualityService()
     return _quality_service
+
+
+def configure_quant_shadow_evaluation_service(
+    service: QuantShadowEvaluationService | None,
+) -> None:
+    global _shadow_service
+    _shadow_service = service
+
+
+def get_quant_shadow_evaluation_service() -> QuantShadowEvaluationService:
+    global _shadow_service
+    if _shadow_service is None:
+        try:
+            _shadow_service = build_configured_quant_shadow_service()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Flash/Pro 影子评估未启用，或模型与成本预算尚未配置"
+                ),
+            ) from exc
+    return _shadow_service
 
 
 def get_quant_selection_service() -> QuantSelectionService:
@@ -151,6 +185,16 @@ async def _execute_run(service: QuantSelectionService, run_id: str) -> None:
         logger.exception("quant selection background run failed: %s", run_id)
 
 
+async def _execute_shadow(
+    service: QuantShadowEvaluationService,
+    shadow_id: str,
+) -> None:
+    try:
+        await asyncio.to_thread(service.execute, shadow_id)
+    except Exception:
+        logger.exception("quant selection shadow evaluation failed: %s", shadow_id)
+
+
 @router.post("/runs", status_code=202)
 async def create_run(
     payload: CreateQuantSelectionRunRequest,
@@ -193,6 +237,41 @@ def get_quality(limit: int = Query(default=100, ge=1, le=1000)):
     except Exception as exc:
         logger.exception("loading quant selection quality report failed")
         raise HTTPException(status_code=500, detail="获取量化优选运行质量失败") from exc
+
+
+@router.post("/shadow-evaluations", status_code=202)
+async def create_shadow_evaluation(
+    payload: RunQuantShadowEvaluationRequest,
+    background_tasks: BackgroundTasks,
+):
+    service = get_quant_shadow_evaluation_service()
+    try:
+        evaluation = service.start(payload.source_run_id)
+    except QuantShadowEvaluationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    background_tasks.add_task(
+        _execute_shadow,
+        service,
+        evaluation["shadow_id"],
+    )
+    return evaluation
+
+
+@router.get("/shadow-evaluations")
+def list_shadow_evaluations(
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    service = get_quant_shadow_evaluation_service()
+    return {"items": service.repository.list(limit=limit)}
+
+
+@router.get("/shadow-evaluations/{shadow_id}")
+def get_shadow_evaluation(shadow_id: str):
+    service = get_quant_shadow_evaluation_service()
+    try:
+        return service.repository.get(shadow_id)
+    except QuantShadowEvaluationError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/evaluation")
