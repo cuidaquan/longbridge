@@ -167,6 +167,8 @@ def _run_migrations(conn: DuckDBPyConnection) -> None:
     conn.execute(_SECURITY_UNIVERSE_SNAPSHOT_RUN_TABLE_SQL)
     conn.execute(_SECURITY_UNIVERSE_CLASSIFICATION_SNAPSHOT_TABLE_SQL)
     conn.execute(_SECURITY_UNIVERSE_TRADEABILITY_SNAPSHOT_TABLE_SQL)
+    conn.execute(_MARKET_BAR_SNAPSHOT_TABLE_SQL)
+    conn.execute(_MARKET_BAR_SNAPSHOT_ROWS_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_SCAN_SNAPSHOT_TABLE_SQL)
     conn.execute(_STOCK_SCREENER_AUTO_CAPTURE_RUN_TABLE_SQL)
     conn.execute(_STOCK_PICKER_RELIABILITY_SNAPSHOT_TABLE_SQL)
@@ -705,6 +707,61 @@ CREATE INDEX IF NOT EXISTS idx_security_universe_tradeability_scope
 ON security_universe_tradeability_snapshots(
     market, observation_date DESC, tradeability_version
 );
+"""
+
+_MARKET_BAR_SNAPSHOT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS market_bar_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    period TEXT NOT NULL,
+    adjust_type TEXT NOT NULL,
+    source TEXT NOT NULL,
+    captured_at TIMESTAMP NOT NULL,
+    data_as_of TIMESTAMP NOT NULL,
+    snapshot_version TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    row_count INTEGER NOT NULL,
+    UNIQUE (
+        symbol,
+        period,
+        adjust_type,
+        source,
+        data_as_of,
+        payload_hash
+    ),
+    CHECK (adjust_type IN ('forward_adjust', 'no_adjust')),
+    CHECK (row_count > 0)
+);
+CREATE INDEX IF NOT EXISTS idx_market_bar_snapshots_scope
+ON market_bar_snapshots(
+    symbol,
+    period,
+    adjust_type,
+    data_as_of DESC
+);
+"""
+
+_MARKET_BAR_SNAPSHOT_ROWS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS market_bar_snapshot_rows (
+    snapshot_id TEXT NOT NULL,
+    ts TIMESTAMP NOT NULL,
+    open DOUBLE NOT NULL,
+    high DOUBLE NOT NULL,
+    low DOUBLE NOT NULL,
+    close DOUBLE NOT NULL,
+    volume DOUBLE,
+    turnover DOUBLE,
+    PRIMARY KEY (snapshot_id, ts),
+    FOREIGN KEY (snapshot_id) REFERENCES market_bar_snapshots(snapshot_id),
+    CHECK (open > 0),
+    CHECK (high > 0),
+    CHECK (low > 0),
+    CHECK (close > 0),
+    CHECK (volume IS NULL OR volume >= 0),
+    CHECK (turnover IS NULL OR turnover >= 0)
+);
+CREATE INDEX IF NOT EXISTS idx_market_bar_snapshot_rows_time
+ON market_bar_snapshot_rows(snapshot_id, ts);
 """
 
 _STOCK_PICKER_FACTOR_EVALUATION_TABLE_SQL = """
