@@ -19,6 +19,7 @@ from .quant_stock_selector_ai import (
 )
 from .quant_stock_selector_hashing import canonical_json, canonical_sha256
 from .quant_stock_selector_metadata import normalize_symbol
+from .quant_stock_selector_snapshots import MarketBarSnapshotStore
 from .quant_stock_selector_universe import FILTER_VERSION
 from .runtime import get_runtime_metadata
 from .stock_picker_ai_snapshots import sanitize_error
@@ -567,7 +568,8 @@ class QuantSelectionRunRepository:
             with self.connection_factory() as connection:
                 inputs = connection.execute(
                     """
-                    SELECT source, schema_version, payload_hash, payload
+                    SELECT snapshot_kind, source, schema_version,
+                           payload_hash, payload
                     FROM quant_selection_input_snapshots WHERE run_id = ?
                     """,
                     [run_id],
@@ -593,7 +595,7 @@ class QuantSelectionRunRepository:
                         "schema_version": schema,
                         "payload_hash": digest,
                     }
-                    for source, schema, digest, _payload in inputs
+                    for _kind, source, schema, digest, _payload in inputs
                 ),
                 key=lambda item: (
                     item["source"], item["schema_version"], item["payload_hash"]
@@ -603,9 +605,19 @@ class QuantSelectionRunRepository:
                 return False
             if any(
                 canonical_sha256(json.loads(payload)) != digest
-                for _source, _schema, digest, payload in inputs
+                for _kind, _source, _schema, digest, payload in inputs
             ):
                 return False
+            market_store = MarketBarSnapshotStore(
+                connection_factory=self.connection_factory
+            )
+            for kind, _source, _schema, _digest, payload in inputs:
+                if kind != "market_bar_reference":
+                    continue
+                reference = json.loads(payload)
+                detail = market_store.get(str(reference.get("snapshot_id") or ""))
+                if detail["reference"] != reference.get("reference"):
+                    return False
             if len(candidates) != run["candidate_count"]:
                 return False
             if sum(bool(selected) for _digest, _payload, selected in candidates) != run["final_count"]:

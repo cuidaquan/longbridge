@@ -44,14 +44,23 @@ def configure_quant_selection_service(
 
 
 def get_quant_selection_service() -> QuantSelectionService:
+    global _service
     if _service is None:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "量化优选数据源尚未配置：需要通过产品元数据阶段 0 门禁，"
-                "并配置可用的批量 NBBO 提供方"
-            ),
-        )
+        try:
+            from ..quant_stock_selector_data import (
+                build_configured_quant_selection_service,
+            )
+
+            _service = build_configured_quant_selection_service()
+        except Exception as exc:
+            logger.warning("quant selection service is not ready: %s", exc)
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "量化优选数据源尚未就绪：需要通过产品元数据阶段 0 "
+                    "门禁，并配置版本化点时数据包与批量 NBBO"
+                ),
+            ) from exc
     return _service
 
 

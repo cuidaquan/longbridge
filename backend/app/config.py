@@ -25,6 +25,9 @@ class Settings(BaseSettings):
         ge=1.0,
         le=30.0,
     )
+    quant_selector_bundle_path: Optional[Path] = None
+    quant_selector_product_metadata_path: Optional[Path] = None
+    deepseek_base_url: str = "https://api.deepseek.com"
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
