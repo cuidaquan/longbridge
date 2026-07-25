@@ -19,7 +19,7 @@ function renderPage(activeTab: TabType) {
       return <SmartPositionPage />;
     case "stock-picker":
       return <StockPickerPage />;
-    case "quant-selector":
+    case "quant-stock-selector":
       return <QuantStockSelectorPage />;
     case "sector-rotation":
       return <SectorRotationPage />;

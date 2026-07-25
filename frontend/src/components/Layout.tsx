@@ -9,7 +9,7 @@ const VALID_TABS = new Set<TabType>([
   "ai-trading",
   "smart-position",
   "stock-picker",
-  "quant-selector",
+  "quant-stock-selector",
   "sector-rotation",
   "strategy-watch",
   "monitoring",
@@ -20,6 +20,7 @@ const VALID_TABS = new Set<TabType>([
 export default function Layout({ children }: LayoutProps) {
   const [activeTab, setActiveTab] = useState<TabType>(() => {
     const saved = localStorage.getItem("activeTab");
+    if (saved === "quant-selector") return "quant-stock-selector";
     return saved && VALID_TABS.has(saved as TabType)
       ? (saved as TabType)
       : "ai-trading";

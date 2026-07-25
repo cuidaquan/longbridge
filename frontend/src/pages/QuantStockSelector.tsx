@@ -82,7 +82,19 @@ function formatDate(value: string | null) {
 }
 
 function formatScore(value: number | null | undefined) {
-  return value == null ? "--" : value.toFixed(1);
+  return value == null || !Number.isFinite(value) ? "--" : value.toFixed(1);
+}
+
+function formatPercent(value: number | string | null | undefined) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${(number * 100).toFixed(1)}%` : "--";
+}
+
+function candidateDataTime(candidate: QuantCandidate | undefined) {
+  if (!candidate) return "--";
+  return candidate.nbbo?.quote_timestamp
+    ? formatDate(candidate.nbbo.quote_timestamp)
+    : candidate.bar_data_as_of || candidate.price_data_as_of || "--";
 }
 
 function assetLabel(candidate: QuantCandidate) {
@@ -104,6 +116,7 @@ export default function QuantStockSelector() {
   const [selected, setSelected] = useState<QuantCandidate | null>(null);
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -245,12 +258,12 @@ export default function QuantStockSelector() {
     };
   }, [closeConnection, connectToRun, loadResults]);
 
-  const startRun = async (forceRefresh: boolean) => {
+  const startRun = async () => {
     setStarting(true);
     setError(null);
     setSelected(null);
     try {
-      const created = await createQuantSelectionRun(forceRefresh);
+      const created = await createQuantSelectionRun(false);
       if (!mountedRef.current) return;
       setRun(created);
       setData(null);
@@ -259,6 +272,38 @@ export default function QuantStockSelector() {
     } catch (reason) {
       setStarting(false);
       setError(reason instanceof Error ? reason.message : "无法创建量化优选运行");
+    }
+  };
+
+  const refreshStatus = async () => {
+    setRefreshing(true);
+    setError(null);
+    try {
+      if (run) {
+        const snapshot = await getQuantSelectionRun(run.run_id);
+        if (!mountedRef.current) return;
+        setRun(snapshot);
+        if (TERMINAL_STATUSES.has(snapshot.status)) {
+          await Promise.all([loadResults(snapshot.run_id), loadHistory()]);
+        } else {
+          connectToRun(snapshot.run_id);
+        }
+      } else {
+        const [latest, runs] = await Promise.all([
+          getLatestQuantSelection(),
+          listQuantSelectionRuns(20),
+        ]);
+        if (!mountedRef.current) return;
+        setHistory(runs.items);
+        if (latest) {
+          setData(latest);
+          setRun(latest.run);
+        }
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "运行状态刷新失败");
+    } finally {
+      if (mountedRef.current) setRefreshing(false);
     }
   };
 
@@ -282,6 +327,18 @@ export default function QuantStockSelector() {
   const running = Boolean(run && !TERMINAL_STATUSES.has(run.status));
   const status = run?.status;
   const completedProgress = status ? STATUS_META[status].progress : 0;
+  const candidates = data?.candidates || [];
+  const hardFilteredCount = candidates.filter((candidate) => (
+    Object.keys(candidate.hard_filters || {}).length === 11
+    && Object.values(candidate.hard_filters).every((item) => item.status === "pass")
+  )).length;
+  const quantCandidateCount = candidates.filter((candidate) => (
+    candidate.quant_score != null
+    && candidate.quant_score.total >= 65
+    && Object.values(candidate.hard_filters || {}).every(
+      (item) => item.status === "pass",
+    )
+  )).length;
 
   return (
     <div className="space-y-5 animate-fade-in">
@@ -291,21 +348,21 @@ export default function QuantStockSelector() {
         icon={<QueryStats />}
         actions={(
           <div className="flex items-center gap-2">
-            <Tooltip title="强制重新捕获全部输入" arrow>
+            <Tooltip title="刷新运行状态" arrow>
               <span>
                 <button
                   type="button"
-                  aria-label="强制重新捕获全部输入"
-                  onClick={() => void startRun(true)}
-                  disabled={starting || running}
+                  aria-label="刷新运行状态"
+                  onClick={() => void refreshStatus()}
+                  disabled={refreshing}
                   className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-300 bg-white text-slate-600 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700"
                 >
-                  <Refresh className="h-5 w-5" />
+                  <Refresh className={`h-5 w-5 ${refreshing ? "animate-spin" : ""}`} />
                 </button>
               </span>
             </Tooltip>
             <Button
-              onClick={() => void startRun(false)}
+              onClick={() => void startRun()}
               loading={starting || running}
               icon={<PlayArrow className="h-4 w-4" />}
             >
@@ -343,17 +400,24 @@ export default function QuantStockSelector() {
                 {run.reused_from_run_id && (
                   <Badge variant="default">缓存复用</Badge>
                 )}
+                <span className="font-mono text-[11px] text-slate-400">
+                  {run.score_version}
+                </span>
+                <span className="text-xs text-slate-500 dark:text-slate-400">
+                  {run.resolved_model_id || run.model_alias}
+                </span>
               </div>
               <ProgressBar
                 value={completedProgress}
                 variant={run.status === "partial" ? "warning" : run.status === "failed" ? "danger" : run.status === "completed" ? "success" : "default"}
               />
             </div>
-            <div className="grid grid-cols-4 gap-4 text-right">
-              <RunMetric label="候选" value={run.candidate_count} />
-              <RunMetric label="AI 计划" value={run.ai_planned_count} />
+            <div className="grid grid-cols-2 gap-4 text-right sm:grid-cols-5">
+              <RunMetric label="证券总数" value={run.candidate_count} />
+              <RunMetric label="硬过滤后" value={hardFilteredCount} />
+              <RunMetric label="量化候选" value={quantCandidateCount} />
               <RunMetric label="AI 完成" value={run.ai_completed_count} />
-              <RunMetric label="入选" value={run.final_count} />
+              <RunMetric label="最终入选" value={run.final_count} />
             </div>
           </div>
         </Card>
@@ -426,6 +490,9 @@ export default function QuantStockSelector() {
                   <span>{item.data_as_of || "--"}</span>
                   <span>{item.final_count} 入选</span>
                 </div>
+                <div className="mt-1 truncate font-mono text-[11px] text-slate-400">
+                  {item.score_version}
+                </div>
               </button>
             )) : (
               <EmptyState icon={<History />} title="暂无历史运行" />
@@ -435,7 +502,11 @@ export default function QuantStockSelector() {
       </div>
 
       {selected && (
-        <CandidateDrawer candidate={selected} onClose={() => setSelected(null)} />
+        <CandidateDrawer
+          candidate={selected}
+          run={data?.run || run}
+          onClose={() => setSelected(null)}
+        />
       )}
     </div>
   );
@@ -461,7 +532,7 @@ function ResultsTable({
 }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[760px] text-sm">
+      <table className="w-full min-w-[1120px] text-sm">
         <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-900/50 dark:text-slate-400">
           <tr>
             <th className="w-14 px-4 py-3 text-left">排名</th>
@@ -471,7 +542,11 @@ function ResultsTable({
             <th className="px-4 py-3 text-right">AI</th>
             <th className="px-4 py-3 text-right">F</th>
             <th className="px-4 py-3 text-right">置信度</th>
-            <th className="px-4 py-3 text-right">持有期</th>
+            <th className="px-4 py-3 text-right">趋势</th>
+            <th className="px-4 py-3 text-right">相对强度</th>
+            <th className="px-4 py-3 text-right">流动性</th>
+            <th className="px-4 py-3 text-right">风险</th>
+            <th className="px-4 py-3 text-right">数据时点</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100 dark:divide-slate-700">
@@ -493,7 +568,11 @@ function ResultsTable({
                 <td className="px-4 py-3 text-right tabular-nums">{formatScore(item.ai_score)}</td>
                 <td className="px-4 py-3 text-right font-semibold tabular-nums text-cyan-700 dark:text-cyan-400">{formatScore(item.final_score)}</td>
                 <td className="px-4 py-3 text-right tabular-nums">{(item.ai_decision.confidence * 100).toFixed(0)}%</td>
-                <td className="px-4 py-3 text-right">{item.ai_decision.time_horizon_days} 日</td>
+                <td className="px-4 py-3 text-right tabular-nums">{formatScore(Number(candidate?.quant_score?.trend))}</td>
+                <td className="px-4 py-3 text-right tabular-nums">{formatScore(Number(candidate?.quant_score?.relative_strength))}</td>
+                <td className="px-4 py-3 text-right tabular-nums">{formatScore(Number(candidate?.quant_score?.liquidity))}</td>
+                <td className="px-4 py-3 text-right tabular-nums">{formatScore(Number(candidate?.quant_score?.risk))}</td>
+                <td className="whitespace-nowrap px-4 py-3 text-right text-xs text-slate-500">{candidateDataTime(candidate)}</td>
               </tr>
             );
           })}
@@ -552,9 +631,11 @@ function DiagnosticsTable({
 
 function CandidateDrawer({
   candidate,
+  run,
   onClose,
 }: {
   candidate: QuantCandidate;
+  run: QuantSelectionRun | null;
   onClose: () => void;
 }) {
   const decision = candidate.ai?.decision;
@@ -607,6 +688,21 @@ function CandidateDrawer({
             ]} />
           </DetailSection>
 
+          <DetailSection title="量化分项">
+            <DetailRows rows={[
+              ["趋势", formatScore(Number(candidate.quant_score?.trend))],
+              ["相对强度", formatScore(Number(candidate.quant_score?.relative_strength))],
+              ["流动性", formatScore(Number(candidate.quant_score?.liquidity))],
+              ["动量确认", formatScore(Number(candidate.quant_score?.momentum))],
+              ["风险适配", formatScore(Number(candidate.quant_score?.risk))],
+              ["RS20 / RS60", `${formatPercent(candidate.indicators?.rs20)} / ${formatPercent(candidate.indicators?.rs60)}`],
+              ["RSI14", formatScore(Number(candidate.indicators?.rsi14))],
+              ["ATR14 / Close", formatPercent(candidate.indicators?.atr14_close)],
+              ["20 日波动率", formatPercent(candidate.indicators?.volatility_20d)],
+              ["60 日最大回撤", formatPercent(candidate.indicators?.max_drawdown_60d)],
+            ]} />
+          </DetailSection>
+
           <DetailSection title="硬过滤">
             <div className="mb-3 text-sm text-slate-500 dark:text-slate-400">{passed} / 11 通过</div>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -646,6 +742,19 @@ function CandidateDrawer({
               <TextList items={candidate.exclusion_reasons} />
             </DetailSection>
           )}
+
+          <DetailSection title="数据完整性与哈希">
+            <DetailRows rows={[
+              ["数据时点", candidateDataTime(candidate)],
+              ["日 K 截止", candidate.bar_data_as_of || "--"],
+              ["NBBO 来源", candidate.nbbo?.source || "--"],
+              ["硬过滤", `${passed} / 11 通过`],
+              ["AI 输入", candidate.ai?.request_status || "未计划"],
+              ["候选输入哈希", candidate.candidate_quant_input_hash || "--"],
+              ["运行输入哈希", run?.run_input_hash || "--"],
+              ["AI 输入哈希", candidate.ai?.ai_input_hash || "--"],
+            ]} />
+          </DetailSection>
         </div>
       </aside>
     </div>

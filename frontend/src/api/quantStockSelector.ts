@@ -78,6 +78,13 @@ export interface QuantCandidate {
   exclusion_reasons: string[];
   selection_status: string;
   selected_for_ai: boolean;
+  candidate_quant_input_hash: string;
+  price_data_as_of: string | null;
+  bar_data_as_of: string | null;
+  nbbo: {
+    quote_timestamp: string | null;
+    source: string;
+  } | null;
   spread_bps: number | null;
   quant_score: { total: number; [key: string]: number | string } | null;
   ai?: {
