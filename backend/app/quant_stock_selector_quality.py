@@ -190,11 +190,13 @@ class QuantSelectionQualityService:
                 proven_boundaries,
                 len(completed_auditable_runs),
                 target=1.0,
+                empty=None,
             ),
             "input_hash_validity_rate": _coverage_metric(
                 valid_hash_runs,
                 len(auditable_runs),
                 target=1.0,
+                empty=None,
             ),
             "quant_replay_consistency_rate": _coverage_metric(
                 consistency_numerator,
@@ -218,6 +220,8 @@ class QuantSelectionQualityService:
             for name, metric in metrics.items()
             if metric["target"] is not None and metric["passes"] is False
         ]
+        if not auditable_runs:
+            gate_reasons.append("insufficient_auditable_runs")
         if consistency_denominator == 0:
             gate_reasons.append("insufficient_quant_replay_pairs")
         if not durations:

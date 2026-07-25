@@ -258,6 +258,13 @@ class QuantSelectionQualityTests(unittest.TestCase):
         self.assertIsNone(
             report["metrics"]["run_duration_p95_seconds"]["value"]
         )
+        self.assertIsNone(
+            report["metrics"]["exact_candidate_boundary_rate"]["value"]
+        )
+        self.assertIsNone(
+            report["metrics"]["input_hash_validity_rate"]["value"]
+        )
+        self.assertIn("insufficient_auditable_runs", report["gate_reasons"])
         self.assertIn("insufficient_duration_samples", report["gate_reasons"])
 
 
