@@ -681,6 +681,7 @@ function CandidateDrawer({
           <DetailSection title="产品与流动性">
             <DetailRows rows={[
               ["交易所", candidate.metadata?.exchange || "--"],
+              ["供应商原始类别", candidate.metadata?.raw_asset_class || "--"],
               ["敞口方向", candidate.metadata?.exposure_direction || "--"],
               ["杠杆倍数", candidate.metadata?.leverage == null ? "--" : `${candidate.metadata.leverage}x`],
               ["20 日成交额中位数", candidate.indicators?.median_turnover_20d == null ? "--" : `$${(Number(candidate.indicators.median_turnover_20d) / 1_000_000).toFixed(1)}M`],
@@ -748,6 +749,9 @@ function CandidateDrawer({
               ["数据时点", candidateDataTime(candidate)],
               ["日 K 截止", candidate.bar_data_as_of || "--"],
               ["NBBO 来源", candidate.nbbo?.source || "--"],
+              ["产品范围来源", candidate.metadata ? `${candidate.metadata.source} / ${candidate.metadata.source_version}` : "--"],
+              ["产品映射版本", candidate.metadata?.mapping_version || "--"],
+              ["产品证据时间", formatDate(candidate.metadata?.captured_at || null)],
               ["硬过滤", `${passed} / 11 通过`],
               ["AI 输入", candidate.ai?.request_status || "未计划"],
               ["候选输入哈希", candidate.candidate_quant_input_hash || "--"],

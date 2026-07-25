@@ -68,10 +68,15 @@ export interface QuantCandidate {
   symbol: string;
   name: string;
   metadata: {
+    raw_asset_class: string;
     asset_class: string;
     exposure_direction: string;
     leverage: number | null;
     exchange: string;
+    source: string;
+    source_version: string;
+    captured_at: string;
+    mapping_version: string;
   } | null;
   indicators: Record<string, number | string> | null;
   hard_filters: Record<string, { status: string; reason?: string | null }>;
