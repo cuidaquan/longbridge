@@ -136,6 +136,16 @@ class CandidatePoolTests(unittest.TestCase):
 
 
 class HardFilterTests(unittest.TestCase):
+    def test_longbridge_nasd_exchange_alias_is_eligible(self) -> None:
+        candidate = _candidate("AAA.US", exchange="NASD")
+        filters, reasons = evaluate_hard_filters(
+            candidate,
+            data_as_of=DATA_AS_OF,
+        )
+        self.assertEqual(filters["H2"], {"status": "pass", "reason": None})
+        self.assertEqual(candidate.catalog_evidence()["exchange"], "NASDAQ")
+        self.assertEqual(reasons, [])
+
     def test_product_names_and_structures_do_not_change_eligibility(self) -> None:
         symbols = ("COMMON.US", "BOND.US", "SQQQ.US", "LEV3X.US", "WARRANT.US")
         for symbol in symbols:

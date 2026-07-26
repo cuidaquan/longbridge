@@ -89,6 +89,7 @@ def _normalize_board(value: Any) -> str:
 def _normalize_exchange(value: Any) -> str:
     normalized = " ".join(str(value or "").strip().upper().split())
     aliases = {
+        "NASD": "NASDAQ",
         "AMEX": "NYSE AMERICAN",
         "NYSEAMERICAN": "NYSE AMERICAN",
         "NYSE AMEX": "NYSE AMERICAN",

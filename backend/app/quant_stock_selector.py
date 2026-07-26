@@ -285,7 +285,7 @@ def calculate_quant_indicators(
     raw_bars: Sequence[Mapping[str, Any]],
     spy_adjusted_bars: Sequence[Mapping[str, Any]],
 ) -> QuantIndicators:
-    """Calculate every v1.1 indicator without intermediate rounding."""
+    """Calculate every v1.2 indicator without intermediate rounding."""
     adjusted = _normalize_price_bars(adjusted_bars, label="adjusted")
     spy = _normalize_price_bars(spy_adjusted_bars, label="spy")
     raw_by_date = _normalize_raw_bars(raw_bars)

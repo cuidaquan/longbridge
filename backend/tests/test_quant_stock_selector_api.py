@@ -274,7 +274,7 @@ class QuantStockSelectorApiTests(unittest.TestCase):
             json={},
         )
         self.assertEqual(response.status_code, 503)
-        self.assertIn("Longbridge 目录", response.json()["detail"])
+        self.assertIn("Longbridge 凭据", response.json()["detail"])
 
     def test_fixed_evaluation_and_history_contracts(self) -> None:
         evaluation = self.client.post(

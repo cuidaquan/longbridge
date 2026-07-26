@@ -125,8 +125,8 @@ def get_quant_selection_service() -> QuantSelectionService:
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "量化优选数据源尚未就绪：需要配置由 Longbridge 目录、"
-                    "交易状态、交易日历和复权/未复权日 K 组成的版本化点时数据包"
+                    "量化优选服务尚未就绪：请配置 DeepSeek API Key 与完整的 "
+                    "Longbridge 凭据；QUANT_SELECTOR_BUNDLE_PATH 仅用于冻结数据包回放"
                 ),
             ) from exc
     return _service
