@@ -70,6 +70,11 @@ def _candidate(symbol: str, **overrides) -> QuantUniverseCandidate:
         "valid_daily_bars": 90,
         "indicators": _indicators(),
         "indicator_error": None,
+        "current_turnover": 100_000_000.0,
+        "total_market_value": 10_000_000_000.0,
+        "volume_ratio": 1.2,
+        "ten_day_change_rate": 0.10,
+        "ten_day_relative_strength": 0.05,
     }
     values.update(overrides)
     return QuantUniverseCandidate(**values)
@@ -163,7 +168,8 @@ class HardFilterTests(unittest.TestCase):
             ({"board": "USOTC"}, "H1", "market_or_catalog_not_usmain"),
             ({"exchange": "OTC"}, "H2", "ineligible_exchange"),
             ({"trade_status": "halted"}, "H3", "trade_status_not_normal"),
-            ({"last_price": 4.99}, "H4", "price_below_minimum_or_missing"),
+            ({"last_price": 4.99}, "H4", "price_outside_5_to_500_or_missing"),
+            ({"last_price": 500.01}, "H4", "price_outside_5_to_500_or_missing"),
             (
                 {"indicators": _indicators(turnover=9_999_999)},
                 "H5",
@@ -172,6 +178,26 @@ class HardFilterTests(unittest.TestCase):
             ({"valid_daily_bars": 84}, "H6", "daily_bar_history_incomplete"),
             ({"bar_data_as_of": date(2026, 7, 23)}, "H7", "data_as_of_mismatch"),
             ({"symbol": "SPY.US"}, "H8", "benchmark_symbol"),
+            (
+                {"current_turnover": 9_999_999},
+                "H9",
+                "current_turnover_below_minimum_or_missing",
+            ),
+            (
+                {"total_market_value": 999_999_999},
+                "H10",
+                "market_value_below_minimum_or_missing",
+            ),
+            (
+                {"volume_ratio": 0.79},
+                "H11",
+                "volume_ratio_below_minimum_or_missing",
+            ),
+            (
+                {"ten_day_relative_strength": -0.01},
+                "H12",
+                "ten_day_relative_strength_below_spy_or_missing",
+            ),
         )
         for override, code, reason in cases:
             with self.subTest(code=code, override=override):
@@ -206,7 +232,7 @@ class QuantUniverseSelectionTests(unittest.TestCase):
         manifest = result["selection_manifest"]
         self.assertEqual(
             manifest["candidate_set_method"],
-            "deterministic-full-score-v1.2",
+            "deterministic-full-score-v1.3",
         )
         self.assertEqual(len(result["selection_manifest_hash"]), 64)
 

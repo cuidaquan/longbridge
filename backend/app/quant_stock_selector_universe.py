@@ -18,12 +18,17 @@ from .quant_stock_selector_hashing import canonical_sha256
 from .quant_stock_selector_symbols import normalize_symbol
 
 
-FILTER_VERSION = "quant-selector-filter-v1.2"
+FILTER_VERSION = "quant-selector-filter-v1.3"
 AI_QUANT_THRESHOLD = 65.0
 AI_CANDIDATE_LIMIT = 30
 BENCHMARK_SYMBOLS = frozenset({"SPY"})
-ELIGIBLE_EXCHANGES = frozenset({"NYSE", "NASDAQ", "NYSE AMERICAN"})
+ELIGIBLE_EXCHANGES = frozenset({"NASDAQ"})
 ELIGIBLE_BOARD = "USMAIN"
+MIN_PRICE = 5.0
+MAX_PRICE = 500.0
+MIN_CURRENT_TURNOVER = 10_000_000.0
+MIN_TOTAL_MARKET_VALUE = 1_000_000_000.0
+MIN_VOLUME_RATIO = 0.8
 
 
 class UniverseSelectionError(ValueError):
@@ -47,6 +52,11 @@ class QuantUniverseCandidate:
     valid_daily_bars: int
     indicators: QuantIndicators | None
     indicator_error: str | None = None
+    current_turnover: float | None = None
+    total_market_value: float | None = None
+    volume_ratio: float | None = None
+    ten_day_change_rate: float | None = None
+    ten_day_relative_strength: float | None = None
 
     def catalog_evidence(self) -> dict[str, str]:
         return {
@@ -68,6 +78,11 @@ class CandidateMarketData:
     valid_daily_bars: int
     indicators: QuantIndicators | None
     indicator_error: str | None = None
+    current_turnover: float | None = None
+    total_market_value: float | None = None
+    volume_ratio: float | None = None
+    ten_day_change_rate: float | None = None
+    ten_day_relative_strength: float | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +176,19 @@ def build_unified_candidate_pool(
                 if facts is not None
                 else "market_data_missing"
             ),
+            current_turnover=(
+                facts.current_turnover if facts is not None else None
+            ),
+            total_market_value=(
+                facts.total_market_value if facts is not None else None
+            ),
+            volume_ratio=facts.volume_ratio if facts is not None else None,
+            ten_day_change_rate=(
+                facts.ten_day_change_rate if facts is not None else None
+            ),
+            ten_day_relative_strength=(
+                facts.ten_day_relative_strength if facts is not None else None
+            ),
         ))
     return candidates
 
@@ -195,8 +223,8 @@ def evaluate_hard_filters(
         last_price = float("nan")
     filters["H4"] = (
         _filter("pass")
-        if math.isfinite(last_price) and last_price >= 5.0
-        else _filter("fail", "price_below_minimum_or_missing")
+        if math.isfinite(last_price) and MIN_PRICE <= last_price <= MAX_PRICE
+        else _filter("fail", "price_outside_5_to_500_or_missing")
     )
     if candidate.indicators is None:
         filters["H5"] = _filter("fail", "turnover_missing")
@@ -223,6 +251,30 @@ def evaluate_hard_filters(
         _filter("fail", "benchmark_symbol")
         if _symbol_root(symbol) in BENCHMARK_SYMBOLS
         else _filter("pass")
+    )
+    filters["H9"] = (
+        _filter("pass")
+        if candidate.current_turnover is not None
+        and candidate.current_turnover >= MIN_CURRENT_TURNOVER
+        else _filter("fail", "current_turnover_below_minimum_or_missing")
+    )
+    filters["H10"] = (
+        _filter("pass")
+        if candidate.total_market_value is not None
+        and candidate.total_market_value >= MIN_TOTAL_MARKET_VALUE
+        else _filter("fail", "market_value_below_minimum_or_missing")
+    )
+    filters["H11"] = (
+        _filter("pass")
+        if candidate.volume_ratio is not None
+        and candidate.volume_ratio >= MIN_VOLUME_RATIO
+        else _filter("fail", "volume_ratio_below_minimum_or_missing")
+    )
+    filters["H12"] = (
+        _filter("pass")
+        if candidate.ten_day_relative_strength is not None
+        and candidate.ten_day_relative_strength >= 0.0
+        else _filter("fail", "ten_day_relative_strength_below_spy_or_missing")
     )
     reasons = [
         str(filters[code]["reason"])
@@ -316,6 +368,11 @@ class QuantUniverseSelector:
                     if candidate.indicators is not None else None
                 ),
                 "last_price": candidate.last_price,
+                "current_turnover": candidate.current_turnover,
+                "total_market_value": candidate.total_market_value,
+                "volume_ratio": candidate.volume_ratio,
+                "ten_day_change_rate": candidate.ten_day_change_rate,
+                "ten_day_relative_strength": candidate.ten_day_relative_strength,
                 "name": candidate.name,
                 "price_data_as_of": _date_value(candidate.price_data_as_of),
                 "quant_input_schema": "quant-selector-candidate-input-v2",
@@ -368,7 +425,7 @@ class QuantUniverseSelector:
                 "symbol": item["symbol"],
             })
         selection_manifest = {
-            "candidate_set_method": "deterministic-full-score-v1.2",
+            "candidate_set_method": "deterministic-full-score-v1.3",
             "candidates": manifest_candidates,
             "filter_version": FILTER_VERSION,
             "q_threshold": self.policy.q_threshold,

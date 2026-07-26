@@ -391,18 +391,33 @@ class JsonQuantRunInputProvider:
             spy_payload.get("unadjusted_bars"),
             field="SPY.US.unadjusted_bars",
         ))
-        spy_adjusted_snapshot, spy_raw_snapshot = self._capture_bars(
-            symbol="SPY.US",
-            data_as_of=data_as_of,
-            captured_at=captured_at,
-            source=bar_source,
-            adjusted=spy_adjusted,
-            raw=spy_raw,
+        spy_bar_error_category = str(
+            spy_payload.get("bar_error_category") or ""
+        ).strip() or None
+        spy_indicator_error = (
+            "benchmark_monthly_history_symbol_quota"
+            if spy_bar_error_category == "monthly_history_symbol_quota"
+            else "benchmark_history_missing"
         )
+        spy_adjusted_snapshot = None
+        spy_raw_snapshot = None
+        if spy_adjusted and spy_raw:
+            spy_adjusted_snapshot, spy_raw_snapshot = self._capture_bars(
+                symbol="SPY.US",
+                data_as_of=data_as_of,
+                captured_at=captured_at,
+                source=bar_source,
+                adjusted=spy_adjusted,
+                raw=spy_raw,
+            )
 
         facts_by_symbol = {}
         adjusted_by_symbol = {"SPY.US": spy_adjusted}
-        bar_references = [spy_adjusted_snapshot, spy_raw_snapshot]
+        bar_references = [
+            item
+            for item in (spy_adjusted_snapshot, spy_raw_snapshot)
+            if item is not None
+        ]
         tradeability_payload = {
             symbol: {"status": "market_data_missing"}
             for symbol in catalog_symbols
@@ -419,6 +434,11 @@ class JsonQuantRunInputProvider:
                     "last_price",
                     "price_data_as_of",
                     "bar_data_as_of",
+                    "current_turnover",
+                    "total_market_value",
+                    "volume_ratio",
+                    "ten_day_change_rate",
+                    "ten_day_relative_strength",
                 )
             }
             adjusted = list(raw_facts.get("forward_adjusted_bars") or [])
@@ -426,7 +446,10 @@ class JsonQuantRunInputProvider:
             indicators = None
             indicator_error = None
             if not adjusted or not raw:
-                indicator_error = "market_bars_missing"
+                indicator_error = str(
+                    raw_facts.get("bar_error_category")
+                    or "market_bars_missing"
+                )
                 invalid_bar_inputs[symbol] = {
                     "forward_adjusted_bars": adjusted,
                     "unadjusted_bars": raw,
@@ -443,12 +466,20 @@ class JsonQuantRunInputProvider:
                         raw=raw,
                     )
                     bar_references.extend([adjusted_snapshot, raw_snapshot])
-                    indicators = calculate_quant_indicators(
-                        adjusted,
-                        raw,
-                        spy_adjusted,
-                    )
                     adjusted_by_symbol[symbol] = adjusted
+                    if not spy_adjusted or not spy_raw:
+                        indicator_error = spy_indicator_error
+                        invalid_bar_inputs[symbol] = {
+                            "forward_adjusted_bars": adjusted,
+                            "unadjusted_bars": raw,
+                            "reason": indicator_error,
+                        }
+                    else:
+                        indicators = calculate_quant_indicators(
+                            adjusted,
+                            raw,
+                            spy_adjusted,
+                        )
                 except QuantInputError as exc:
                     indicator_error = exc.reason
                     invalid_bar_inputs[symbol] = {
@@ -482,6 +513,26 @@ class JsonQuantRunInputProvider:
                 valid_daily_bars=min(len(adjusted), len(raw)),
                 indicators=indicators,
                 indicator_error=indicator_error,
+                current_turnover=_optional_float(
+                    raw_facts.get("current_turnover"),
+                    field=f"{symbol}.current_turnover",
+                ),
+                total_market_value=_optional_float(
+                    raw_facts.get("total_market_value"),
+                    field=f"{symbol}.total_market_value",
+                ),
+                volume_ratio=_optional_float(
+                    raw_facts.get("volume_ratio"),
+                    field=f"{symbol}.volume_ratio",
+                ),
+                ten_day_change_rate=_optional_float(
+                    raw_facts.get("ten_day_change_rate"),
+                    field=f"{symbol}.ten_day_change_rate",
+                ),
+                ten_day_relative_strength=_optional_float(
+                    raw_facts.get("ten_day_relative_strength"),
+                    field=f"{symbol}.ten_day_relative_strength",
+                ),
             )
 
         candidates = build_unified_candidate_pool(
@@ -562,13 +613,15 @@ class JsonQuantRunInputProvider:
             item["symbol"]: item for item in quant_selection["candidates"]
         }
         ai_contexts = {}
-        spy_closes = [float(item["close"]) for item in spy_adjusted]
-        spy_state = {
-            "data_as_of": data_as_of.isoformat(),
-            "return_20d": spy_closes[-1] / spy_closes[-21] - 1.0,
-            "return_60d": spy_closes[-1] / spy_closes[-61] - 1.0,
-            "bar_snapshot_reference": spy_adjusted_snapshot["reference"],
-        }
+        spy_state = {}
+        if spy_adjusted_snapshot is not None:
+            spy_closes = [float(item["close"]) for item in spy_adjusted]
+            spy_state = {
+                "data_as_of": data_as_of.isoformat(),
+                "return_20d": spy_closes[-1] / spy_closes[-21] - 1.0,
+                "return_60d": spy_closes[-1] / spy_closes[-61] - 1.0,
+                "bar_snapshot_reference": spy_adjusted_snapshot["reference"],
+            }
         for symbol in quant_selection["ai_candidate_symbols"]:
             candidate = candidate_payloads[symbol]
             source_facts = normalized_market_data[symbol]

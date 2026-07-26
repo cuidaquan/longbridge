@@ -124,6 +124,11 @@ def _bundle() -> dict:
                 "last_price": aaa_bars[-1]["close"],
                 "price_data_as_of": DATA_AS_OF.isoformat(),
                 "bar_data_as_of": DATA_AS_OF.isoformat(),
+                "current_turnover": 100_000_000.0,
+                "total_market_value": 10_000_000_000.0,
+                "volume_ratio": 1.2,
+                "ten_day_change_rate": 0.10,
+                "ten_day_relative_strength": 0.05,
                 "forward_adjusted_bars": aaa_bars,
                 "unadjusted_bars": aaa_bars,
                 "news": {
@@ -142,6 +147,11 @@ def _bundle() -> dict:
                 "last_price": spy_bars[-1]["close"],
                 "price_data_as_of": DATA_AS_OF.isoformat(),
                 "bar_data_as_of": DATA_AS_OF.isoformat(),
+                "current_turnover": 100_000_000.0,
+                "total_market_value": 10_000_000_000.0,
+                "volume_ratio": 1.2,
+                "ten_day_change_rate": 0.05,
+                "ten_day_relative_strength": 0.0,
                 "forward_adjusted_bars": spy_bars,
                 "unadjusted_bars": spy_bars,
             },
@@ -404,6 +414,66 @@ class QuantSourceBundleTests(unittest.TestCase):
         )
         self.assertEqual(evidence.payload["AAA.US"]["reason"], "market_bars_missing")
         self.assertTrue(captured.required_inputs_complete)
+
+    def test_monthly_quota_skip_is_a_candidate_exclusion(self):
+        bundle = _bundle()
+        bundle["market_data"]["AAA.US"].update({
+            "forward_adjusted_bars": [],
+            "unadjusted_bars": [],
+            "bar_error": "301607 Permission limit",
+            "bar_error_category": "monthly_history_symbol_quota",
+        })
+        bundle["source_capture"].update({
+            "history_quota_skipped_count": 1,
+            "history_quota_skipped_symbols": ["AAA.US"],
+        })
+
+        captured = self._provider(bundle).capture()
+
+        aaa = next(
+            item for item in captured.quant_selection["candidates"]
+            if item["symbol"] == "AAA.US"
+        )
+        self.assertTrue(captured.required_inputs_complete)
+        self.assertEqual(
+            aaa["hard_filters"]["H6"]["reason"],
+            "monthly_history_symbol_quota",
+        )
+        self.assertFalse(aaa["selected_for_ai"])
+
+    def test_spy_monthly_quota_preserves_candidate_bars_as_partial_diagnostics(self):
+        bundle = _bundle()
+        bundle["market_data"]["SPY.US"].update({
+            "forward_adjusted_bars": [],
+            "unadjusted_bars": [],
+            "bar_error": "301607 Permission limit",
+            "bar_error_category": "monthly_history_symbol_quota",
+        })
+        bundle["source_capture"].update({
+            "status": "partial",
+            "errors": ["benchmark:SPY.US:monthly_history_symbol_quota"],
+            "history_quota_skipped_count": 1,
+            "history_quota_skipped_symbols": ["SPY.US"],
+        })
+
+        captured = self._provider(bundle).capture()
+
+        aaa = next(
+            item for item in captured.quant_selection["candidates"]
+            if item["symbol"] == "AAA.US"
+        )
+        self.assertFalse(captured.required_inputs_complete)
+        self.assertEqual(
+            aaa["hard_filters"]["H6"]["reason"],
+            "benchmark_monthly_history_symbol_quota",
+        )
+        self.assertEqual(captured.quant_selection["ai_candidate_symbols"], [])
+        bar_snapshots = [
+            item for item in captured.input_snapshots
+            if item.snapshot_kind == "market_bar_reference"
+        ]
+        self.assertTrue(bar_snapshots)
+        self.assertNotIn("SPY.US", {item.symbol for item in bar_snapshots})
 
     def test_old_schema_is_rejected(self):
         bundle = _bundle()

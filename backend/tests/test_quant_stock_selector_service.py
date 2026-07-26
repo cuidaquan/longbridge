@@ -195,7 +195,7 @@ def _captured(
             }
             for item in sorted(candidates, key=lambda value: value["symbol"])
         ],
-        "filter_version": "quant-selector-filter-v1.2",
+        "filter_version": "quant-selector-filter-v1.3",
         "q_threshold": 65.0,
         "ranking": ranking,
         "top_n": 30,
@@ -204,7 +204,7 @@ def _captured(
     quant = {
         "status": quant_status,
         "boundary_proven": quant_status == "completed",
-        "filter_version": "quant-selector-filter-v1.2",
+        "filter_version": "quant-selector-filter-v1.3",
         "data_as_of": DATA_AS_OF.isoformat(),
         "official_close": "2026-07-24T20:00:00.000Z",
         "candidates": candidates,

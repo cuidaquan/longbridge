@@ -57,6 +57,16 @@ def _bars(symbols, *, data_as_of):
     }
 
 
+def _calc_indexes(symbols):
+    return {
+        symbol: {
+            "turnover": 100_000_000.0,
+            "total_market_value": 10_000_000_000.0,
+            "volume_ratio": 1.2,
+            "ten_day_change_rate": 0.05 if symbol == "SPY.US" else 0.10,
+        }
+        for symbol in symbols
+    }
 class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
     def _collector(
         self,
@@ -64,6 +74,7 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
         catalog=None,
         static_info_loader=None,
         tradeability_loader=None,
+        calc_index_loader=_calc_indexes,
         bar_loader=_bars,
         batch_size=500,
     ):
@@ -99,6 +110,7 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
             catalog_loader=lambda: catalog,
             static_info_loader=static_info_loader,
             tradeability_loader=tradeability_loader,
+            calc_index_loader=calc_index_loader,
             calendar_loader=_calendar,
             bar_loader=bar_loader,
             clock=lambda: CAPTURED_AT,
@@ -116,7 +128,7 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
 
         self.assertEqual(
             requested,
-            ["AAA.US", "BND.US", "INV.US", "SPY.US"],
+            ["SPY.US", "AAA.US", "BND.US", "INV.US"],
         )
         self.assertNotIn("OTC.US", bundle["market_data"])
         self.assertEqual(bundle["source_capture"]["status"], "complete")
@@ -139,7 +151,7 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
         def static_info_loader(symbols):
             static_batches.append(list(symbols))
             return [
-                {"symbol": symbol, "board": "USMain", "exchange": "NYSE"}
+                {"symbol": symbol, "board": "USMain", "exchange": "NASD"}
                 for symbol in symbols
             ]
 
@@ -171,6 +183,7 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
         context_entries = []
         static_calls = []
         quote_calls = []
+        calc_calls = []
         bar_calls = []
 
         @contextmanager
@@ -186,7 +199,7 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
             self.assertIs(context, quote_context_instance)
             static_calls.append(list(symbols))
             return [
-                {"symbol": symbol, "board": "USMain", "exchange": "NYSE"}
+                {"symbol": symbol, "board": "USMain", "exchange": "NASD"}
                 for symbol in symbols
             ]
 
@@ -202,6 +215,11 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
             self.assertIs(active_context, quote_context_instance)
             bar_calls.append(list(symbols))
             return _bars(symbols, data_as_of=data_as_of)
+
+        def calc_loader(active_context, symbols):
+            self.assertIs(active_context, quote_context_instance)
+            calc_calls.append(list(symbols))
+            return _calc_indexes(symbols)
 
         collector = LongbridgeQuantSourceBundleCollector(
             catalog_loader=lambda: catalog,
@@ -233,6 +251,11 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
             ),
             patch(
                 "app.quant_stock_selector_longbridge."
+                "_load_longbridge_quant_prefilter_indexes_from_context",
+                side_effect=calc_loader,
+            ),
+            patch(
+                "app.quant_stock_selector_longbridge."
                 "_load_longbridge_daily_bars_from_context",
                 side_effect=bar_loader,
             ),
@@ -242,13 +265,14 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
         self.assertEqual(context_entries, [{"configured": "yes"}])
         self.assertEqual([len(batch) for batch in static_calls], [2, 2, 2])
         self.assertEqual([len(batch) for batch in quote_calls], [2, 2, 2])
+        self.assertEqual([len(batch) for batch in calc_calls], [2, 2, 2])
         self.assertEqual(bar_calls, [[
+            "SPY.US",
             "S000.US",
             "S001.US",
             "S002.US",
             "S003.US",
             "S004.US",
-            "SPY.US",
         ]])
         self.assertEqual(bundle["source_capture"]["history_symbol_count"], 6)
 
@@ -290,10 +314,110 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
             bar_loader=bar_loader,
         ).capture()
 
-        self.assertEqual(requested, ["AAA.US", "SPY.US"])
+        self.assertEqual(requested, ["SPY.US", "AAA.US"])
         self.assertEqual(bundle["source_capture"]["history_symbol_count"], 2)
         self.assertEqual(bundle["market_data"]["BND.US"]["unadjusted_bars"], [])
         self.assertEqual(bundle["market_data"]["INV.US"]["unadjusted_bars"], [])
+
+    def test_strict_prefilter_sorts_every_match_without_truncation(self):
+        catalog = [
+            {"symbol": symbol, "name": symbol}
+            for symbol in ("AAA.US", "BBB.US", "CCC.US", "DDD.US")
+        ]
+        requested = []
+
+        def calc_loader(symbols):
+            values = {
+                "SPY.US": (100_000_000, 10_000_000_000, 1.2, 0.02),
+                "AAA.US": (20_000_000, 2_000_000_000, 1.0, 0.03),
+                "BBB.US": (50_000_000, 2_000_000_000, 1.0, 0.02),
+                "CCC.US": (50_000_000, 2_000_000_000, 1.5, 0.04),
+                "DDD.US": (9_999_999, 2_000_000_000, 2.0, 0.10),
+            }
+            return {
+                symbol: {
+                    "turnover": values[symbol][0],
+                    "total_market_value": values[symbol][1],
+                    "volume_ratio": values[symbol][2],
+                    "ten_day_change_rate": values[symbol][3],
+                }
+                for symbol in symbols
+            }
+
+        def bar_loader(symbols, *, data_as_of):
+            requested.extend(symbols)
+            return _bars(symbols, data_as_of=data_as_of)
+
+        bundle = self._collector(
+            catalog=catalog,
+            calc_index_loader=calc_loader,
+            bar_loader=bar_loader,
+        ).capture()
+
+        self.assertEqual(
+            requested,
+            ["SPY.US", "CCC.US", "BBB.US", "AAA.US"],
+        )
+        self.assertEqual(bundle["source_capture"]["prefiltered_stock_count"], 3)
+        self.assertIsNone(
+            bundle["source_capture"]["prefilter_policy"]["history_symbol_limit"]
+        )
+        self.assertEqual(
+            bundle["market_data"]["DDD.US"]["prefilter"]["status"],
+            "excluded",
+        )
+
+    def test_monthly_quota_skip_is_preserved_without_aborting_capture(self):
+        def bar_loader(symbols, *, data_as_of):
+            result = _bars(symbols, data_as_of=data_as_of)
+            result["AAA.US"] = {
+                "forward_adjusted_bars": [],
+                "unadjusted_bars": [],
+                "error": "301607 Permission limit",
+                "error_category": "monthly_history_symbol_quota",
+            }
+            return result
+
+        bundle = self._collector(bar_loader=bar_loader).capture()
+
+        self.assertEqual(bundle["source_capture"]["status"], "complete")
+        self.assertEqual(bundle["source_capture"]["history_quota_skipped_count"], 1)
+        self.assertEqual(
+            bundle["source_capture"]["history_quota_skipped_symbols"],
+            ["AAA.US"],
+        )
+        self.assertEqual(
+            bundle["market_data"]["AAA.US"]["bar_error_category"],
+            "monthly_history_symbol_quota",
+        )
+
+    def test_spy_monthly_quota_continues_all_sorted_history_requests(self):
+        requested = []
+
+        def bar_loader(symbols, *, data_as_of):
+            requested.extend(symbols)
+            result = _bars(symbols, data_as_of=data_as_of)
+            result["SPY.US"] = {
+                "forward_adjusted_bars": [],
+                "unadjusted_bars": [],
+                "error": "301607 Permission limit",
+                "error_category": "monthly_history_symbol_quota",
+            }
+            return result
+
+        bundle = self._collector(bar_loader=bar_loader).capture()
+
+        self.assertEqual(requested, ["SPY.US", "AAA.US", "BND.US", "INV.US"])
+        self.assertEqual(bundle["source_capture"]["status"], "partial")
+        self.assertEqual(
+            bundle["source_capture"]["errors"],
+            ["benchmark:SPY.US:monthly_history_symbol_quota"],
+        )
+        self.assertEqual(
+            bundle["source_capture"]["history_quota_skipped_symbols"],
+            ["SPY.US"],
+        )
+        self.assertTrue(bundle["market_data"]["AAA.US"]["unadjusted_bars"])
 
     def test_history_requests_have_no_local_symbol_limit(self):
         catalog = [
@@ -441,7 +565,7 @@ class LongbridgeQuantLoaderTests(unittest.TestCase):
             100_000_000.0,
         )
 
-    def test_daily_bars_fails_fast_on_monthly_symbol_quota(self):
+    def test_daily_bars_skips_monthly_symbol_quota_and_continues(self):
         calls = []
 
         def history(symbol, *_args):
@@ -466,16 +590,20 @@ class LongbridgeQuantLoaderTests(unittest.TestCase):
                 return_value={"configured": "yes"},
             ),
         ):
-            with self.assertRaisesRegex(
-                LongbridgeAPIError,
-                "301607 Permission limit",
-            ):
-                load_longbridge_daily_bars(
-                    ["AAA.US", "BBB.US"],
-                    data_as_of=DATA_AS_OF,
-                )
+            result = load_longbridge_daily_bars(
+                ["AAA.US", "BBB.US"],
+                data_as_of=DATA_AS_OF,
+            )
 
-        self.assertEqual(calls, ["AAA.US"])
+        self.assertEqual(calls, ["AAA.US", "BBB.US"])
+        self.assertEqual(
+            result["AAA.US"]["error_category"],
+            "monthly_history_symbol_quota",
+        )
+        self.assertEqual(
+            result["BBB.US"]["error_category"],
+            "monthly_history_symbol_quota",
+        )
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+import logging
 import multiprocessing
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
@@ -27,7 +28,15 @@ BAR_SOURCE_VERSION = "longbridge-history-candlestick-v1"
 CALENDAR_SOURCE_VERSION = "longbridge-trading-days-v1"
 DEFAULT_BATCH_SIZE = 500
 NEW_YORK = ZoneInfo("America/New_York")
-ELIGIBLE_EXCHANGES = frozenset({"NYSE", "NASDAQ", "NYSE AMERICAN"})
+ELIGIBLE_EXCHANGES = frozenset({"NASDAQ"})
+MIN_PRICE = 5.0
+MAX_PRICE = 500.0
+MIN_CURRENT_TURNOVER = 10_000_000.0
+MIN_TOTAL_MARKET_VALUE = 1_000_000_000.0
+MIN_VOLUME_RATIO = 0.8
+MONTHLY_HISTORY_QUOTA_CATEGORY = "monthly_history_symbol_quota"
+
+logger = logging.getLogger(__name__)
 
 
 def _credentials() -> Mapping[str, str]:
@@ -146,19 +155,77 @@ def _load_longbridge_daily_bars_from_context(
                 "forward_adjusted_bars": adjusted_rows,
                 "unadjusted_bars": raw_rows,
                 "error": None,
+                "error_category": None,
             }
         except Exception as exc:
             if "301607" in str(exc):
-                raise LongbridgeAPIError(
-                    "Longbridge 历史 K 线月度唯一证券额度已用尽"
-                    "（301607 Permission limit）"
-                ) from exc
+                result[symbol] = {
+                    "forward_adjusted_bars": [],
+                    "unadjusted_bars": [],
+                    "error": (
+                        "Longbridge 历史 K 线月度唯一证券额度已用尽"
+                        "（301607 Permission limit）"
+                    ),
+                    "error_category": MONTHLY_HISTORY_QUOTA_CATEGORY,
+                }
+                continue
             result[symbol] = {
                 "forward_adjusted_bars": [],
                 "unadjusted_bars": [],
                 "error": f"{type(exc).__name__}: {exc}",
+                "error_category": "provider_error",
             }
     return result
+
+
+def load_longbridge_quant_prefilter_indexes(
+    symbols: Sequence[str],
+) -> Mapping[str, Mapping[str, Any]]:
+    try:
+        with _quote_context(dict(_credentials())) as context:
+            return _load_longbridge_quant_prefilter_indexes_from_context(
+                context,
+                symbols,
+            )
+    except (ValueError, LongbridgeDependencyMissing, LongbridgeAPIError):
+        raise
+    except Exception as exc:
+        raise LongbridgeAPIError(
+            f"获取 Longbridge 量化预筛选指标失败: {exc}"
+        ) from exc
+
+
+def _load_longbridge_quant_prefilter_indexes_from_context(
+    context: Any,
+    symbols: Sequence[str],
+) -> Mapping[str, Mapping[str, Any]]:
+    try:
+        from longbridge.openapi import CalcIndex
+    except ModuleNotFoundError as exc:  # pragma: no cover - environment dependent
+        raise LongbridgeDependencyMissing(
+            "未找到 longbridge Python SDK，请先运行 `pip install longbridge`。"
+        ) from exc
+    requested = [
+        CalcIndex.Turnover,
+        CalcIndex.TotalMarketValue,
+        CalcIndex.VolumeRatio,
+        CalcIndex.TenDayChangeRate,
+    ]
+    rows = context.calc_indexes(list(symbols), requested)
+    return {
+        normalize_symbol(getattr(row, "symbol", None)): {
+            "turnover": _float(getattr(row, "turnover", None)),
+            "total_market_value": _float(
+                getattr(row, "total_market_value", None)
+            ),
+            "volume_ratio": _float(getattr(row, "volume_ratio", None)),
+            "ten_day_change_rate": _float(
+                getattr(row, "ten_day_change_rate", None)
+            ),
+        }
+        for row in list(rows or [])
+        if getattr(row, "symbol", None)
+    }
 
 
 def load_longbridge_latest_completed_us_session(
@@ -278,6 +345,12 @@ def _capture_live_bundle(
                     symbols,
                     context=context,
                 ),
+                calc_index_loader=lambda symbols: (
+                    _load_longbridge_quant_prefilter_indexes_from_context(
+                        context,
+                        list(symbols),
+                    )
+                ),
                 calendar_loader=lambda *, now: (
                     _load_longbridge_latest_completed_us_session_from_context(
                         context,
@@ -318,6 +391,9 @@ class LongbridgeQuantSourceBundleCollector:
         tradeability_loader: (
             Callable[[Iterable[str]], Mapping[str, Mapping[str, Any]]] | None
         ) = None,
+        calc_index_loader: (
+            Callable[[Iterable[str]], Mapping[str, Mapping[str, Any]]] | None
+        ) = None,
         calendar_loader: Callable[..., Mapping[str, Any]] | None = None,
         bar_loader: Callable[..., Mapping[str, Mapping[str, Any]]] | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -332,6 +408,7 @@ class LongbridgeQuantSourceBundleCollector:
             for loader in (
                 static_info_loader,
                 tradeability_loader,
+                calc_index_loader,
                 calendar_loader,
                 bar_loader,
             )
@@ -339,6 +416,9 @@ class LongbridgeQuantSourceBundleCollector:
         self.static_info_loader = static_info_loader or get_security_static_info
         self.tradeability_loader = (
             tradeability_loader or get_security_tradeability
+        )
+        self.calc_index_loader = (
+            calc_index_loader or load_longbridge_quant_prefilter_indexes
         )
         self.calendar_loader = (
             calendar_loader or load_longbridge_latest_completed_us_session
@@ -357,6 +437,7 @@ class LongbridgeQuantSourceBundleCollector:
                 self.calendar_loader,
                 self.static_info_loader,
                 self.tradeability_loader,
+                self.calc_index_loader,
                 self.bar_loader,
             )
             return
@@ -376,6 +457,12 @@ class LongbridgeQuantSourceBundleCollector:
                 lambda symbols: get_security_tradeability(
                     symbols,
                     context=context,
+                ),
+                lambda symbols: (
+                    _load_longbridge_quant_prefilter_indexes_from_context(
+                        context,
+                        list(symbols),
+                    )
                 ),
                 lambda symbols, *, data_as_of: (
                     _load_longbridge_daily_bars_from_context(
@@ -425,6 +512,27 @@ class LongbridgeQuantSourceBundleCollector:
                 records[symbol] = item
         return records
 
+    def _load_calc_indexes(
+        self,
+        symbols: Sequence[str],
+        *,
+        loader: (
+            Callable[[Iterable[str]], Mapping[str, Mapping[str, Any]]] | None
+        ) = None,
+    ) -> dict[str, Mapping[str, Any]]:
+        active_loader = loader or self.calc_index_loader
+        records = {}
+        for batch in _chunks(symbols, self.batch_size):
+            loaded = active_loader(batch)
+            for raw_symbol, item in loaded.items():
+                symbol = normalize_symbol(raw_symbol)
+                if symbol not in batch:
+                    raise ValueError(f"unexpected calc index symbol: {symbol}")
+                if symbol in records:
+                    raise ValueError(f"duplicate calc index symbol: {symbol}")
+                records[symbol] = item
+        return records
+
     def capture(self) -> Mapping[str, Any]:
         captured_at = self.clock()
         if captured_at.tzinfo is None or captured_at.utcoffset() is None:
@@ -449,6 +557,7 @@ class LongbridgeQuantSourceBundleCollector:
                 calendar_loader,
                 static_info_loader,
                 tradeability_loader,
+                calc_index_loader,
                 bar_loader,
             ) = loaders
             return self._capture_with_loaders(
@@ -456,6 +565,7 @@ class LongbridgeQuantSourceBundleCollector:
                 calendar_loader=calendar_loader,
                 static_info_loader=static_info_loader,
                 tradeability_loader=tradeability_loader,
+                calc_index_loader=calc_index_loader,
                 bar_loader=bar_loader,
             )
 
@@ -466,6 +576,9 @@ class LongbridgeQuantSourceBundleCollector:
         calendar_loader: Callable[..., Mapping[str, Any]],
         static_info_loader: Callable[[Iterable[str]], Sequence[Mapping[str, Any]]],
         tradeability_loader: Callable[
+            [Iterable[str]], Mapping[str, Mapping[str, Any]]
+        ],
+        calc_index_loader: Callable[
             [Iterable[str]], Mapping[str, Mapping[str, Any]]
         ],
         bar_loader: Callable[..., Mapping[str, Mapping[str, Any]]],
@@ -510,11 +623,14 @@ class LongbridgeQuantSourceBundleCollector:
             if _board(board) == "USMAIN" and exchange in ELIGIBLE_EXCHANGES:
                 eligible_symbols.append(symbol)
 
+        quote_symbols = list(eligible_symbols)
+        if "SPY.US" not in quote_symbols:
+            quote_symbols.append("SPY.US")
         tradeability = self._load_tradeability(
-            eligible_symbols,
+            quote_symbols,
             loader=tradeability_loader,
         )
-        history_symbols = []
+        price_filtered_symbols = []
         for symbol in eligible_symbols:
             quote = tradeability.get(symbol, {})
             try:
@@ -522,25 +638,121 @@ class LongbridgeQuantSourceBundleCollector:
             except (TypeError, ValueError):
                 last_done = 0.0
             if (
-                symbol == "SPY.US"
-                or (
-                    str(quote.get("trade_status") or "").strip().lower()
-                    == "normal"
-                    and last_done >= 5.0
-                )
+                str(quote.get("trade_status") or "").strip().lower()
+                == "normal"
+                and MIN_PRICE <= last_done <= MAX_PRICE
             ):
-                history_symbols.append(symbol)
+                price_filtered_symbols.append(symbol)
+
+        calc_symbols = list(price_filtered_symbols)
+        if "SPY.US" not in calc_symbols:
+            calc_symbols.append("SPY.US")
+        calc_indexes = self._load_calc_indexes(
+            calc_symbols,
+            loader=calc_index_loader,
+        )
+        spy_ten_day_change = _float(
+            calc_indexes.get("SPY.US", {}).get("ten_day_change_rate")
+        )
+        if spy_ten_day_change is None:
+            raise LongbridgeAPIError("SPY.US 十日涨跌幅缺失，无法执行严格预筛选")
+
+        prefiltered_symbols = []
+        prefilter_rules = {}
+        for symbol in price_filtered_symbols:
+            if symbol == "SPY.US":
+                continue
+            detail = calc_indexes.get(symbol, {})
+            turnover = _float(detail.get("turnover"))
+            total_market_value = _float(detail.get("total_market_value"))
+            volume_ratio = _float(detail.get("volume_ratio"))
+            ten_day_change = _float(detail.get("ten_day_change_rate"))
+            rules = {
+                "current_turnover": (
+                    turnover is not None
+                    and turnover >= MIN_CURRENT_TURNOVER
+                ),
+                "total_market_value": (
+                    total_market_value is not None
+                    and total_market_value >= MIN_TOTAL_MARKET_VALUE
+                ),
+                "volume_ratio": (
+                    volume_ratio is not None
+                    and volume_ratio >= MIN_VOLUME_RATIO
+                ),
+                "ten_day_relative_strength": (
+                    ten_day_change is not None
+                    and ten_day_change >= spy_ten_day_change
+                ),
+            }
+            prefilter_rules[symbol] = rules
+            if all(rules.values()):
+                prefiltered_symbols.append(symbol)
+
+        def prefilter_rank(symbol: str) -> tuple[float, float, float, str]:
+            detail = calc_indexes[symbol]
+            return (
+                -float(detail["turnover"]),
+                -(
+                    float(detail["ten_day_change_rate"])
+                    - spy_ten_day_change
+                ),
+                -float(detail["volume_ratio"]),
+                symbol,
+            )
+
+        history_symbols = sorted(prefiltered_symbols, key=prefilter_rank)
+        history_request_symbols = ["SPY.US", *(
+            symbol for symbol in history_symbols if symbol != "SPY.US"
+        )]
+        logger.info(
+            "quant strict prefilter complete: catalog=%d nasdaq_usmain=%d "
+            "price_filtered=%d prefiltered=%d history_requests=%d",
+            len(catalog),
+            len(eligible_symbols),
+            len(price_filtered_symbols),
+            len(history_symbols),
+            len(history_request_symbols),
+        )
         bar_results = bar_loader(
-            history_symbols,
+            history_request_symbols,
             data_as_of=data_as_of,
         )
+        spy_bar_result = dict(bar_results.get("SPY.US", {}))
         capture_errors = []
+        history_quota_skips = [
+            symbol
+            for symbol in history_request_symbols
+            if str(
+                bar_results.get(symbol, {}).get("error_category") or ""
+            ).strip() == MONTHLY_HISTORY_QUOTA_CATEGORY
+        ]
+        if (
+            spy_bar_result.get("error_category")
+            == MONTHLY_HISTORY_QUOTA_CATEGORY
+        ):
+            capture_errors.append(
+                "benchmark:SPY.US:monthly_history_symbol_quota"
+            )
         market_data = {}
-        for symbol in eligible_symbols:
+        market_symbols = list(eligible_symbols)
+        if "SPY.US" not in market_symbols:
+            market_symbols.append("SPY.US")
+        history_rank = {
+            symbol: index + 1 for index, symbol in enumerate(history_symbols)
+        }
+        for symbol in market_symbols:
             quote = dict(tradeability.get(symbol, {}))
+            calc_detail = dict(calc_indexes.get(symbol, {}))
             bars = dict(bar_results.get(symbol, {}))
             error = str(bars.get("error") or "").strip()
-            if error:
+            error_category = str(
+                bars.get("error_category") or ""
+            ).strip() or None
+            if (
+                error_category != MONTHLY_HISTORY_QUOTA_CATEGORY
+                and error
+            ):
                 capture_errors.append(f"bars:{symbol}:{error}")
             adjusted = list(bars.get("forward_adjusted_bars") or [])
             raw = list(bars.get("unadjusted_bars") or [])
@@ -557,6 +769,33 @@ class LongbridgeQuantSourceBundleCollector:
                 ),
                 "price_data_as_of": raw_date.isoformat() if raw_date else None,
                 "bar_data_as_of": raw_date.isoformat() if raw_date else None,
+                "current_turnover": _float(calc_detail.get("turnover")),
+                "total_market_value": _float(
+                    calc_detail.get("total_market_value")
+                ),
+                "volume_ratio": _float(calc_detail.get("volume_ratio")),
+                "ten_day_change_rate": _float(
+                    calc_detail.get("ten_day_change_rate")
+                ),
+                "ten_day_relative_strength": (
+                    _float(calc_detail.get("ten_day_change_rate"))
+                    - spy_ten_day_change
+                    if _float(calc_detail.get("ten_day_change_rate")) is not None
+                    else None
+                ),
+                "prefilter": {
+                    "status": (
+                        "benchmark"
+                        if symbol == "SPY.US"
+                        else "selected"
+                        if symbol in history_rank
+                        else "excluded"
+                    ),
+                    "rank": history_rank.get(symbol),
+                    "rules": prefilter_rules.get(symbol, {}),
+                },
+                "bar_error": error or None,
+                "bar_error_category": error_category,
                 "forward_adjusted_bars": adjusted,
                 "unadjusted_bars": raw,
                 "news": {
@@ -579,7 +818,27 @@ class LongbridgeQuantSourceBundleCollector:
                 "errors": capture_errors,
                 "catalog_count": len(catalog),
                 "eligible_market_data_count": len(eligible_symbols),
-                "history_symbol_count": len(history_symbols),
+                "price_filtered_count": len(price_filtered_symbols),
+                "prefiltered_stock_count": len(history_symbols),
+                "history_symbol_count": len(history_request_symbols),
+                "history_quota_skipped_count": len(history_quota_skips),
+                "history_quota_skipped_symbols": history_quota_skips,
+                "prefilter_policy": {
+                    "exchange": "NASDAQ",
+                    "minimum_price": MIN_PRICE,
+                    "maximum_price": MAX_PRICE,
+                    "minimum_current_turnover": MIN_CURRENT_TURNOVER,
+                    "minimum_total_market_value": MIN_TOTAL_MARKET_VALUE,
+                    "minimum_volume_ratio": MIN_VOLUME_RATIO,
+                    "minimum_ten_day_relative_strength": 0.0,
+                    "sort": [
+                        "current_turnover_desc",
+                        "ten_day_relative_strength_desc",
+                        "volume_ratio_desc",
+                        "symbol_asc",
+                    ],
+                    "history_symbol_limit": None,
+                },
             },
             "data_as_of": data_as_of.isoformat(),
             "official_close": calendar["official_close"],

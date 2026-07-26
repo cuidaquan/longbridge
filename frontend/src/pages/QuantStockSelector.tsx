@@ -36,7 +36,7 @@ import {
 } from "../api/quantStockSelector";
 
 const ACTIVE_RUN_KEY = "quantSelectorActiveRunId";
-const HARD_FILTER_COUNT = 8;
+const HARD_FILTER_COUNT = 12;
 const TERMINAL_STATUSES = new Set<QuantRunStatus>([
   "completed",
   "partial",
@@ -89,6 +89,13 @@ function formatScore(value: number | null | undefined) {
 function formatPercent(value: number | string | null | undefined) {
   const number = Number(value);
   return Number.isFinite(number) ? `${(number * 100).toFixed(1)}%` : "--";
+}
+
+function formatRunError(value: string) {
+  if (value === "benchmark:SPY.US:monthly_history_symbol_quota") {
+    return "SPY.US 基准历史 K 线触发月度唯一证券额度限制（301607），已继续处理其余标的";
+  }
+  return value;
 }
 
 function candidateDataTime(candidate: QuantCandidate | undefined) {
@@ -335,7 +342,7 @@ export default function QuantStockSelector() {
     <div className="space-y-5 animate-fade-in">
       <PageHeader
         title="量化优选"
-        description="美国主板统一候选 · 5–20 个交易日"
+        description="NASDAQ 证券 · 5–20 个交易日"
         icon={<QueryStats />}
         actions={(
           <div className="flex items-center gap-2">
@@ -368,7 +375,7 @@ export default function QuantStockSelector() {
       )}
       {run?.status === "partial" && (
         <Alert type="warning" title="本次运行不完整">
-          最终榜单未发布。{run.error_summary.join("；")}
+          最终榜单未发布。{run.error_summary.map(formatRunError).join("；")}
         </Alert>
       )}
       {run?.status === "failed" && (
