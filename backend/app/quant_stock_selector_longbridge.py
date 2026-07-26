@@ -23,6 +23,7 @@ CATALOG_SOURCE_VERSION = "longbridge-security-list-static-info-v1"
 BAR_SOURCE_VERSION = "longbridge-history-candlestick-v1"
 CALENDAR_SOURCE_VERSION = "longbridge-trading-days-v1"
 DEFAULT_BATCH_SIZE = 500
+MAX_DOCUMENTED_HISTORY_SYMBOLS = 3000
 NEW_YORK = ZoneInfo("America/New_York")
 ELIGIBLE_EXCHANGES = frozenset({"NYSE", "NASDAQ", "NYSE AMERICAN"})
 
@@ -238,6 +239,7 @@ class LongbridgeQuantSourceBundleCollector:
         bar_loader: Callable[..., Mapping[str, Mapping[str, Any]]] = load_longbridge_daily_bars,
         clock: Callable[[], datetime] | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
+        max_history_symbols: int = 100,
     ) -> None:
         self.catalog_loader = catalog_loader or (
             lambda: SecurityCatalogService(fetch_attempts=2).refresh("US")
@@ -250,6 +252,12 @@ class LongbridgeQuantSourceBundleCollector:
         if batch_size < 1 or batch_size > 500:
             raise ValueError("batch_size must be between 1 and 500")
         self.batch_size = batch_size
+        if (
+            max_history_symbols < 1
+            or max_history_symbols > MAX_DOCUMENTED_HISTORY_SYMBOLS
+        ):
+            raise ValueError("max_history_symbols must be between 1 and 3000")
+        self.max_history_symbols = max_history_symbols
 
     def _load_static(self, symbols: Sequence[str]) -> dict[str, Mapping[str, Any]]:
         records = {}
@@ -325,8 +333,31 @@ class LongbridgeQuantSourceBundleCollector:
                 eligible_symbols.append(symbol)
 
         tradeability = self._load_tradeability(eligible_symbols)
+        history_symbols = []
+        for symbol in eligible_symbols:
+            quote = tradeability.get(symbol, {})
+            try:
+                last_done = float(quote.get("last_done"))
+            except (TypeError, ValueError):
+                last_done = 0.0
+            if (
+                symbol == "SPY.US"
+                or (
+                    str(quote.get("trade_status") or "").strip().lower()
+                    == "normal"
+                    and last_done >= 5.0
+                )
+            ):
+                history_symbols.append(symbol)
+        if len(history_symbols) > self.max_history_symbols:
+            raise ValueError(
+                "Longbridge history symbol budget exceeded before capture: "
+                f"required={len(history_symbols)}, "
+                f"configured_limit={self.max_history_symbols}; configure "
+                "QUANT_SELECTOR_HISTORY_SYMBOL_LIMIT from the account entitlement"
+            )
         bar_results = self.bar_loader(
-            eligible_symbols,
+            history_symbols,
             data_as_of=data_as_of,
         )
         capture_errors = []
@@ -374,6 +405,8 @@ class LongbridgeQuantSourceBundleCollector:
                 "errors": capture_errors,
                 "catalog_count": len(catalog),
                 "eligible_market_data_count": len(eligible_symbols),
+                "history_symbol_count": len(history_symbols),
+                "history_symbol_limit": self.max_history_symbols,
             },
             "data_as_of": data_as_of.isoformat(),
             "official_close": calendar["official_close"],

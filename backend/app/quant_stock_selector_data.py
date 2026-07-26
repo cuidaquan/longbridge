@@ -669,8 +669,16 @@ def build_configured_quant_selection_service():
             LongbridgeQuantSourceBundleCollector,
         )
 
+        if settings.quant_selector_history_symbol_limit is None:
+            raise QuantSourceBundleError(
+                "QUANT_SELECTOR_HISTORY_SYMBOL_LIMIT is required for live "
+                "Longbridge capture"
+            )
+        collector = LongbridgeQuantSourceBundleCollector(
+            max_history_symbols=settings.quant_selector_history_symbol_limit,
+        )
         input_provider = JsonQuantRunInputProvider(
-            bundle_loader=LongbridgeQuantSourceBundleCollector().capture,
+            bundle_loader=collector.capture,
         )
     return QuantSelectionService(
         input_provider,

@@ -126,7 +126,9 @@ def get_quant_selection_service() -> QuantSelectionService:
                 status_code=503,
                 detail=(
                     "量化优选服务尚未就绪：请配置 DeepSeek API Key 与完整的 "
-                    "Longbridge 凭据；QUANT_SELECTOR_BUNDLE_PATH 仅用于冻结数据包回放"
+                    "Longbridge 凭据，并按账户额度设置 "
+                    "QUANT_SELECTOR_HISTORY_SYMBOL_LIMIT；"
+                    "QUANT_SELECTOR_BUNDLE_PATH 仅用于冻结数据包回放"
                 ),
             ) from exc
     return _service

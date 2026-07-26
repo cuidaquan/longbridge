@@ -65,6 +65,7 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
         tradeability_loader=None,
         bar_loader=_bars,
         batch_size=500,
+        max_history_symbols=3000,
     ):
         catalog = catalog or [
             {"symbol": "AAA.US", "name": "Ordinary stock"},
@@ -102,6 +103,7 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
             bar_loader=bar_loader,
             clock=lambda: CAPTURED_AT,
             batch_size=batch_size,
+            max_history_symbols=max_history_symbols,
         )
 
     def test_collects_all_usmain_product_names_without_classification(self):
@@ -177,6 +179,49 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
             bundle["source_capture"]["errors"],
             ["bars:AAA.US:quota exceeded"],
         )
+
+    def test_h1_to_h4_prefilter_limits_history_requests(self):
+        requested = []
+
+        def tradeability_loader(symbols):
+            return {
+                symbol: {
+                    "trade_status": "halted" if symbol == "BND.US" else "normal",
+                    "last_done": 4.99 if symbol == "INV.US" else 100.0,
+                }
+                for symbol in symbols
+            }
+
+        def bar_loader(symbols, *, data_as_of):
+            requested.extend(symbols)
+            return _bars(symbols, data_as_of=data_as_of)
+
+        bundle = self._collector(
+            tradeability_loader=tradeability_loader,
+            bar_loader=bar_loader,
+        ).capture()
+
+        self.assertEqual(requested, ["AAA.US", "SPY.US"])
+        self.assertEqual(bundle["source_capture"]["history_symbol_count"], 2)
+        self.assertEqual(bundle["market_data"]["BND.US"]["unadjusted_bars"], [])
+        self.assertEqual(bundle["market_data"]["INV.US"]["unadjusted_bars"], [])
+
+    def test_history_budget_fails_before_bar_requests(self):
+        calls = []
+
+        def bar_loader(symbols, *, data_as_of):
+            calls.append((symbols, data_as_of))
+            return _bars(symbols, data_as_of=data_as_of)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "history symbol budget exceeded.*required=4.*configured_limit=3",
+        ):
+            self._collector(
+                bar_loader=bar_loader,
+                max_history_symbols=3,
+            ).capture()
+        self.assertEqual(calls, [])
 
     def test_missing_history_without_provider_error_is_an_exclusion_not_partial(self):
         def bar_loader(symbols, *, data_as_of):
