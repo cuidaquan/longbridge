@@ -10,6 +10,7 @@ from unittest.mock import patch
 from app.exceptions import LongbridgeAPIError
 from app.quant_stock_selector_longbridge import (
     LongbridgeQuantSourceBundleCollector,
+    _load_longbridge_quant_prefilter_indexes_from_context,
     load_longbridge_daily_bars,
     load_longbridge_latest_completed_us_session,
 )
@@ -63,6 +64,7 @@ def _calc_indexes(symbols):
             "turnover": 100_000_000.0,
             "total_market_value": 10_000_000_000.0,
             "volume_ratio": 1.2,
+            "pe_ttm_ratio": 20.0,
             "ten_day_change_rate": 0.05 if symbol == "SPY.US" else 0.10,
         }
         for symbol in symbols
@@ -328,18 +330,19 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
 
         def calc_loader(symbols):
             values = {
-                "SPY.US": (100_000_000, 10_000_000_000, 1.2, 0.02),
-                "AAA.US": (20_000_000, 2_000_000_000, 1.0, 0.03),
-                "BBB.US": (50_000_000, 2_000_000_000, 1.0, 0.02),
-                "CCC.US": (50_000_000, 2_000_000_000, 1.5, 0.04),
-                "DDD.US": (9_999_999, 2_000_000_000, 2.0, 0.10),
+                "SPY.US": (100_000_000, 10_000_000_000, 1.2, 20.0, 0.02),
+                "AAA.US": (20_000_000, 2_000_000_000, 1.0, 25.0, 0.03),
+                "BBB.US": (50_000_000, 2_000_000_000, 1.0, 30.0, 0.02),
+                "CCC.US": (50_000_000, 2_000_000_000, 1.5, 40.0, 0.04),
+                "DDD.US": (9_999_999, 2_000_000_000, 2.0, 15.0, 0.10),
             }
             return {
                 symbol: {
                     "turnover": values[symbol][0],
                     "total_market_value": values[symbol][1],
                     "volume_ratio": values[symbol][2],
-                    "ten_day_change_rate": values[symbol][3],
+                    "pe_ttm_ratio": values[symbol][3],
+                    "ten_day_change_rate": values[symbol][4],
                 }
                 for symbol in symbols
             }
@@ -366,6 +369,54 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
             bundle["market_data"]["DDD.US"]["prefilter"]["status"],
             "excluded",
         )
+
+    def test_strict_prefilter_requires_positive_pe_ttm_below_50(self):
+        catalog = [
+            {"symbol": symbol, "name": symbol}
+            for symbol in ("VALID.US", "HIGH.US", "LOSS.US", "MISSING.US")
+        ]
+        requested = []
+
+        def calc_loader(symbols):
+            pe_values = {
+                "SPY.US": 25.0,
+                "VALID.US": 49.99,
+                "HIGH.US": 50.0,
+                "LOSS.US": -10.0,
+                "MISSING.US": None,
+            }
+            return {
+                symbol: {
+                    "turnover": 100_000_000.0,
+                    "total_market_value": 10_000_000_000.0,
+                    "volume_ratio": 1.2,
+                    "pe_ttm_ratio": pe_values[symbol],
+                    "ten_day_change_rate": (
+                        0.05 if symbol == "SPY.US" else 0.10
+                    ),
+                }
+                for symbol in symbols
+            }
+
+        def bar_loader(symbols, *, data_as_of):
+            requested.extend(symbols)
+            return _bars(symbols, data_as_of=data_as_of)
+
+        bundle = self._collector(
+            catalog=catalog,
+            calc_index_loader=calc_loader,
+            bar_loader=bar_loader,
+        ).capture()
+
+        self.assertEqual(requested, ["SPY.US", "VALID.US"])
+        self.assertEqual(bundle["source_capture"]["prefiltered_stock_count"], 1)
+        self.assertEqual(bundle["market_data"]["VALID.US"]["pe_ttm_ratio"], 49.99)
+        for symbol in ("HIGH.US", "LOSS.US", "MISSING.US"):
+            self.assertFalse(
+                bundle["market_data"][symbol]["prefilter"]["rules"][
+                    "pe_ttm_ratio"
+                ]
+            )
 
     def test_monthly_quota_skip_is_preserved_without_aborting_capture(self):
         def bar_loader(symbols, *, data_as_of):
@@ -487,6 +538,31 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
 
 
 class LongbridgeQuantLoaderTests(unittest.TestCase):
+    def test_prefilter_indexes_request_and_map_pe_ttm(self):
+        from longbridge.openapi import CalcIndex
+
+        calls = []
+
+        def calc_indexes(symbols, indexes):
+            calls.append((list(symbols), list(indexes)))
+            return [SimpleNamespace(
+                symbol="AAA.US",
+                turnover=Decimal("100000000"),
+                total_market_value=Decimal("10000000000"),
+                volume_ratio=Decimal("1.2"),
+                pe_ttm_ratio=Decimal("49.5"),
+                ten_day_change_rate=Decimal("0.1"),
+            )]
+
+        result = _load_longbridge_quant_prefilter_indexes_from_context(
+            SimpleNamespace(calc_indexes=calc_indexes),
+            ["AAA.US"],
+        )
+
+        self.assertEqual(calls[0][0], ["AAA.US"])
+        self.assertIn(CalcIndex.PeTtmRatio, calls[0][1])
+        self.assertEqual(result["AAA.US"]["pe_ttm_ratio"], 49.5)
+
     def test_calendar_resolves_verified_half_day_close(self):
         context = SimpleNamespace(
             trading_days=lambda *_args: SimpleNamespace(

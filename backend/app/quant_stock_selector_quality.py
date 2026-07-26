@@ -331,7 +331,7 @@ class QuantSelectionQualityService:
         manifest = payload.get("selection_manifest")
         if not isinstance(manifest, Mapping):
             return False
-        if manifest.get("candidate_set_method") != "deterministic-full-score-v1.3":
+        if manifest.get("candidate_set_method") != "deterministic-full-score-v1.4":
             return False
         ranking = manifest.get("ranking")
         top_symbols = manifest.get("top_symbols")

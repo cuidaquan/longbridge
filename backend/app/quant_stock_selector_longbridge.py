@@ -34,6 +34,7 @@ MAX_PRICE = 500.0
 MIN_CURRENT_TURNOVER = 10_000_000.0
 MIN_TOTAL_MARKET_VALUE = 1_000_000_000.0
 MIN_VOLUME_RATIO = 0.8
+MAX_PE_TTM = 50.0
 MONTHLY_HISTORY_QUOTA_CATEGORY = "monthly_history_symbol_quota"
 
 logger = logging.getLogger(__name__)
@@ -209,6 +210,7 @@ def _load_longbridge_quant_prefilter_indexes_from_context(
         CalcIndex.Turnover,
         CalcIndex.TotalMarketValue,
         CalcIndex.VolumeRatio,
+        CalcIndex.PeTtmRatio,
         CalcIndex.TenDayChangeRate,
     ]
     rows = context.calc_indexes(list(symbols), requested)
@@ -219,6 +221,7 @@ def _load_longbridge_quant_prefilter_indexes_from_context(
                 getattr(row, "total_market_value", None)
             ),
             "volume_ratio": _float(getattr(row, "volume_ratio", None)),
+            "pe_ttm_ratio": _float(getattr(row, "pe_ttm_ratio", None)),
             "ten_day_change_rate": _float(
                 getattr(row, "ten_day_change_rate", None)
             ),
@@ -666,6 +669,7 @@ class LongbridgeQuantSourceBundleCollector:
             turnover = _float(detail.get("turnover"))
             total_market_value = _float(detail.get("total_market_value"))
             volume_ratio = _float(detail.get("volume_ratio"))
+            pe_ttm_ratio = _float(detail.get("pe_ttm_ratio"))
             ten_day_change = _float(detail.get("ten_day_change_rate"))
             rules = {
                 "current_turnover": (
@@ -679,6 +683,10 @@ class LongbridgeQuantSourceBundleCollector:
                 "volume_ratio": (
                     volume_ratio is not None
                     and volume_ratio >= MIN_VOLUME_RATIO
+                ),
+                "pe_ttm_ratio": (
+                    pe_ttm_ratio is not None
+                    and 0.0 < pe_ttm_ratio < MAX_PE_TTM
                 ),
                 "ten_day_relative_strength": (
                     ten_day_change is not None
@@ -774,6 +782,7 @@ class LongbridgeQuantSourceBundleCollector:
                     calc_detail.get("total_market_value")
                 ),
                 "volume_ratio": _float(calc_detail.get("volume_ratio")),
+                "pe_ttm_ratio": _float(calc_detail.get("pe_ttm_ratio")),
                 "ten_day_change_rate": _float(
                     calc_detail.get("ten_day_change_rate")
                 ),
@@ -830,6 +839,8 @@ class LongbridgeQuantSourceBundleCollector:
                     "minimum_current_turnover": MIN_CURRENT_TURNOVER,
                     "minimum_total_market_value": MIN_TOTAL_MARKET_VALUE,
                     "minimum_volume_ratio": MIN_VOLUME_RATIO,
+                    "minimum_pe_ttm_exclusive": 0.0,
+                    "maximum_pe_ttm_exclusive": MAX_PE_TTM,
                     "minimum_ten_day_relative_strength": 0.0,
                     "sort": [
                         "current_turnover_desc",

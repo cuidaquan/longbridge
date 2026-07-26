@@ -85,7 +85,7 @@ class QuantSelectionQualityTests(unittest.TestCase):
             "input_snapshots": references,
             "selection_manifest": {
                 "candidate_set_method": (
-                    "deterministic-full-score-v1.3"
+                    "deterministic-full-score-v1.4"
                     if stable_manifest else "legacy-boundary"
                 ),
                 "ranking": [{

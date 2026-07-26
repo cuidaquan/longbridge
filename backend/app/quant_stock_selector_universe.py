@@ -18,7 +18,7 @@ from .quant_stock_selector_hashing import canonical_sha256
 from .quant_stock_selector_symbols import normalize_symbol
 
 
-FILTER_VERSION = "quant-selector-filter-v1.3"
+FILTER_VERSION = "quant-selector-filter-v1.4"
 AI_QUANT_THRESHOLD = 65.0
 AI_CANDIDATE_LIMIT = 30
 BENCHMARK_SYMBOLS = frozenset({"SPY"})
@@ -29,6 +29,7 @@ MAX_PRICE = 500.0
 MIN_CURRENT_TURNOVER = 10_000_000.0
 MIN_TOTAL_MARKET_VALUE = 1_000_000_000.0
 MIN_VOLUME_RATIO = 0.8
+MAX_PE_TTM = 50.0
 
 
 class UniverseSelectionError(ValueError):
@@ -55,6 +56,7 @@ class QuantUniverseCandidate:
     current_turnover: float | None = None
     total_market_value: float | None = None
     volume_ratio: float | None = None
+    pe_ttm_ratio: float | None = None
     ten_day_change_rate: float | None = None
     ten_day_relative_strength: float | None = None
 
@@ -81,6 +83,7 @@ class CandidateMarketData:
     current_turnover: float | None = None
     total_market_value: float | None = None
     volume_ratio: float | None = None
+    pe_ttm_ratio: float | None = None
     ten_day_change_rate: float | None = None
     ten_day_relative_strength: float | None = None
 
@@ -183,6 +186,7 @@ def build_unified_candidate_pool(
                 facts.total_market_value if facts is not None else None
             ),
             volume_ratio=facts.volume_ratio if facts is not None else None,
+            pe_ttm_ratio=facts.pe_ttm_ratio if facts is not None else None,
             ten_day_change_rate=(
                 facts.ten_day_change_rate if facts is not None else None
             ),
@@ -198,7 +202,7 @@ def evaluate_hard_filters(
     *,
     data_as_of: date,
 ) -> tuple[dict[str, dict[str, str | None]], list[str]]:
-    """Evaluate the frozen v1.2 H1-H8 contract."""
+    """Evaluate the versioned H1-H13 hard-filter contract."""
     symbol = normalize_symbol(candidate.symbol)
     filters: dict[str, dict[str, str | None]] = {}
     filters["H1"] = (
@@ -275,6 +279,12 @@ def evaluate_hard_filters(
         if candidate.ten_day_relative_strength is not None
         and candidate.ten_day_relative_strength >= 0.0
         else _filter("fail", "ten_day_relative_strength_below_spy_or_missing")
+    )
+    filters["H13"] = (
+        _filter("pass")
+        if candidate.pe_ttm_ratio is not None
+        and 0.0 < candidate.pe_ttm_ratio < MAX_PE_TTM
+        else _filter("fail", "pe_ttm_outside_0_to_50_or_missing")
     )
     reasons = [
         str(filters[code]["reason"])
@@ -371,6 +381,7 @@ class QuantUniverseSelector:
                 "current_turnover": candidate.current_turnover,
                 "total_market_value": candidate.total_market_value,
                 "volume_ratio": candidate.volume_ratio,
+                "pe_ttm_ratio": candidate.pe_ttm_ratio,
                 "ten_day_change_rate": candidate.ten_day_change_rate,
                 "ten_day_relative_strength": candidate.ten_day_relative_strength,
                 "name": candidate.name,
@@ -425,7 +436,7 @@ class QuantUniverseSelector:
                 "symbol": item["symbol"],
             })
         selection_manifest = {
-            "candidate_set_method": "deterministic-full-score-v1.3",
+            "candidate_set_method": "deterministic-full-score-v1.4",
             "candidates": manifest_candidates,
             "filter_version": FILTER_VERSION,
             "q_threshold": self.policy.q_threshold,

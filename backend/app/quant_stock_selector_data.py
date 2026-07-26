@@ -437,6 +437,7 @@ class JsonQuantRunInputProvider:
                     "current_turnover",
                     "total_market_value",
                     "volume_ratio",
+                    "pe_ttm_ratio",
                     "ten_day_change_rate",
                     "ten_day_relative_strength",
                 )
@@ -524,6 +525,10 @@ class JsonQuantRunInputProvider:
                 volume_ratio=_optional_float(
                     raw_facts.get("volume_ratio"),
                     field=f"{symbol}.volume_ratio",
+                ),
+                pe_ttm_ratio=_optional_float(
+                    raw_facts.get("pe_ttm_ratio"),
+                    field=f"{symbol}.pe_ttm_ratio",
                 ),
                 ten_day_change_rate=_optional_float(
                     raw_facts.get("ten_day_change_rate"),

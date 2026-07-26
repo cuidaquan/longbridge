@@ -36,7 +36,7 @@ import {
 } from "../api/quantStockSelector";
 
 const ACTIVE_RUN_KEY = "quantSelectorActiveRunId";
-const HARD_FILTER_COUNT = 12;
+const HARD_FILTER_COUNT = 13;
 const TERMINAL_STATUSES = new Set<QuantRunStatus>([
   "completed",
   "partial",

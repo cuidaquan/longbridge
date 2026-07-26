@@ -73,6 +73,7 @@ def _candidate(symbol: str, **overrides) -> QuantUniverseCandidate:
         "current_turnover": 100_000_000.0,
         "total_market_value": 10_000_000_000.0,
         "volume_ratio": 1.2,
+        "pe_ttm_ratio": 20.0,
         "ten_day_change_rate": 0.10,
         "ten_day_relative_strength": 0.05,
     }
@@ -198,6 +199,16 @@ class HardFilterTests(unittest.TestCase):
                 "H12",
                 "ten_day_relative_strength_below_spy_or_missing",
             ),
+            (
+                {"pe_ttm_ratio": 50.0},
+                "H13",
+                "pe_ttm_outside_0_to_50_or_missing",
+            ),
+            (
+                {"pe_ttm_ratio": 0.0},
+                "H13",
+                "pe_ttm_outside_0_to_50_or_missing",
+            ),
         )
         for override, code, reason in cases:
             with self.subTest(code=code, override=override):
@@ -232,7 +243,7 @@ class QuantUniverseSelectionTests(unittest.TestCase):
         manifest = result["selection_manifest"]
         self.assertEqual(
             manifest["candidate_set_method"],
-            "deterministic-full-score-v1.3",
+            "deterministic-full-score-v1.4",
         )
         self.assertEqual(len(result["selection_manifest_hash"]), 64)
 

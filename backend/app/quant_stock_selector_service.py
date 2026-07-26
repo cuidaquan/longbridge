@@ -25,7 +25,7 @@ from .runtime import get_runtime_metadata
 from .stock_picker_ai_snapshots import sanitize_error
 
 
-UNIVERSE_VERSION = "quant-selector-universe-v1.3"
+UNIVERSE_VERSION = "quant-selector-universe-v1.4"
 RUN_SCHEMA_VERSION = "quant-selector-run-v1"
 INPUT_SNAPSHOT_SCHEMA_VERSION = "quant-selector-input-snapshot-v1"
 TERMINAL_STATUSES = frozenset({"completed", "partial", "failed", "cancelled"})
