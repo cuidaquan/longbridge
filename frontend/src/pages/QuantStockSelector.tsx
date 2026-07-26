@@ -225,7 +225,10 @@ export default function QuantStockSelector() {
           setRun(snapshot);
           if (TERMINAL_STATUSES.has(snapshot.status)) {
             localStorage.removeItem(ACTIVE_RUN_KEY);
-            await loadResults(snapshot.run_id);
+            await Promise.all([
+              loadResults(snapshot.run_id),
+              loadHistory(),
+            ]);
           } else {
             setStarting(true);
             connectToRun(snapshot.run_id);
@@ -244,7 +247,7 @@ export default function QuantStockSelector() {
       mountedRef.current = false;
       closeConnection();
     };
-  }, [closeConnection, connectToRun, loadResults]);
+  }, [closeConnection, connectToRun, loadHistory, loadResults]);
 
   const startRun = async () => {
     setStarting(true);

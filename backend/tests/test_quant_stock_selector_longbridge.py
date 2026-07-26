@@ -162,6 +162,96 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
         self.assertTrue(all(len(item) <= 2 for item in static_batches))
         self.assertTrue(all(len(item) <= 2 for item in quote_batches))
 
+    def test_live_capture_reuses_one_quote_context_across_all_batches(self):
+        catalog = [
+            {"symbol": f"S{index:03d}.US", "name": str(index)}
+            for index in range(5)
+        ]
+        quote_context_instance = SimpleNamespace()
+        context_entries = []
+        static_calls = []
+        quote_calls = []
+        bar_calls = []
+
+        @contextmanager
+        def quote_context(credentials):
+            context_entries.append(credentials)
+            yield quote_context_instance
+
+        def calendar_loader(active_context, *, captured_at):
+            self.assertIs(active_context, quote_context_instance)
+            return _calendar(now=captured_at)
+
+        def static_loader(symbols, *, context):
+            self.assertIs(context, quote_context_instance)
+            static_calls.append(list(symbols))
+            return [
+                {"symbol": symbol, "board": "USMain", "exchange": "NYSE"}
+                for symbol in symbols
+            ]
+
+        def quote_loader(symbols, *, context):
+            self.assertIs(context, quote_context_instance)
+            quote_calls.append(list(symbols))
+            return {
+                symbol: {"trade_status": "normal", "last_done": 100.0}
+                for symbol in symbols
+            }
+
+        def bar_loader(active_context, symbols, *, data_as_of):
+            self.assertIs(active_context, quote_context_instance)
+            bar_calls.append(list(symbols))
+            return _bars(symbols, data_as_of=data_as_of)
+
+        collector = LongbridgeQuantSourceBundleCollector(
+            catalog_loader=lambda: catalog,
+            clock=lambda: CAPTURED_AT,
+            batch_size=2,
+            isolate_live_capture=False,
+        )
+        with (
+            patch(
+                "app.quant_stock_selector_longbridge._quote_context",
+                quote_context,
+            ),
+            patch(
+                "app.quant_stock_selector_longbridge._credentials",
+                return_value={"configured": "yes"},
+            ),
+            patch(
+                "app.quant_stock_selector_longbridge."
+                "_load_longbridge_latest_completed_us_session_from_context",
+                side_effect=calendar_loader,
+            ),
+            patch(
+                "app.quant_stock_selector_longbridge.get_security_static_info",
+                side_effect=static_loader,
+            ),
+            patch(
+                "app.quant_stock_selector_longbridge.get_security_tradeability",
+                side_effect=quote_loader,
+            ),
+            patch(
+                "app.quant_stock_selector_longbridge."
+                "_load_longbridge_daily_bars_from_context",
+                side_effect=bar_loader,
+            ),
+        ):
+            bundle = collector.capture()
+
+        self.assertEqual(context_entries, [{"configured": "yes"}])
+        self.assertEqual([len(batch) for batch in static_calls], [2, 2, 2])
+        self.assertEqual([len(batch) for batch in quote_calls], [2, 2, 2])
+        self.assertEqual(bar_calls, [[
+            "S000.US",
+            "S001.US",
+            "S002.US",
+            "S003.US",
+            "S004.US",
+            "SPY.US",
+        ]])
+        self.assertEqual(bundle["source_capture"]["history_symbol_count"], 6)
+
     def test_bar_error_marks_capture_partial(self):
         def bar_loader(symbols, *, data_as_of):
             result = dict(_bars(symbols, data_as_of=data_as_of))

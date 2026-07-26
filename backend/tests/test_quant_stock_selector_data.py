@@ -9,6 +9,7 @@ import unittest
 
 import duckdb
 
+from app.exceptions import LongbridgeAPIError
 from app.db import _run_migrations
 from app.quant_stock_selector_ai import AICompletion, QuantAISelectionService
 from app.quant_stock_selector_data import (
@@ -199,6 +200,25 @@ class QuantSourceBundleTests(unittest.TestCase):
                 self.path,
                 bundle_loader=_bundle,
             )
+
+    def test_live_provider_preserves_actionable_longbridge_error(self):
+        def failed_capture():
+            raise LongbridgeAPIError(
+                "Longbridge 历史 K 线月度唯一证券额度已用尽"
+            )
+
+        provider = JsonQuantRunInputProvider(
+            bundle_loader=failed_capture,
+            market_bar_store=MarketBarSnapshotStore(
+                connection_factory=self.factory,
+                clock=lambda: CAPTURED_AT,
+            ),
+        )
+        with self.assertRaisesRegex(
+            QuantSourceBundleError,
+            "量化优选数据采集失败.*月度唯一证券额度已用尽",
+        ):
+            provider.capture()
 
     def test_bundle_loader_uses_same_validated_contract(self):
         provider = JsonQuantRunInputProvider(

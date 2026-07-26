@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, timedelta
 import math
 from typing import Any, Dict, Iterable, Iterator, List, Optional
@@ -229,6 +229,8 @@ def is_market_trading_day(
 
 def get_security_static_info(
     symbols: Iterable[str],
+    *,
+    context: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """Load classification fields exposed by Longbridge static_info."""
     symbol_list = _symbols(symbols)
@@ -236,8 +238,11 @@ def get_security_static_info(
         return []
 
     try:
-        with _context("quote") as context:
-            response = context.static_info(symbol_list)
+        context_scope = (
+            _context("quote") if context is None else nullcontext(context)
+        )
+        with context_scope as active_context:
+            response = active_context.static_info(symbol_list)
     except (ValueError, LongbridgeDependencyMissing, LongbridgeAPIError):
         raise
     except Exception as exc:
@@ -286,14 +291,19 @@ def get_security_static_info(
 def get_security_tradeability(
     symbols: Iterable[str],
     include_depth: bool = False,
+    *,
+    context: Optional[Any] = None,
 ) -> Dict[str, Dict[str, Any]]:
     symbol_list = _symbols(symbols)
     if not symbol_list:
         return {}
 
     try:
-        with _context("quote") as context:
-            quotes = context.quote(symbol_list)
+        context_scope = (
+            _context("quote") if context is None else nullcontext(context)
+        )
+        with context_scope as active_context:
+            quotes = active_context.quote(symbol_list)
             result = {
                 symbol: {
                     "status": "no_data",
@@ -332,7 +342,7 @@ def get_security_tradeability(
             if include_depth:
                 for symbol in symbol_list:
                     try:
-                        depth = context.depth(symbol)
+                        depth = active_context.depth(symbol)
                         bid_price, bid_volume = _best_depth(
                             getattr(depth, "bids", []) or [],
                             highest=True,

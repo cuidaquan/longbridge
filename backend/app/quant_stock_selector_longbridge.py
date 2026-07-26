@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+import multiprocessing
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
@@ -86,6 +89,27 @@ def load_longbridge_daily_bars(
 ) -> Mapping[str, Mapping[str, Any]]:
     """Load independent adjusted and raw daily series without shared OHLC writes."""
     try:
+        with _quote_context(dict(_credentials())) as context:
+            return _load_longbridge_daily_bars_from_context(
+                context,
+                symbols,
+                data_as_of=data_as_of,
+                count=count,
+            )
+    except (ValueError, LongbridgeDependencyMissing, LongbridgeAPIError):
+        raise
+    except Exception as exc:
+        raise LongbridgeAPIError(f"获取 Longbridge 日 K 失败: {exc}") from exc
+
+
+def _load_longbridge_daily_bars_from_context(
+    context: Any,
+    symbols: Sequence[str],
+    *,
+    data_as_of: date,
+    count: int = 90,
+) -> Mapping[str, Mapping[str, Any]]:
+    try:
         from longbridge.openapi import AdjustType, Period
     except ModuleNotFoundError as exc:  # pragma: no cover - environment dependent
         raise LongbridgeDependencyMissing(
@@ -93,53 +117,47 @@ def load_longbridge_daily_bars(
         ) from exc
     start = data_as_of - timedelta(days=max(180, count * 2))
     result: dict[str, Mapping[str, Any]] = {}
-    try:
-        with _quote_context(dict(_credentials())) as context:
-            for raw_symbol in symbols:
-                symbol = normalize_symbol(raw_symbol)
-                try:
-                    adjusted = context.history_candlesticks_by_date(
-                        symbol,
-                        Period.Day,
-                        AdjustType.ForwardAdjust,
-                        start,
-                        data_as_of,
-                    )
-                    raw = context.history_candlesticks_by_date(
-                        symbol,
-                        Period.Day,
-                        AdjustType.NoAdjust,
-                        start,
-                        data_as_of,
-                    )
-                    adjusted_rows = sorted(
-                        (_bar_row(item) for item in list(adjusted or [])),
-                        key=lambda item: item["ts"],
-                    )[-count:]
-                    raw_rows = sorted(
-                        (_bar_row(item) for item in list(raw or [])),
-                        key=lambda item: item["ts"],
-                    )[-count:]
-                    result[symbol] = {
-                        "forward_adjusted_bars": adjusted_rows,
-                        "unadjusted_bars": raw_rows,
-                        "error": None,
-                    }
-                except Exception as exc:
-                    if "301607" in str(exc):
-                        raise LongbridgeAPIError(
-                            "Longbridge 历史 K 线月度唯一证券额度已用尽"
-                            "（301607 Permission limit）"
-                        ) from exc
-                    result[symbol] = {
-                        "forward_adjusted_bars": [],
-                        "unadjusted_bars": [],
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
-    except (ValueError, LongbridgeDependencyMissing, LongbridgeAPIError):
-        raise
-    except Exception as exc:
-        raise LongbridgeAPIError(f"获取 Longbridge 日 K 失败: {exc}") from exc
+    for raw_symbol in symbols:
+        symbol = normalize_symbol(raw_symbol)
+        try:
+            adjusted = context.history_candlesticks_by_date(
+                symbol,
+                Period.Day,
+                AdjustType.ForwardAdjust,
+                start,
+                data_as_of,
+            )
+            raw = context.history_candlesticks_by_date(
+                symbol,
+                Period.Day,
+                AdjustType.NoAdjust,
+                start,
+                data_as_of,
+            )
+            adjusted_rows = sorted(
+                (_bar_row(item) for item in list(adjusted or [])),
+                key=lambda item: item["ts"],
+            )[-count:]
+            raw_rows = sorted(
+                (_bar_row(item) for item in list(raw or [])),
+                key=lambda item: item["ts"],
+            )[-count:]
+            result[symbol] = {
+                "forward_adjusted_bars": adjusted_rows,
+                "unadjusted_bars": raw_rows,
+                "error": None,
+            }
+        except Exception as exc:
+            if "301607" in str(exc):
+                raise LongbridgeAPIError(
+                    "Longbridge 历史 K 线月度唯一证券额度已用尽"
+                    "（301607 Permission limit）"
+                ) from exc
+            result[symbol] = {
+                "forward_adjusted_bars": [],
+                "unadjusted_bars": [],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
     return result
 
 
@@ -152,6 +170,23 @@ def load_longbridge_latest_completed_us_session(
     if captured_at.tzinfo is None or captured_at.utcoffset() is None:
         raise ValueError("calendar capture time must be timezone-aware")
     captured_at = captured_at.astimezone(timezone.utc)
+    try:
+        with _quote_context(dict(_credentials())) as context:
+            return _load_longbridge_latest_completed_us_session_from_context(
+                context,
+                captured_at=captured_at,
+            )
+    except (ValueError, LongbridgeDependencyMissing, LongbridgeAPIError):
+        raise
+    except Exception as exc:
+        raise LongbridgeAPIError(f"获取 Longbridge 美国交易日失败: {exc}") from exc
+
+
+def _load_longbridge_latest_completed_us_session_from_context(
+    context: Any,
+    *,
+    captured_at: datetime,
+) -> Mapping[str, Any]:
     local_today = captured_at.astimezone(NEW_YORK).date()
     start = local_today - timedelta(days=28)
     try:
@@ -160,13 +195,7 @@ def load_longbridge_latest_completed_us_session(
         raise LongbridgeDependencyMissing(
             "未找到 longbridge Python SDK，请先运行 `pip install longbridge`。"
         ) from exc
-    try:
-        with _quote_context(dict(_credentials())) as context:
-            response = context.trading_days(Market.US, start, local_today)
-    except (ValueError, LongbridgeDependencyMissing):
-        raise
-    except Exception as exc:
-        raise LongbridgeAPIError(f"获取 Longbridge 美国交易日失败: {exc}") from exc
+    response = context.trading_days(Market.US, start, local_today)
     trading_days = {
         value if isinstance(value, date) else date.fromisoformat(str(value))
         for value in list(getattr(response, "trading_days", None) or [])
@@ -230,6 +259,52 @@ def _exchange(value: Any) -> str:
     return aliases.get(normalized, normalized)
 
 
+def _capture_live_bundle(
+    raw_catalog: Sequence[Mapping[str, Any]],
+    credentials: Mapping[str, str],
+    captured_at: datetime,
+    batch_size: int,
+) -> Mapping[str, Any]:
+    """Run the GIL-blocking SDK capture outside the API server process."""
+    try:
+        with _quote_context(dict(credentials)) as context:
+            collector = LongbridgeQuantSourceBundleCollector(
+                catalog_loader=lambda: raw_catalog,
+                static_info_loader=lambda symbols: get_security_static_info(
+                    symbols,
+                    context=context,
+                ),
+                tradeability_loader=lambda symbols: get_security_tradeability(
+                    symbols,
+                    context=context,
+                ),
+                calendar_loader=lambda *, now: (
+                    _load_longbridge_latest_completed_us_session_from_context(
+                        context,
+                        captured_at=now,
+                    )
+                ),
+                bar_loader=lambda symbols, *, data_as_of: (
+                    _load_longbridge_daily_bars_from_context(
+                        context,
+                        symbols,
+                        data_as_of=data_as_of,
+                    )
+                ),
+                clock=lambda: captured_at,
+                batch_size=batch_size,
+                isolate_live_capture=False,
+            )
+            return collector.capture()
+    except Exception as exc:
+        detail = (
+            str(exc)
+            if isinstance(exc, LongbridgeAPIError)
+            else f"{type(exc).__name__}: {exc}"
+        )
+        raise LongbridgeAPIError(detail) from None
+
+
 class LongbridgeQuantSourceBundleCollector:
     """Capture Longbridge facts into the same immutable v3 bundle used for replay."""
 
@@ -237,29 +312,90 @@ class LongbridgeQuantSourceBundleCollector:
         self,
         *,
         catalog_loader: Callable[[], Sequence[Mapping[str, Any]]] | None = None,
-        static_info_loader: Callable[[Iterable[str]], Sequence[Mapping[str, Any]]] = get_security_static_info,
-        tradeability_loader: Callable[[Iterable[str]], Mapping[str, Mapping[str, Any]]] = get_security_tradeability,
-        calendar_loader: Callable[..., Mapping[str, Any]] = load_longbridge_latest_completed_us_session,
-        bar_loader: Callable[..., Mapping[str, Mapping[str, Any]]] = load_longbridge_daily_bars,
+        static_info_loader: (
+            Callable[[Iterable[str]], Sequence[Mapping[str, Any]]] | None
+        ) = None,
+        tradeability_loader: (
+            Callable[[Iterable[str]], Mapping[str, Mapping[str, Any]]] | None
+        ) = None,
+        calendar_loader: Callable[..., Mapping[str, Any]] | None = None,
+        bar_loader: Callable[..., Mapping[str, Mapping[str, Any]]] | None = None,
         clock: Callable[[], datetime] | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
+        isolate_live_capture: bool = True,
     ) -> None:
         self.catalog_loader = catalog_loader or (
             lambda: SecurityCatalogService(fetch_attempts=2).refresh("US")
         )
-        self.static_info_loader = static_info_loader
-        self.tradeability_loader = tradeability_loader
-        self.calendar_loader = calendar_loader
-        self.bar_loader = bar_loader
+        self._reuse_live_context = all(
+            loader is None
+            for loader in (
+                static_info_loader,
+                tradeability_loader,
+                calendar_loader,
+                bar_loader,
+            )
+        )
+        self.static_info_loader = static_info_loader or get_security_static_info
+        self.tradeability_loader = (
+            tradeability_loader or get_security_tradeability
+        )
+        self.calendar_loader = (
+            calendar_loader or load_longbridge_latest_completed_us_session
+        )
+        self.bar_loader = bar_loader or load_longbridge_daily_bars
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         if batch_size < 1 or batch_size > 500:
             raise ValueError("batch_size must be between 1 and 500")
         self.batch_size = batch_size
+        self.isolate_live_capture = isolate_live_capture
 
-    def _load_static(self, symbols: Sequence[str]) -> dict[str, Mapping[str, Any]]:
+    @contextmanager
+    def _loader_scope(self):
+        if not self._reuse_live_context:
+            yield (
+                self.calendar_loader,
+                self.static_info_loader,
+                self.tradeability_loader,
+                self.bar_loader,
+            )
+            return
+
+        with _quote_context(dict(_credentials())) as context:
+            yield (
+                lambda *, now: (
+                    _load_longbridge_latest_completed_us_session_from_context(
+                        context,
+                        captured_at=now,
+                    )
+                ),
+                lambda symbols: get_security_static_info(
+                    symbols,
+                    context=context,
+                ),
+                lambda symbols: get_security_tradeability(
+                    symbols,
+                    context=context,
+                ),
+                lambda symbols, *, data_as_of: (
+                    _load_longbridge_daily_bars_from_context(
+                        context,
+                        symbols,
+                        data_as_of=data_as_of,
+                    )
+                ),
+            )
+
+    def _load_static(
+        self,
+        symbols: Sequence[str],
+        *,
+        loader: Callable[[Iterable[str]], Sequence[Mapping[str, Any]]] | None = None,
+    ) -> dict[str, Mapping[str, Any]]:
+        active_loader = loader or self.static_info_loader
         records = {}
         for batch in _chunks(symbols, self.batch_size):
-            for item in self.static_info_loader(batch):
+            for item in active_loader(batch):
                 symbol = normalize_symbol(item.get("symbol"))
                 if symbol not in batch:
                     raise ValueError(f"unexpected static info symbol: {symbol}")
@@ -271,10 +407,15 @@ class LongbridgeQuantSourceBundleCollector:
     def _load_tradeability(
         self,
         symbols: Sequence[str],
+        *,
+        loader: (
+            Callable[[Iterable[str]], Mapping[str, Mapping[str, Any]]] | None
+        ) = None,
     ) -> dict[str, Mapping[str, Any]]:
+        active_loader = loader or self.tradeability_loader
         records = {}
         for batch in _chunks(symbols, self.batch_size):
-            loaded = self.tradeability_loader(batch)
+            loaded = active_loader(batch)
             for raw_symbol, item in loaded.items():
                 symbol = normalize_symbol(raw_symbol)
                 if symbol not in batch:
@@ -289,7 +430,47 @@ class LongbridgeQuantSourceBundleCollector:
         if captured_at.tzinfo is None or captured_at.utcoffset() is None:
             raise ValueError("collector clock must be timezone-aware")
         captured_at = captured_at.astimezone(timezone.utc)
-        calendar = dict(self.calendar_loader(now=captured_at))
+        if self._reuse_live_context and self.isolate_live_capture:
+            raw_catalog = [dict(item) for item in self.catalog_loader()]
+            process_context = multiprocessing.get_context("spawn")
+            with ProcessPoolExecutor(
+                max_workers=1,
+                mp_context=process_context,
+            ) as executor:
+                return executor.submit(
+                    _capture_live_bundle,
+                    raw_catalog,
+                    dict(_credentials()),
+                    captured_at,
+                    self.batch_size,
+                ).result()
+        with self._loader_scope() as loaders:
+            (
+                calendar_loader,
+                static_info_loader,
+                tradeability_loader,
+                bar_loader,
+            ) = loaders
+            return self._capture_with_loaders(
+                captured_at=captured_at,
+                calendar_loader=calendar_loader,
+                static_info_loader=static_info_loader,
+                tradeability_loader=tradeability_loader,
+                bar_loader=bar_loader,
+            )
+
+    def _capture_with_loaders(
+        self,
+        *,
+        captured_at: datetime,
+        calendar_loader: Callable[..., Mapping[str, Any]],
+        static_info_loader: Callable[[Iterable[str]], Sequence[Mapping[str, Any]]],
+        tradeability_loader: Callable[
+            [Iterable[str]], Mapping[str, Mapping[str, Any]]
+        ],
+        bar_loader: Callable[..., Mapping[str, Mapping[str, Any]]],
+    ) -> Mapping[str, Any]:
+        calendar = dict(calendar_loader(now=captured_at))
         data_as_of = date.fromisoformat(str(calendar["session_date"]))
 
         raw_catalog = [dict(item) for item in self.catalog_loader()]
@@ -306,7 +487,7 @@ class LongbridgeQuantSourceBundleCollector:
             "market": "US",
         })
         symbols = sorted(by_symbol)
-        static = self._load_static(symbols)
+        static = self._load_static(symbols, loader=static_info_loader)
         catalog = []
         eligible_symbols = []
         for symbol in symbols:
@@ -329,7 +510,10 @@ class LongbridgeQuantSourceBundleCollector:
             if _board(board) == "USMAIN" and exchange in ELIGIBLE_EXCHANGES:
                 eligible_symbols.append(symbol)
 
-        tradeability = self._load_tradeability(eligible_symbols)
+        tradeability = self._load_tradeability(
+            eligible_symbols,
+            loader=tradeability_loader,
+        )
         history_symbols = []
         for symbol in eligible_symbols:
             quote = tradeability.get(symbol, {})
@@ -346,7 +530,7 @@ class LongbridgeQuantSourceBundleCollector:
                 )
             ):
                 history_symbols.append(symbol)
-        bar_results = self.bar_loader(
+        bar_results = bar_loader(
             history_symbols,
             data_as_of=data_as_of,
         )

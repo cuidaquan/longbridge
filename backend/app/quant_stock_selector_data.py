@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .exceptions import LongbridgeAPIError
 from .quant_stock_selector import QuantInputError, calculate_quant_indicators
 from .quant_stock_selector_ai import AICandidateContext
 from .quant_stock_selector_hashing import canonical_json
@@ -175,6 +176,10 @@ class JsonQuantRunInputProvider:
                 payload = self.bundle_loader()
             except QuantSourceBundleError:
                 raise
+            except LongbridgeAPIError as exc:
+                raise QuantSourceBundleError(
+                    f"量化优选数据采集失败：{exc}"
+                ) from exc
             except Exception as exc:
                 raise QuantSourceBundleError(
                     f"Longbridge source capture failed: {type(exc).__name__}: {exc}"
