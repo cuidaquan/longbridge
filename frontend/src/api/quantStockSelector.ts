@@ -67,17 +67,14 @@ export interface QuantFinalResult {
 export interface QuantCandidate {
   symbol: string;
   name: string;
-  metadata: {
-    raw_asset_class: string;
-    asset_class: string;
-    exposure_direction: string;
-    leverage: number | null;
+  catalog_evidence: {
+    board: string;
     exchange: string;
+    market: string;
     source: string;
     source_version: string;
     captured_at: string;
-    mapping_version: string;
-  } | null;
+  };
   indicators: Record<string, number | string> | null;
   hard_filters: Record<string, { status: string; reason?: string | null }>;
   exclusion_reasons: string[];
@@ -86,11 +83,6 @@ export interface QuantCandidate {
   candidate_quant_input_hash: string;
   price_data_as_of: string | null;
   bar_data_as_of: string | null;
-  nbbo: {
-    quote_timestamp: string | null;
-    source: string;
-  } | null;
-  spread_bps: number | null;
   quant_score: { total: number; [key: string]: number | string } | null;
   ai?: {
     request_status: string;

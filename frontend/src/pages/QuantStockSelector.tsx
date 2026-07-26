@@ -36,6 +36,7 @@ import {
 } from "../api/quantStockSelector";
 
 const ACTIVE_RUN_KEY = "quantSelectorActiveRunId";
+const HARD_FILTER_COUNT = 8;
 const TERMINAL_STATUSES = new Set<QuantRunStatus>([
   "completed",
   "partial",
@@ -92,20 +93,7 @@ function formatPercent(value: number | string | null | undefined) {
 
 function candidateDataTime(candidate: QuantCandidate | undefined) {
   if (!candidate) return "--";
-  return candidate.nbbo?.quote_timestamp
-    ? formatDate(candidate.nbbo.quote_timestamp)
-    : candidate.bar_data_as_of || candidate.price_data_as_of || "--";
-}
-
-function assetLabel(candidate: QuantCandidate) {
-  const asset = candidate.metadata?.asset_class;
-  if (asset === "common_stock") return "正股";
-  if (asset === "equity_etf") {
-    return candidate.metadata?.exposure_direction === "inverse"
-      ? "反向 ETF"
-      : "权益 ETF";
-  }
-  return asset || "未知";
+  return candidate.bar_data_as_of || candidate.price_data_as_of || "--";
 }
 
 export default function QuantStockSelector() {
@@ -329,7 +317,7 @@ export default function QuantStockSelector() {
   const completedProgress = status ? STATUS_META[status].progress : 0;
   const candidates = data?.candidates || [];
   const hardFilteredCount = candidates.filter((candidate) => (
-    Object.keys(candidate.hard_filters || {}).length === 11
+    Object.keys(candidate.hard_filters || {}).length === HARD_FILTER_COUNT
     && Object.values(candidate.hard_filters).every((item) => item.status === "pass")
   )).length;
   const quantCandidateCount = candidates.filter((candidate) => (
@@ -344,7 +332,7 @@ export default function QuantStockSelector() {
     <div className="space-y-5 animate-fade-in">
       <PageHeader
         title="量化优选"
-        description="美股正股与权益 ETF · 5–20 个交易日"
+        description="美国主板统一候选 · 5–20 个交易日"
         icon={<QueryStats />}
         actions={(
           <div className="flex items-center gap-2">
@@ -532,12 +520,12 @@ function ResultsTable({
 }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[1120px] text-sm">
+      <table className="w-full min-w-[1040px] text-sm">
         <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-900/50 dark:text-slate-400">
           <tr>
             <th className="w-14 px-4 py-3 text-left">排名</th>
             <th className="px-4 py-3 text-left">标的</th>
-            <th className="px-4 py-3 text-left">产品</th>
+            <th className="px-4 py-3 text-left">交易所</th>
             <th className="px-4 py-3 text-right">Q</th>
             <th className="px-4 py-3 text-right">AI</th>
             <th className="px-4 py-3 text-right">F</th>
@@ -563,7 +551,9 @@ function ResultsTable({
                   <div className="font-semibold text-slate-900 dark:text-white">{item.symbol}</div>
                   <div className="max-w-48 truncate text-xs text-slate-500">{item.name}</div>
                 </td>
-                <td className="px-4 py-3"><Badge>{candidate ? assetLabel(candidate) : "--"}</Badge></td>
+                <td className="px-4 py-3">
+                  <Badge>{candidate?.catalog_evidence.exchange || "--"}</Badge>
+                </td>
                 <td className="px-4 py-3 text-right tabular-nums">{formatScore(item.quant_score)}</td>
                 <td className="px-4 py-3 text-right tabular-nums">{formatScore(item.ai_score)}</td>
                 <td className="px-4 py-3 text-right font-semibold tabular-nums text-cyan-700 dark:text-cyan-400">{formatScore(item.final_score)}</td>
@@ -591,14 +581,14 @@ function DiagnosticsTable({
 }) {
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[680px] text-sm">
+      <table className="w-full min-w-[720px] text-sm">
         <thead className="bg-slate-50 text-xs uppercase text-slate-500 dark:bg-slate-900/50 dark:text-slate-400">
           <tr>
             <th className="px-4 py-3 text-left">标的</th>
-            <th className="px-4 py-3 text-left">产品</th>
+            <th className="px-4 py-3 text-left">目录</th>
             <th className="px-4 py-3 text-left">状态</th>
             <th className="px-4 py-3 text-right">Q</th>
-            <th className="px-4 py-3 text-right">价差</th>
+            <th className="px-4 py-3 text-right">硬过滤</th>
             <th className="px-4 py-3 text-left">排除原因</th>
           </tr>
         </thead>
@@ -610,14 +600,25 @@ function DiagnosticsTable({
               className="cursor-pointer bg-white transition-colors hover:bg-slate-50 dark:bg-slate-800 dark:hover:bg-slate-700/40"
             >
               <td className="px-4 py-3 font-semibold text-slate-900 dark:text-white">{item.symbol}</td>
-              <td className="px-4 py-3"><Badge>{assetLabel(item)}</Badge></td>
+              <td className="px-4 py-3">
+                <div className="font-medium text-slate-700 dark:text-slate-200">
+                  {item.catalog_evidence.exchange || "--"}
+                </div>
+                <div className="text-xs text-slate-400">
+                  {item.catalog_evidence.board || "--"}
+                </div>
+              </td>
               <td className="px-4 py-3">
                 <Badge variant={item.selected_for_ai ? "info" : item.exclusion_reasons.length ? "danger" : "default"}>
                   {item.selected_for_ai ? "AI 候选" : item.selection_status}
                 </Badge>
               </td>
               <td className="px-4 py-3 text-right tabular-nums">{formatScore(item.quant_score?.total)}</td>
-              <td className="px-4 py-3 text-right tabular-nums">{item.spread_bps == null ? "--" : `${item.spread_bps.toFixed(1)} bp`}</td>
+              <td className="px-4 py-3 text-right tabular-nums">
+                {Object.values(item.hard_filters || {}).filter(
+                  (filter) => filter.status === "pass",
+                ).length} / {HARD_FILTER_COUNT}
+              </td>
               <td className="max-w-64 truncate px-4 py-3 text-slate-500 dark:text-slate-400">
                 {item.exclusion_reasons.join("、") || "--"}
               </td>
@@ -655,7 +656,7 @@ function CandidateDrawer({
           <div>
             <div className="flex items-center gap-2">
               <h2 className="text-xl font-semibold text-slate-900 dark:text-white">{candidate.symbol}</h2>
-              <Badge>{assetLabel(candidate)}</Badge>
+              <Badge>{candidate.catalog_evidence.exchange || "USMain"}</Badge>
             </div>
             <p className="mt-0.5 text-sm text-slate-500">{candidate.name}</p>
           </div>
@@ -678,14 +679,12 @@ function CandidateDrawer({
             <DetailMetric label="F 分" value={formatScore(candidate.result?.final_score)} emphasis />
           </div>
 
-          <DetailSection title="产品与流动性">
+          <DetailSection title="目录与流动性">
             <DetailRows rows={[
-              ["交易所", candidate.metadata?.exchange || "--"],
-              ["供应商原始类别", candidate.metadata?.raw_asset_class || "--"],
-              ["敞口方向", candidate.metadata?.exposure_direction || "--"],
-              ["杠杆倍数", candidate.metadata?.leverage == null ? "--" : `${candidate.metadata.leverage}x`],
+              ["市场", candidate.catalog_evidence.market || "--"],
+              ["目录板块", candidate.catalog_evidence.board || "--"],
+              ["交易所", candidate.catalog_evidence.exchange || "--"],
               ["20 日成交额中位数", candidate.indicators?.median_turnover_20d == null ? "--" : `$${(Number(candidate.indicators.median_turnover_20d) / 1_000_000).toFixed(1)}M`],
-              ["买卖价差", candidate.spread_bps == null ? "--" : `${candidate.spread_bps.toFixed(1)} bp`],
             ]} />
           </DetailSection>
 
@@ -705,7 +704,7 @@ function CandidateDrawer({
           </DetailSection>
 
           <DetailSection title="硬过滤">
-            <div className="mb-3 text-sm text-slate-500 dark:text-slate-400">{passed} / 11 通过</div>
+            <div className="mb-3 text-sm text-slate-500 dark:text-slate-400">{passed} / {HARD_FILTER_COUNT} 通过</div>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
               {Object.entries(candidate.hard_filters || {}).sort().map(([code, item]) => (
                 <div key={code} className="flex items-center gap-2 border-b border-slate-100 py-2 dark:border-slate-800">
@@ -748,11 +747,10 @@ function CandidateDrawer({
             <DetailRows rows={[
               ["数据时点", candidateDataTime(candidate)],
               ["日 K 截止", candidate.bar_data_as_of || "--"],
-              ["NBBO 来源", candidate.nbbo?.source || "--"],
-              ["产品范围来源", candidate.metadata ? `${candidate.metadata.source} / ${candidate.metadata.source_version}` : "--"],
-              ["产品映射版本", candidate.metadata?.mapping_version || "--"],
-              ["产品证据时间", formatDate(candidate.metadata?.captured_at || null)],
-              ["硬过滤", `${passed} / 11 通过`],
+              ["目录来源", candidate.catalog_evidence.source || "--"],
+              ["目录版本", candidate.catalog_evidence.source_version || "--"],
+              ["目录捕获时间", formatDate(candidate.catalog_evidence.captured_at || null)],
+              ["硬过滤", `${passed} / ${HARD_FILTER_COUNT} 通过`],
               ["AI 输入", candidate.ai?.request_status || "未计划"],
               ["候选输入哈希", candidate.candidate_quant_input_hash || "--"],
               ["运行输入哈希", run?.run_input_hash || "--"],
