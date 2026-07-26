@@ -76,6 +76,11 @@ def _bundle() -> dict:
     return {
         "schema_version": SOURCE_BUNDLE_SCHEMA_VERSION,
         "captured_at": CAPTURED_AT.isoformat(),
+        "source_capture": {
+            "status": "complete",
+            "source": "test-bundle",
+            "errors": [],
+        },
         "data_as_of": DATA_AS_OF.isoformat(),
         "official_close": "2026-07-24T20:00:00Z",
         "exchange_calendar": {
@@ -185,6 +190,50 @@ class QuantSourceBundleTests(unittest.TestCase):
                 clock=lambda: CAPTURED_AT,
             ),
         )
+
+    def test_provider_requires_exactly_one_input_source(self):
+        with self.assertRaisesRegex(QuantSourceBundleError, "exactly one"):
+            JsonQuantRunInputProvider()
+        with self.assertRaisesRegex(QuantSourceBundleError, "exactly one"):
+            JsonQuantRunInputProvider(
+                self.path,
+                bundle_loader=_bundle,
+            )
+
+    def test_bundle_loader_uses_same_validated_contract(self):
+        provider = JsonQuantRunInputProvider(
+            bundle_loader=_bundle,
+            market_bar_store=MarketBarSnapshotStore(
+                connection_factory=self.factory,
+                clock=lambda: CAPTURED_AT,
+            ),
+        )
+        captured = provider.capture()
+        self.assertTrue(captured.required_inputs_complete)
+        self.assertEqual(
+            captured.input_snapshots[0].snapshot_kind,
+            "source_capture",
+        )
+
+    def test_partial_source_capture_marks_run_incomplete(self):
+        bundle = _bundle()
+        bundle["source_capture"] = {
+            "status": "partial",
+            "source": "longbridge",
+            "errors": ["bars:AAA.US:quota exceeded"],
+        }
+        captured = self._provider(bundle).capture()
+        self.assertFalse(captured.required_inputs_complete)
+        self.assertEqual(captured.errors, ["bars:AAA.US:quota exceeded"])
+
+    def test_complete_source_capture_rejects_errors(self):
+        bundle = _bundle()
+        bundle["source_capture"]["errors"] = ["unexpected"]
+        with self.assertRaisesRegex(
+            QuantSourceBundleError,
+            "complete source_capture",
+        ):
+            self._provider(bundle).capture()
 
     def test_bundle_computes_quant_without_product_metadata_or_nbbo(self):
         bundle = _bundle()

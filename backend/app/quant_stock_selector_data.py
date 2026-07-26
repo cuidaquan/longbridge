@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .quant_stock_selector import QuantInputError, calculate_quant_indicators
 from .quant_stock_selector_ai import AICandidateContext
@@ -154,26 +154,42 @@ class JsonQuantRunInputProvider:
 
     def __init__(
         self,
-        bundle_path: Path | str,
+        bundle_path: Path | str | None = None,
         *,
+        bundle_loader: Callable[[], Mapping[str, Any]] | None = None,
         market_bar_store: MarketBarSnapshotStore | None = None,
         selection_policy: SelectionPolicy | None = None,
     ) -> None:
-        self.bundle_path = Path(bundle_path)
+        if (bundle_path is None) == (bundle_loader is None):
+            raise QuantSourceBundleError(
+                "exactly one of bundle_path or bundle_loader must be configured"
+            )
+        self.bundle_path = Path(bundle_path) if bundle_path is not None else None
+        self.bundle_loader = bundle_loader
         self.market_bar_store = market_bar_store or MarketBarSnapshotStore()
         self.selection_policy = selection_policy or SelectionPolicy()
 
     def _read(self) -> Mapping[str, Any]:
-        try:
-            payload = json.loads(self.bundle_path.read_text(encoding="utf-8"))
-        except FileNotFoundError as exc:
-            raise QuantSourceBundleError(
-                f"quant source bundle not found: {self.bundle_path}"
-            ) from exc
-        except (OSError, json.JSONDecodeError) as exc:
-            raise QuantSourceBundleError(
-                f"quant source bundle is invalid: {type(exc).__name__}"
-            ) from exc
+        if self.bundle_loader is not None:
+            try:
+                payload = self.bundle_loader()
+            except QuantSourceBundleError:
+                raise
+            except Exception as exc:
+                raise QuantSourceBundleError(
+                    f"Longbridge source capture failed: {type(exc).__name__}: {exc}"
+                ) from exc
+        else:
+            try:
+                payload = json.loads(self.bundle_path.read_text(encoding="utf-8"))
+            except FileNotFoundError as exc:
+                raise QuantSourceBundleError(
+                    f"quant source bundle not found: {self.bundle_path}"
+                ) from exc
+            except (OSError, json.JSONDecodeError) as exc:
+                raise QuantSourceBundleError(
+                    f"quant source bundle is invalid: {type(exc).__name__}"
+                ) from exc
         payload = _mapping(payload, field="bundle")
         canonical_json(payload)
         if payload.get("schema_version") != SOURCE_BUNDLE_SCHEMA_VERSION:
@@ -232,6 +248,25 @@ class JsonQuantRunInputProvider:
     def capture(self) -> CapturedQuantRun:
         payload = self._read()
         captured_at = _datetime(payload.get("captured_at"), field="captured_at")
+        source_capture = _mapping(
+            payload.get("source_capture"),
+            field="source_capture",
+        )
+        capture_status = str(source_capture.get("status") or "").strip().lower()
+        if capture_status not in {"complete", "partial"}:
+            raise QuantSourceBundleError("source_capture.status is invalid")
+        capture_errors = [
+            str(item).strip()
+            for item in _sequence(
+                source_capture.get("errors"),
+                field="source_capture.errors",
+            )
+            if str(item).strip()
+        ]
+        if capture_status == "complete" and capture_errors:
+            raise QuantSourceBundleError(
+                "complete source_capture cannot contain errors"
+            )
         data_as_of = _date(payload.get("data_as_of"), field="data_as_of")
         official_close = _datetime(
             payload.get("official_close"), field="official_close"
@@ -462,6 +497,14 @@ class JsonQuantRunInputProvider:
 
         input_snapshots = [
             CapturedInputSnapshot(
+                snapshot_kind="source_capture",
+                source=str(source_capture.get("source") or "bundle"),
+                schema_version=SOURCE_BUNDLE_SCHEMA_VERSION,
+                captured_at=captured_at,
+                data_as_of=official_close,
+                payload=source_capture,
+            ),
+            CapturedInputSnapshot(
                 snapshot_kind="security_catalog",
                 source=catalog_source,
                 schema_version=SOURCE_BUNDLE_SCHEMA_VERSION,
@@ -584,13 +627,16 @@ class JsonQuantRunInputProvider:
             quant_selection=quant_selection,
             ai_contexts=ai_contexts,
             input_snapshots=input_snapshots,
-            required_inputs_complete=quant_selection["status"] == "completed",
+            required_inputs_complete=(
+                quant_selection["status"] == "completed"
+                and capture_status == "complete"
+            ),
             errors=(
                 (
                     []
                     if quant_selection["status"] == "completed"
                     else ["quant_selection_incomplete"]
-                )
+                ) + capture_errors
             ),
         )
 
@@ -606,8 +652,6 @@ def build_configured_quant_selection_service():
     from .repositories import load_ai_credentials
 
     settings = get_settings()
-    if settings.quant_selector_bundle_path is None:
-        raise QuantSourceBundleError("QUANT_SELECTOR_BUNDLE_PATH is not configured")
     credentials = load_ai_credentials()
     api_key = str(credentials.get("DEEPSEEK_API_KEY") or "").strip()
     if not api_key:
@@ -616,9 +660,19 @@ def build_configured_quant_selection_service():
         api_key,
         base_url=settings.deepseek_base_url,
     )
-    return QuantSelectionService(
-        JsonQuantRunInputProvider(
+    if settings.quant_selector_bundle_path is not None:
+        input_provider = JsonQuantRunInputProvider(
             settings.quant_selector_bundle_path,
-        ),
+        )
+    else:
+        from .quant_stock_selector_longbridge import (
+            LongbridgeQuantSourceBundleCollector,
+        )
+
+        input_provider = JsonQuantRunInputProvider(
+            bundle_loader=LongbridgeQuantSourceBundleCollector().capture,
+        )
+    return QuantSelectionService(
+        input_provider,
         QuantAISelectionService(ai_provider),
     )
