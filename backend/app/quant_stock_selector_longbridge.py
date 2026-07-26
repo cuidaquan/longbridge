@@ -23,7 +23,6 @@ CATALOG_SOURCE_VERSION = "longbridge-security-list-static-info-v1"
 BAR_SOURCE_VERSION = "longbridge-history-candlestick-v1"
 CALENDAR_SOURCE_VERSION = "longbridge-trading-days-v1"
 DEFAULT_BATCH_SIZE = 500
-MAX_DOCUMENTED_HISTORY_SYMBOLS = 3000
 NEW_YORK = ZoneInfo("America/New_York")
 ELIGIBLE_EXCHANGES = frozenset({"NYSE", "NASDAQ", "NYSE AMERICAN"})
 
@@ -127,12 +126,17 @@ def load_longbridge_daily_bars(
                         "error": None,
                     }
                 except Exception as exc:
+                    if "301607" in str(exc):
+                        raise LongbridgeAPIError(
+                            "Longbridge 历史 K 线月度唯一证券额度已用尽"
+                            "（301607 Permission limit）"
+                        ) from exc
                     result[symbol] = {
                         "forward_adjusted_bars": [],
                         "unadjusted_bars": [],
                         "error": f"{type(exc).__name__}: {exc}",
                     }
-    except (ValueError, LongbridgeDependencyMissing):
+    except (ValueError, LongbridgeDependencyMissing, LongbridgeAPIError):
         raise
     except Exception as exc:
         raise LongbridgeAPIError(f"获取 Longbridge 日 K 失败: {exc}") from exc
@@ -239,7 +243,6 @@ class LongbridgeQuantSourceBundleCollector:
         bar_loader: Callable[..., Mapping[str, Mapping[str, Any]]] = load_longbridge_daily_bars,
         clock: Callable[[], datetime] | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
-        max_history_symbols: int = 100,
     ) -> None:
         self.catalog_loader = catalog_loader or (
             lambda: SecurityCatalogService(fetch_attempts=2).refresh("US")
@@ -252,12 +255,6 @@ class LongbridgeQuantSourceBundleCollector:
         if batch_size < 1 or batch_size > 500:
             raise ValueError("batch_size must be between 1 and 500")
         self.batch_size = batch_size
-        if (
-            max_history_symbols < 1
-            or max_history_symbols > MAX_DOCUMENTED_HISTORY_SYMBOLS
-        ):
-            raise ValueError("max_history_symbols must be between 1 and 3000")
-        self.max_history_symbols = max_history_symbols
 
     def _load_static(self, symbols: Sequence[str]) -> dict[str, Mapping[str, Any]]:
         records = {}
@@ -349,13 +346,6 @@ class LongbridgeQuantSourceBundleCollector:
                 )
             ):
                 history_symbols.append(symbol)
-        if len(history_symbols) > self.max_history_symbols:
-            raise ValueError(
-                "Longbridge history symbol budget exceeded before capture: "
-                f"required={len(history_symbols)}, "
-                f"configured_limit={self.max_history_symbols}; configure "
-                "QUANT_SELECTOR_HISTORY_SYMBOL_LIMIT from the account entitlement"
-            )
         bar_results = self.bar_loader(
             history_symbols,
             data_as_of=data_as_of,
@@ -406,7 +396,6 @@ class LongbridgeQuantSourceBundleCollector:
                 "catalog_count": len(catalog),
                 "eligible_market_data_count": len(eligible_symbols),
                 "history_symbol_count": len(history_symbols),
-                "history_symbol_limit": self.max_history_symbols,
             },
             "data_as_of": data_as_of.isoformat(),
             "official_close": calendar["official_close"],

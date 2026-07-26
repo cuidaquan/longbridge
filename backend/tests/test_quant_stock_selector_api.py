@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 import unittest
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -269,12 +270,34 @@ class QuantStockSelectorApiTests(unittest.TestCase):
 
     def test_unconfigured_service_fails_closed(self) -> None:
         configure_quant_selection_service(None)
-        response = self.client.post(
-            "/api/quant-stock-selector/runs",
-            json={},
-        )
+        with patch(
+            "app.quant_stock_selector_data.build_configured_quant_selection_service",
+            side_effect=RuntimeError("DEEPSEEK_API_KEY is not configured"),
+        ):
+            response = self.client.post(
+                "/api/quant-stock-selector/runs",
+                json={},
+            )
         self.assertEqual(response.status_code, 503)
-        self.assertIn("Longbridge 凭据", response.json()["detail"])
+        self.assertEqual(
+            response.json()["detail"],
+            "量化优选服务尚未就绪：DeepSeek API Key 未配置",
+        )
+
+    def test_service_initialization_error_reports_specific_cause(self) -> None:
+        configure_quant_selection_service(None)
+        with patch(
+            "app.quant_stock_selector_data.build_configured_quant_selection_service",
+            side_effect=RuntimeError("snapshot repository unavailable"),
+        ):
+            response = self.client.get(
+                "/api/quant-stock-selector/runs?limit=1"
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json()["detail"],
+            "量化优选服务初始化失败：snapshot repository unavailable",
+        )
 
     def test_fixed_evaluation_and_history_contracts(self) -> None:
         evaluation = self.client.post(

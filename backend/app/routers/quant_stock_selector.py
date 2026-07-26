@@ -28,6 +28,7 @@ from ..quant_stock_selector_shadow import (
     QuantShadowEvaluationService,
     build_configured_quant_shadow_service,
 )
+from ..stock_picker_ai_snapshots import sanitize_error
 
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,17 @@ _service: QuantSelectionService | None = None
 _evaluation_service: QuantSelectionEvaluationService | None = None
 _quality_service: QuantSelectionQualityService | None = None
 _shadow_service: QuantShadowEvaluationService | None = None
+
+
+def _selection_service_readiness_detail(error: Exception) -> str:
+    safe_error = sanitize_error(error).strip()
+    if safe_error == "DEEPSEEK_API_KEY is not configured":
+        return "量化优选服务尚未就绪：DeepSeek API Key 未配置"
+    if "Could not set lock on file" in safe_error:
+        return "量化优选服务尚未就绪：量化数据库正被其他进程占用"
+    if not safe_error:
+        safe_error = type(error).__name__
+    return f"量化优选服务初始化失败：{safe_error}"
 
 
 def configure_quant_selection_service(
@@ -124,12 +136,7 @@ def get_quant_selection_service() -> QuantSelectionService:
             logger.warning("quant selection service is not ready: %s", exc)
             raise HTTPException(
                 status_code=503,
-                detail=(
-                    "量化优选服务尚未就绪：请配置 DeepSeek API Key 与完整的 "
-                    "Longbridge 凭据，并按账户额度设置 "
-                    "QUANT_SELECTOR_HISTORY_SYMBOL_LIMIT；"
-                    "QUANT_SELECTOR_BUNDLE_PATH 仅用于冻结数据包回放"
-                ),
+                detail=_selection_service_readiness_detail(exc),
             ) from exc
     return _service
 

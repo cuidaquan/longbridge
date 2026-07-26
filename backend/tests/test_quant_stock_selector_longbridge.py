@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from app.exceptions import LongbridgeAPIError
 from app.quant_stock_selector_longbridge import (
     LongbridgeQuantSourceBundleCollector,
     load_longbridge_daily_bars,
@@ -65,7 +66,6 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
         tradeability_loader=None,
         bar_loader=_bars,
         batch_size=500,
-        max_history_symbols=3000,
     ):
         catalog = catalog or [
             {"symbol": "AAA.US", "name": "Ordinary stock"},
@@ -103,7 +103,6 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
             bar_loader=bar_loader,
             clock=lambda: CAPTURED_AT,
             batch_size=batch_size,
-            max_history_symbols=max_history_symbols,
         )
 
     def test_collects_all_usmain_product_names_without_classification(self):
@@ -206,22 +205,25 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
         self.assertEqual(bundle["market_data"]["BND.US"]["unadjusted_bars"], [])
         self.assertEqual(bundle["market_data"]["INV.US"]["unadjusted_bars"], [])
 
-    def test_history_budget_fails_before_bar_requests(self):
-        calls = []
+    def test_history_requests_have_no_local_symbol_limit(self):
+        catalog = [
+            {"symbol": f"S{index:03d}.US", "name": str(index)}
+            for index in range(101)
+        ]
+        requested = []
 
         def bar_loader(symbols, *, data_as_of):
-            calls.append((symbols, data_as_of))
+            requested.extend(symbols)
             return _bars(symbols, data_as_of=data_as_of)
 
-        with self.assertRaisesRegex(
-            ValueError,
-            "history symbol budget exceeded.*required=4.*configured_limit=3",
-        ):
-            self._collector(
-                bar_loader=bar_loader,
-                max_history_symbols=3,
-            ).capture()
-        self.assertEqual(calls, [])
+        bundle = self._collector(
+            catalog=catalog,
+            bar_loader=bar_loader,
+        ).capture()
+
+        self.assertEqual(len(requested), 102)
+        self.assertEqual(bundle["source_capture"]["history_symbol_count"], 102)
+        self.assertNotIn("history_symbol_limit", bundle["source_capture"])
 
     def test_missing_history_without_provider_error_is_an_exclusion_not_partial(self):
         def bar_loader(symbols, *, data_as_of):
@@ -348,6 +350,42 @@ class LongbridgeQuantLoaderTests(unittest.TestCase):
             result["AAA.US"]["unadjusted_bars"][0]["turnover"],
             100_000_000.0,
         )
+
+    def test_daily_bars_fails_fast_on_monthly_symbol_quota(self):
+        calls = []
+
+        def history(symbol, *_args):
+            calls.append(symbol)
+            raise RuntimeError(
+                "OpenApiException: code=301607 Permission limit"
+            )
+
+        context = SimpleNamespace(history_candlesticks_by_date=history)
+
+        @contextmanager
+        def quote_context(_credentials):
+            yield context
+
+        with (
+            patch(
+                "app.quant_stock_selector_longbridge._quote_context",
+                quote_context,
+            ),
+            patch(
+                "app.quant_stock_selector_longbridge._credentials",
+                return_value={"configured": "yes"},
+            ),
+        ):
+            with self.assertRaisesRegex(
+                LongbridgeAPIError,
+                "301607 Permission limit",
+            ):
+                load_longbridge_daily_bars(
+                    ["AAA.US", "BBB.US"],
+                    data_as_of=DATA_AS_OF,
+                )
+
+        self.assertEqual(calls, ["AAA.US"])
 
 
 if __name__ == "__main__":
