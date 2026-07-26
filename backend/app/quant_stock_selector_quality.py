@@ -13,7 +13,7 @@ from .db import get_connection
 from .quant_stock_selector_hashing import canonical_sha256
 
 
-QUALITY_REPORT_VERSION = "quant-selector-quality-v1"
+QUALITY_REPORT_VERSION = "quant-selector-quality-v2"
 AI_COMPLETION_SLO = 0.95
 RUN_DURATION_P95_SLO_SECONDS = 300.0
 _AUDITABLE_STATUSES = {"completed", "partial"}
@@ -82,27 +82,9 @@ class QuantSelectionQualityService:
         snapshots = self._load_snapshots(run_ids)
         ai_snapshots = self._load_ai_snapshots(run_ids)
 
-        selected_candidates = [
-            item for item in candidates if item["selected_for_ai"]
-        ]
-        product_evidence = sum(
-            self._has_product_scope_evidence(item["payload"])
-            for item in selected_candidates
-        )
-        etfs = [
-            item for item in selected_candidates
-            if (item["payload"].get("metadata") or {}).get("asset_class")
-            == "equity_etf"
-        ]
-        etf_direction = sum(
-            str((item["payload"].get("metadata") or {}).get(
-                "exposure_direction"
-            ) or "").lower() not in {"", "unknown"}
-            for item in etfs
-        )
-        etf_leverage = sum(
-            (item["payload"].get("metadata") or {}).get("leverage") is not None
-            for item in etfs
+        catalog_evidence = sum(
+            self._has_catalog_evidence(item["payload"])
+            for item in candidates
         )
 
         hard_filtered = [
@@ -123,12 +105,8 @@ class QuantSelectionQualityService:
         completed_auditable_runs = [
             item for item in auditable_runs if item["status"] == "completed"
         ]
-        proven_boundaries = sum(
-            bool(
-                (item["quant_manifest"].get("selection_manifest") or {}).get(
-                    "boundary_proven"
-                )
-            )
+        stable_rankings = sum(
+            self._has_stable_candidate_manifest(item["quant_manifest"])
             for item in completed_auditable_runs
         )
         valid_hash_runs = sum(
@@ -159,22 +137,10 @@ class QuantSelectionQualityService:
         duration_p95 = _nearest_rank_percentile(durations, 0.95)
 
         metrics = {
-            "product_scope_evidence_coverage": _coverage_metric(
-                product_evidence,
-                len(selected_candidates),
+            "catalog_evidence_coverage": _coverage_metric(
+                catalog_evidence,
+                len(candidates),
                 target=1.0,
-            ),
-            "etf_direction_coverage": _coverage_metric(
-                etf_direction,
-                len(etfs),
-                target=None,
-                empty=None,
-            ),
-            "etf_leverage_coverage": _coverage_metric(
-                etf_leverage,
-                len(etfs),
-                target=None,
-                empty=None,
             ),
             "hard_filter_reason_coverage": _coverage_metric(
                 hard_filter_reasons,
@@ -186,8 +152,8 @@ class QuantSelectionQualityService:
                 planned,
                 target=AI_COMPLETION_SLO,
             ),
-            "exact_candidate_boundary_rate": _coverage_metric(
-                proven_boundaries,
+            "stable_candidate_ranking_rate": _coverage_metric(
+                stable_rankings,
                 len(completed_auditable_runs),
                 target=1.0,
                 empty=None,
@@ -237,7 +203,9 @@ class QuantSelectionQualityService:
                 "terminal_runs": len(runs),
                 "auditable_runs": len(auditable_runs),
                 "candidate_records": len(candidates),
-                "selected_for_ai_records": len(selected_candidates),
+                "selected_for_ai_records": sum(
+                    item["selected_for_ai"] for item in candidates
+                ),
                 "quant_replay_pairs": consistency_denominator,
             },
             "metrics": metrics,
@@ -346,16 +314,59 @@ class QuantSelectionQualityService:
         return grouped
 
     @staticmethod
-    def _has_product_scope_evidence(payload: Mapping[str, Any]) -> bool:
-        metadata = payload.get("metadata")
+    def _has_catalog_evidence(payload: Mapping[str, Any]) -> bool:
+        evidence = payload.get("catalog_evidence")
         return (
-            isinstance(metadata, Mapping)
-            and metadata.get("asset_class") in {"common_stock", "equity_etf"}
-            and bool(str(metadata.get("raw_asset_class") or "").strip())
-            and bool(str(metadata.get("source") or "").strip())
-            and bool(str(metadata.get("source_version") or "").strip())
-            and bool(str(metadata.get("captured_at") or "").strip())
-            and bool(str(metadata.get("mapping_version") or "").strip())
+            isinstance(evidence, Mapping)
+            and str(evidence.get("market") or "").strip().upper() == "US"
+            and "".join(str(evidence.get("board") or "").upper().split()) == "USMAIN"
+            and bool(str(evidence.get("exchange") or "").strip())
+            and bool(str(evidence.get("source") or "").strip())
+            and bool(str(evidence.get("source_version") or "").strip())
+            and bool(str(evidence.get("captured_at") or "").strip())
+        )
+
+    @staticmethod
+    def _has_stable_candidate_manifest(payload: Mapping[str, Any]) -> bool:
+        manifest = payload.get("selection_manifest")
+        if not isinstance(manifest, Mapping):
+            return False
+        if manifest.get("candidate_set_method") != "deterministic-full-score-v1.2":
+            return False
+        ranking = manifest.get("ranking")
+        top_symbols = manifest.get("top_symbols")
+        top_n = manifest.get("top_n")
+        if not isinstance(ranking, list) or not isinstance(top_symbols, list):
+            return False
+        if not isinstance(top_n, int) or top_n < 1:
+            return False
+        try:
+            normalized = [
+                {
+                    "symbol": str(item["symbol"]),
+                    "q": float(item["q"]),
+                    "median_turnover_20d": float(item["median_turnover_20d"]),
+                    "rank": int(item["rank"]),
+                }
+                for item in ranking
+            ]
+        except (KeyError, TypeError, ValueError):
+            return False
+        expected = sorted(
+            normalized,
+            key=lambda item: (
+                -item["q"],
+                -item["median_turnover_20d"],
+                item["symbol"],
+            ),
+        )
+        return (
+            len({item["symbol"] for item in normalized}) == len(normalized)
+            and normalized == expected
+            and [item["rank"] for item in normalized]
+            == list(range(1, len(normalized) + 1))
+            and top_symbols
+            == [item["symbol"] for item in normalized[:top_n]]
         )
 
     @staticmethod

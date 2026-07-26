@@ -15,11 +15,11 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .db import get_connection
 from .quant_stock_selector_hashing import canonical_json, canonical_sha256
-from .quant_stock_selector_metadata import normalize_symbol
+from .quant_stock_selector_symbols import normalize_symbol
 from .quant_stock_selector_service import QuantSelectionRunRepository
 
 
-EVALUATION_VERSION = "quant-selector-effect-v1"
+EVALUATION_VERSION = "quant-selector-effect-v2"
 OUTCOME_SCHEMA_VERSION = "quant-selector-outcome-bundle-v1"
 BOOTSTRAP_METHOD = "circular-moving-block-bootstrap-v1"
 HORIZONS = (5, 10, 20)
@@ -33,7 +33,6 @@ MINIMUM_COMPLETED_DATES = 60
 MINIMUM_PAIRED_DATES = 40
 MINIMUM_AI_COMPLETION_RATE = 0.95
 _HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
-_ELIGIBLE_ASSET_CLASSES = {"common_stock", "equity_etf"}
 _TERMINAL_KINDS = {
     "delisting_cash_settlement",
     "last_tradable_total_return_quote",
@@ -270,8 +269,8 @@ class QuantSelectionEvaluationService:
         exclusions: Counter[str] = Counter()
         observations: dict[int, list[dict[str, Any]]] = defaultdict(list)
         input_valid = 0
-        product_evidence_total = 0
-        product_evidence_valid = 0
+        catalog_evidence_total = 0
+        catalog_evidence_valid = 0
         portfolio_dates: list[dict[str, Any]] = []
         representative_runs = []
 
@@ -294,8 +293,8 @@ class QuantSelectionEvaluationService:
                 exclusions["input_hash_or_snapshot_integrity_failed"] += 1
                 continue
             final_symbols, quant_symbols, evidence = self._load_portfolios(run["run_id"])
-            product_evidence_total += evidence["total"]
-            product_evidence_valid += evidence["valid"]
+            catalog_evidence_total += evidence["total"]
+            catalog_evidence_valid += evidence["valid"]
             portfolio_dates.append({
                 "run_date": run_date,
                 "final_symbols": final_symbols,
@@ -340,9 +339,9 @@ class QuantSelectionEvaluationService:
 
         completed_dates = len(representatives)
         input_hash_coverage = input_valid / completed_dates if completed_dates else None
-        product_coverage = (
-            product_evidence_valid / product_evidence_total
-            if product_evidence_total else 1.0
+        catalog_coverage = (
+            catalog_evidence_valid / catalog_evidence_total
+            if catalog_evidence_total else 1.0
         )
         paired_counts = {str(horizon): len(observations[horizon]) for horizon in HORIZONS}
         gate_reasons = []
@@ -354,8 +353,8 @@ class QuantSelectionEvaluationService:
             gate_reasons.append("insufficient_ai_completion_rate")
         if input_hash_coverage != 1.0:
             gate_reasons.append("incomplete_input_hash_coverage")
-        if product_coverage != 1.0:
-            gate_reasons.append("incomplete_product_scope_coverage")
+        if catalog_coverage != 1.0:
+            gate_reasons.append("incomplete_catalog_evidence_coverage")
         for horizon in HORIZONS:
             if paired_counts[str(horizon)] < MINIMUM_PAIRED_DATES:
                 gate_reasons.append(f"insufficient_paired_run_dates_{horizon}d")
@@ -407,9 +406,9 @@ class QuantSelectionEvaluationService:
                 "ai_completed_calls": ai_completed,
                 "ai_completion_rate": ai_completion_rate,
                 "input_hash_coverage": input_hash_coverage,
-                "product_scope_evidence_total": product_evidence_total,
-                "product_scope_evidence_valid": product_evidence_valid,
-                "product_scope_coverage": product_coverage,
+                "catalog_evidence_total": catalog_evidence_total,
+                "catalog_evidence_valid": catalog_evidence_valid,
+                "catalog_evidence_coverage": catalog_coverage,
                 "paired_run_dates_by_horizon": paired_counts,
                 "exclusions": dict(sorted(exclusions.items())),
                 "outcome_source": outcome.payload["source"],
@@ -563,7 +562,7 @@ class QuantSelectionEvaluationService:
             item["symbol"]: item for item in [*final, *quant]
         }
         evidence_valid = sum(
-            self._has_product_evidence(item["payload"])
+            self._has_catalog_evidence(item["payload"])
             for item in evidence_items.values()
         )
         return (
@@ -578,17 +577,20 @@ class QuantSelectionEvaluationService:
         return isinstance(filters, Mapping) and all(
             isinstance(filters.get(f"H{index}"), Mapping)
             and filters[f"H{index}"].get("status") == "pass"
-            for index in range(1, 12)
+            for index in range(1, 9)
         )
 
     @staticmethod
-    def _has_product_evidence(payload: Mapping[str, Any]) -> bool:
-        metadata = payload.get("metadata")
+    def _has_catalog_evidence(payload: Mapping[str, Any]) -> bool:
+        evidence = payload.get("catalog_evidence")
         return (
-            isinstance(metadata, Mapping)
-            and metadata.get("asset_class") in _ELIGIBLE_ASSET_CLASSES
-            and bool(str(metadata.get("source") or "").strip())
-            and bool(str(metadata.get("source_version") or "").strip())
+            isinstance(evidence, Mapping)
+            and str(evidence.get("market") or "").strip().upper() == "US"
+            and "".join(str(evidence.get("board") or "").upper().split()) == "USMAIN"
+            and bool(str(evidence.get("exchange") or "").strip())
+            and bool(str(evidence.get("source") or "").strip())
+            and bool(str(evidence.get("source_version") or "").strip())
+            and bool(str(evidence.get("captured_at") or "").strip())
         )
 
     @classmethod

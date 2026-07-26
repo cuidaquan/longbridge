@@ -90,13 +90,16 @@ def _outcome_payload(calendar=None):
 def _candidate_payload(symbol):
     return {
         "symbol": symbol,
-        "metadata": {
-            "asset_class": "common_stock",
-            "source": "licensed-metadata-vendor",
+        "catalog_evidence": {
+            "market": "US",
+            "board": "USMAIN",
+            "exchange": "NASDAQ",
+            "source": "longbridge",
             "source_version": "2026-01-01",
+            "captured_at": "2026-07-24T20:05:00Z",
         },
         "hard_filters": {
-            f"H{index}": {"status": "pass"} for index in range(1, 12)
+            f"H{index}": {"status": "pass"} for index in range(1, 9)
         },
     }
 
@@ -247,7 +250,7 @@ class QuantSelectionEvaluationTests(unittest.TestCase):
             "20": 60,
         })
         self.assertEqual(report["coverage"]["input_hash_coverage"], 1.0)
-        self.assertEqual(report["coverage"]["product_scope_coverage"], 1.0)
+        self.assertEqual(report["coverage"]["catalog_evidence_coverage"], 1.0)
         inference = report["metrics"]["horizons"]["20"][
             "final_minus_quant_inference"
         ]

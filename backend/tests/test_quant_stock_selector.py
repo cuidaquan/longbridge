@@ -319,31 +319,22 @@ class QuantScoreTests(unittest.TestCase):
         return QuantIndicators(**values)
 
     def test_exact_boundaries_and_weighted_total(self) -> None:
-        score = score_quantitative(self._indicators(), spread_bps=30.0)
+        score = score_quantitative(self._indicators())
         self.assertEqual(score.score_version, SCORE_VERSION)
         self.assertEqual(score.turnover_score, 50.0)
-        self.assertEqual(score.spread_score, 40.0)
-        self.assertEqual(score.liquidity, 46.0)
+        self.assertEqual(score.liquidity, 50.0)
         self.assertEqual(score.trend, 100.0)
         self.assertEqual(score.relative_strength, 100.0)
         self.assertEqual(score.momentum, 100.0)
         self.assertEqual(score.risk, 100.0)
-        self.assertEqual(score.total, 86.5)
+        self.assertEqual(score.total, 90.0)
 
     def test_thresholds_use_unrounded_values_and_hard_fail(self) -> None:
         with self.assertRaises(QuantInputError) as turnover_error:
             score_quantitative(
                 self._indicators(median_turnover_20d=9_999_999.999999),
-                spread_bps=5.0,
             )
-        self.assertEqual(turnover_error.exception.reason, "h7_min_turnover")
-
-        with self.assertRaises(QuantInputError) as spread_error:
-            score_quantitative(
-                self._indicators(),
-                spread_bps=30.000000001,
-            )
-        self.assertEqual(spread_error.exception.reason, "h8_max_spread")
+        self.assertEqual(turnover_error.exception.reason, "h5_min_turnover")
 
     def test_macd_rising_requires_three_strictly_increasing_values(self) -> None:
         tied = self._indicators(
@@ -352,7 +343,7 @@ class QuantScoreTests(unittest.TestCase):
             macd_histogram_previous_2=0.5,
         )
         self.assertEqual(
-            score_quantitative(tied, spread_bps=5.0).macd_histogram_score,
+            score_quantitative(tied).macd_histogram_score,
             70.0,
         )
 
@@ -366,7 +357,7 @@ class QuantScoreTests(unittest.TestCase):
         for indicators in cases:
             with self.subTest(indicators=indicators):
                 with self.assertRaises(QuantInputError) as raised:
-                    score_quantitative(indicators, spread_bps=5.0)
+                    score_quantitative(indicators)
                 self.assertEqual(raised.exception.reason, "invalid_indicator")
 
 

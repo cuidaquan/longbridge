@@ -17,7 +17,7 @@ from .quant_stock_selector_ai import (
     parse_ai_decision,
 )
 from .quant_stock_selector_hashing import canonical_json, canonical_sha256
-from .quant_stock_selector_metadata import normalize_symbol
+from .quant_stock_selector_symbols import normalize_symbol
 from .stock_picker_ai_snapshots import sanitize_error
 
 

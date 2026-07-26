@@ -109,16 +109,13 @@ def _bars() -> list[dict]:
 
 
 def _candidate(symbol: str, *, selected=True) -> dict:
-    metadata = {
-        "symbol": symbol,
-        "asset_class": "common_stock",
+    catalog_evidence = {
+        "board": "USMAIN",
         "exchange": "NASDAQ",
-        "exposure_direction": "not_applicable",
-        "leverage": None,
-        "effective_from": "2020-01-01",
-        "effective_to": None,
-        "source": "licensed-vendor",
+        "market": "US",
+        "source": "longbridge",
         "source_version": "2026-07-24",
+        "captured_at": "2026-07-25T00:00:00Z",
     }
     indicators = {
         "data_as_of": DATA_AS_OF.isoformat(),
@@ -128,7 +125,7 @@ def _candidate(symbol: str, *, selected=True) -> dict:
         "ma60": 100.0,
     }
     score = {
-        "score_version": "quant-selector-score-v1.1",
+        "score_version": "quant-selector-score-v1.2",
         "total": 90.0,
         "liquidity": 24.0,
         "trend": 24.0,
@@ -139,18 +136,15 @@ def _candidate(symbol: str, *, selected=True) -> dict:
     candidate_input = {
         "symbol": symbol,
         "name": symbol,
-        "metadata": metadata,
+        "catalog_evidence": catalog_evidence,
         "indicators": indicators,
-        "nbbo": {"bid": 100.0, "ask": 100.02},
     }
     return {
         **candidate_input,
         "candidate_quant_input_hash": canonical_sha256(candidate_input),
-        "hard_filters": {f"H{index}": {"status": "pass"} for index in range(1, 12)},
-        "q_upper_bound": 100.0,
+        "hard_filters": {f"H{index}": {"status": "pass"} for index in range(1, 9)},
         "quant_score": score,
         "selection_status": "quant_eligible" if selected else "hard_filter_failed",
-        "spread_bps": 2.0,
         "exclusion_reasons": [] if selected else ["benchmark_excluded"],
         "selected_for_ai": selected,
     }
@@ -161,7 +155,7 @@ def _context(candidate: dict) -> AICandidateContext:
         symbol=candidate["symbol"],
         name=candidate["name"],
         data_as_of=DATA_AS_OF.isoformat(),
-        product_metadata=candidate["metadata"],
+        security_context=candidate["catalog_evidence"],
         quant_score=candidate["quant_score"],
         indicators=candidate["indicators"],
         daily_bars=_bars(),
@@ -197,11 +191,11 @@ def _captured(
             {
                 "symbol": item["symbol"],
                 "selection_status": item["selection_status"],
-                "q_upper_bound": item["q_upper_bound"],
+                "hard_filters": item["hard_filters"],
             }
             for item in sorted(candidates, key=lambda value: value["symbol"])
         ],
-        "filter_version": "quant-selector-filter-v1.1",
+        "filter_version": "quant-selector-filter-v1.2",
         "q_threshold": 65.0,
         "ranking": ranking,
         "top_n": 30,
@@ -210,7 +204,7 @@ def _captured(
     quant = {
         "status": quant_status,
         "boundary_proven": quant_status == "completed",
-        "filter_version": "quant-selector-filter-v1.1",
+        "filter_version": "quant-selector-filter-v1.2",
         "data_as_of": DATA_AS_OF.isoformat(),
         "official_close": "2026-07-24T20:00:00.000Z",
         "candidates": candidates,
@@ -232,14 +226,6 @@ def _captured(
                 captured_at=NOW,
                 data_as_of=NOW,
                 payload={"revision": snapshot_revision, "symbols": [*symbols, "SPY.US"]},
-            ),
-            CapturedInputSnapshot(
-                snapshot_kind="product_metadata",
-                source="licensed-vendor",
-                schema_version="metadata-v1",
-                captured_at=NOW,
-                data_as_of=NOW,
-                payload={"revision": snapshot_revision, "coverage": 1.0},
             ),
         ],
         required_inputs_complete=required_inputs_complete,
@@ -330,7 +316,7 @@ class QuantSelectionServiceTests(unittest.TestCase):
             "SELECT COUNT(*) FROM quant_selection_input_snapshots WHERE run_id = ?",
             [second_done["run_id"]],
         ).fetchone()[0]
-        self.assertEqual(count, 2)
+        self.assertEqual(count, 1)
         self.assertTrue(self.repository.verify_integrity(second_done["run_id"]))
 
     def test_force_refresh_preserves_hashes_but_bypasses_cache(self) -> None:

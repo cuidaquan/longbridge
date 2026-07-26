@@ -18,14 +18,14 @@ from .quant_stock_selector_ai import (
     build_ai_input_snapshot,
 )
 from .quant_stock_selector_hashing import canonical_json, canonical_sha256
-from .quant_stock_selector_metadata import normalize_symbol
+from .quant_stock_selector_symbols import normalize_symbol
 from .quant_stock_selector_snapshots import MarketBarSnapshotStore
 from .quant_stock_selector_universe import FILTER_VERSION
 from .runtime import get_runtime_metadata
 from .stock_picker_ai_snapshots import sanitize_error
 
 
-UNIVERSE_VERSION = "quant-selector-universe-v1.1"
+UNIVERSE_VERSION = "quant-selector-universe-v1.2"
 RUN_SCHEMA_VERSION = "quant-selector-run-v1"
 INPUT_SNAPSHOT_SCHEMA_VERSION = "quant-selector-input-snapshot-v1"
 TERMINAL_STATUSES = frozenset({"completed", "partial", "failed", "cancelled"})
@@ -817,7 +817,7 @@ class QuantSelectionService:
             if incomplete:
                 errors = [*captured.errors, *preflight_errors]
                 if quant_selection.get("status") != "completed":
-                    errors.append("quant_candidate_boundary_unproven")
+                    errors.append("quant_selection_incomplete")
                 return self.repository.transition(
                     run_id,
                     "partial",

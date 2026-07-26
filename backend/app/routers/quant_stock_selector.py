@@ -125,8 +125,8 @@ def get_quant_selection_service() -> QuantSelectionService:
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "量化优选数据源尚未就绪：需要通过产品元数据阶段 0 "
-                    "门禁，并配置版本化点时数据包与批量 NBBO"
+                    "量化优选数据源尚未就绪：需要配置由 Longbridge 目录、"
+                    "交易状态、交易日历和复权/未复权日 K 组成的版本化点时数据包"
                 ),
             ) from exc
     return _service

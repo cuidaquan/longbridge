@@ -11,7 +11,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
-SCORE_VERSION = "quant-selector-score-v1.1"
+SCORE_VERSION = "quant-selector-score-v1.2"
 MIN_DAILY_BARS = 85
 
 
@@ -60,7 +60,6 @@ class QuantScore:
     momentum: float
     risk: float
     turnover_score: float
-    spread_score: float
     moving_average_score: float
     ma20_slope_score: float
     rs20_score: float
@@ -397,29 +396,11 @@ def _turnover_score(value: float) -> float:
         return 70.0
     if value >= 10_000_000:
         return 50.0
-    raise QuantInputError("h7_min_turnover", "median turnover is below 10M USD")
+    raise QuantInputError("h5_min_turnover", "median turnover is below 10M USD")
 
 
-def _spread_score(value: float) -> float:
-    if value < 0 or not math.isfinite(value):
-        raise QuantInputError("h8_invalid_spread", "spread must be finite and nonnegative")
-    if value <= 5:
-        return 100.0
-    if value <= 10:
-        return 85.0
-    if value <= 20:
-        return 65.0
-    if value <= 30:
-        return 40.0
-    raise QuantInputError("h8_max_spread", "spread exceeds 30 bps")
-
-
-def score_quantitative(
-    indicators: QuantIndicators,
-    *,
-    spread_bps: float,
-) -> QuantScore:
-    """Apply the frozen v1.1 score thresholds to unrounded indicators."""
+def score_quantitative(indicators: QuantIndicators) -> QuantScore:
+    """Apply the frozen v1.2 score thresholds to unrounded indicators."""
     for field, value in indicators.to_dict().items():
         if field == "data_as_of":
             continue
@@ -443,16 +424,8 @@ def score_quantitative(
             "invalid_indicator",
             "rsi14 must be between 0 and 100",
         )
-    try:
-        normalized_spread = float(spread_bps)
-    except (TypeError, ValueError) as exc:
-        raise QuantInputError(
-            "h8_invalid_spread",
-            "spread must be numeric",
-        ) from exc
     turnover_score = _turnover_score(indicators.median_turnover_20d)
-    spread_score = _spread_score(normalized_spread)
-    liquidity = 0.6 * turnover_score + 0.4 * spread_score
+    liquidity = turnover_score
 
     if indicators.close > indicators.ma20 > indicators.ma60:
         moving_average_score = 100.0
@@ -553,8 +526,8 @@ def score_quantitative(
         + 0.3 * max_drawdown_score
     )
     total = (
-        0.25 * liquidity
-        + 0.25 * trend
+        0.20 * liquidity
+        + 0.30 * trend
         + 0.20 * relative_strength
         + 0.15 * momentum
         + 0.15 * risk
@@ -568,7 +541,6 @@ def score_quantitative(
         momentum=momentum,
         risk=risk,
         turnover_score=turnover_score,
-        spread_score=spread_score,
         moving_average_score=moving_average_score,
         ma20_slope_score=ma20_slope_score,
         rs20_score=rs20_score,

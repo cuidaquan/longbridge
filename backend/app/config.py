@@ -26,7 +26,6 @@ class Settings(BaseSettings):
         le=30.0,
     )
     quant_selector_bundle_path: Optional[Path] = None
-    quant_selector_product_metadata_path: Optional[Path] = None
     quant_selector_outcome_bundle_path: Optional[Path] = None
     quant_selector_shadow_enabled: bool = False
     quant_selector_shadow_pro_latency_budget_ms: Optional[float] = Field(

@@ -2,22 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 import json
-import math
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .quant_stock_selector import QuantInputError, calculate_quant_indicators
 from .quant_stock_selector_ai import AICandidateContext
 from .quant_stock_selector_hashing import canonical_json
-from .quant_stock_selector_metadata import (
-    JsonProductMetadataProvider,
-    ProductMetadataProvider,
-    evaluate_product_metadata_gate,
-    normalize_symbol,
-)
+from .quant_stock_selector_symbols import normalize_symbol
 from .quant_stock_selector_service import (
     CapturedInputSnapshot,
     CapturedQuantRun,
@@ -28,15 +21,13 @@ from .quant_stock_selector_snapshots import (
 )
 from .quant_stock_selector_universe import (
     CandidateMarketData,
-    NbboQuote,
     QuantUniverseSelector,
     SelectionPolicy,
     build_unified_candidate_pool,
 )
 
 
-SOURCE_BUNDLE_SCHEMA_VERSION = "quant-selector-source-bundle-v2"
-MINIMUM_PRODUCT_METADATA_COVERAGE = 0.95
+SOURCE_BUNDLE_SCHEMA_VERSION = "quant-selector-source-bundle-v3"
 NEWS_LOOKBACK_DAYS = 7
 NEWS_LIMIT = 10
 
@@ -94,18 +85,6 @@ def _required_text(
     if not value:
         raise QuantSourceBundleError(f"{field} is required")
     return value
-
-
-def _positive_number(value: Any, *, field: str) -> float:
-    if isinstance(value, bool):
-        raise QuantSourceBundleError(f"{field} must be positive")
-    try:
-        result = float(value)
-    except (TypeError, ValueError) as exc:
-        raise QuantSourceBundleError(f"{field} must be positive") from exc
-    if not math.isfinite(result) or result <= 0:
-        raise QuantSourceBundleError(f"{field} must be positive")
-    return result
 
 
 def _normalize_news_snapshot(
@@ -170,94 +149,17 @@ def _normalize_news_snapshot(
     return {"status": status, "source": source, "news_items": items}
 
 
-class BundleNbboProvider:
-    def __init__(self, payload: Mapping[str, Any]) -> None:
-        self.source = _required_text(payload, "source", field="nbbo.source")
-        self.source_version = _required_text(
-            payload,
-            "source_version",
-            field="nbbo.source_version",
-        )
-        self.license = _required_text(
-            payload,
-            "license",
-            field="nbbo.license",
-        )
-        self.authorization_constraints = _required_text(
-            payload,
-            "authorization_constraints",
-            field="nbbo.authorization_constraints",
-        )
-        if payload.get("historical_semantics") != "point_in_time":
-            raise QuantSourceBundleError(
-                "nbbo.historical_semantics must be point_in_time"
-            )
-        batch_limit = _positive_number(
-            payload.get("max_batch_size"),
-            field="nbbo.max_batch_size",
-        )
-        if not batch_limit.is_integer():
-            raise QuantSourceBundleError("nbbo.max_batch_size must be an integer")
-        self.max_batch_size = int(batch_limit)
-        self.qps_limit = _positive_number(
-            payload.get("qps_limit"),
-            field="nbbo.qps_limit",
-        )
-        raw_quotes = _mapping(payload.get("quotes"), field="nbbo.quotes")
-        self.quotes = {
-            normalize_symbol(symbol): self._quote(symbol, value)
-            for symbol, value in raw_quotes.items()
-        }
-
-    def _quote(self, symbol: str, value: Any) -> NbboQuote:
-        payload = _mapping(value, field=f"nbbo.quotes.{symbol}")
-        timestamp = payload.get("quote_timestamp")
-        return NbboQuote(
-            symbol=normalize_symbol(symbol),
-            status=str(payload.get("status") or "").strip().lower(),
-            bid=_optional_float(payload.get("bid"), field=f"{symbol}.bid"),
-            ask=_optional_float(payload.get("ask"), field=f"{symbol}.ask"),
-            quote_timestamp=(
-                _datetime(timestamp, field=f"{symbol}.quote_timestamp")
-                if timestamp is not None else None
-            ),
-            session=(
-                str(payload["session"]).strip().lower()
-                if payload.get("session") is not None else None
-            ),
-            source=self.source,
-            error_code=(
-                str(payload["error_code"]).strip()
-                if payload.get("error_code") is not None else None
-            ),
-        )
-
-    def fetch(self, symbols, *, data_as_of, official_close):
-        if len(symbols) > self.max_batch_size:
-            raise QuantSourceBundleError("NBBO request exceeds declared max_batch_size")
-        return {
-            symbol: self.quotes[symbol]
-            for value in symbols
-            if (symbol := normalize_symbol(value)) in self.quotes
-        }
-
-
 class JsonQuantRunInputProvider:
     """Build a run from frozen vendor facts while computing Q locally."""
 
     def __init__(
         self,
         bundle_path: Path | str,
-        product_metadata_path: Path | str,
         *,
-        metadata_provider: ProductMetadataProvider | None = None,
         market_bar_store: MarketBarSnapshotStore | None = None,
         selection_policy: SelectionPolicy | None = None,
     ) -> None:
         self.bundle_path = Path(bundle_path)
-        self.metadata_provider = metadata_provider or JsonProductMetadataProvider(
-            product_metadata_path
-        )
         self.market_bar_store = market_bar_store or MarketBarSnapshotStore()
         self.selection_policy = selection_policy or SelectionPolicy()
 
@@ -411,48 +313,24 @@ class JsonQuantRunInputProvider:
         catalog_symbols = [normalize_symbol(item.get("symbol")) for item in catalog]
         if len(catalog_symbols) != len(set(catalog_symbols)):
             raise QuantSourceBundleError("catalog symbols must be unique")
-
-        validation_samples = _mapping(
-            payload.get("metadata_validation_samples"),
-            field="metadata_validation_samples",
+        catalog_source = _required_text(
+            payload,
+            "catalog_source",
+            field="catalog_source",
         )
-        validation_symbols = [
-            normalize_symbol(symbol)
-            for values in validation_samples.values()
-            for symbol in _sequence(values, field="metadata validation category")
-        ]
-        metadata_batch = self.metadata_provider.load(
-            [*catalog_symbols, *validation_symbols],
-            data_as_of=data_as_of,
+        catalog_source_version = _required_text(
+            payload,
+            "catalog_source_version",
+            field="catalog_source_version",
         )
-        metadata_captured_at = _datetime(
-            metadata_batch.captured_at,
-            field="product_metadata.captured_at",
+        catalog_captured_at = _datetime(
+            payload.get("catalog_captured_at"),
+            field="catalog_captured_at",
         )
-        if metadata_captured_at > captured_at:
+        if catalog_captured_at > captured_at:
             raise QuantSourceBundleError(
-                "product metadata captured_at cannot exceed bundle captured_at"
+                "catalog_captured_at cannot exceed bundle captured_at"
             )
-        metadata_gate = evaluate_product_metadata_gate(
-            metadata_batch,
-            validation_samples,
-        )
-        if not metadata_gate["ready"]:
-            raise QuantSourceBundleError(
-                "product metadata stage-0 gate failed: "
-                + ",".join(metadata_gate["failures"])
-            )
-        catalog_metadata_count = sum(
-            symbol in metadata_batch.records for symbol in catalog_symbols
-        )
-        catalog_metadata_coverage = catalog_metadata_count / len(catalog_symbols)
-        if catalog_metadata_count == 0:
-            raise QuantSourceBundleError(
-                "product metadata is unavailable for the candidate catalog"
-            )
-        metadata_coverage_complete = (
-            catalog_metadata_coverage >= MINIMUM_PRODUCT_METADATA_COVERAGE
-        )
 
         bar_source = str(payload.get("bar_source") or "").strip()
         if not bar_source:
@@ -498,7 +376,6 @@ class JsonQuantRunInputProvider:
                 key: raw_facts.get(key)
                 for key in (
                     "trade_status",
-                    "directly_buyable",
                     "last_price",
                     "price_data_as_of",
                     "bar_data_as_of",
@@ -551,7 +428,6 @@ class JsonQuantRunInputProvider:
                     str(raw_facts.get("trade_status") or "").strip().lower()
                     or None
                 ),
-                directly_buyable=raw_facts.get("directly_buyable") is True,
                 last_price=_optional_float(
                     raw_facts.get("last_price"), field=f"{symbol}.last_price"
                 ),
@@ -570,22 +446,14 @@ class JsonQuantRunInputProvider:
 
         candidates = build_unified_candidate_pool(
             catalog,
-            metadata_batch=metadata_batch,
             market_data=facts_by_symbol,
-            data_as_of=data_as_of,
-        )
-        nbbo_payload = _mapping(payload.get("nbbo"), field="nbbo")
-        nbbo_provider = BundleNbboProvider(nbbo_payload)
-        selector = QuantUniverseSelector(
-            nbbo_provider,
-            policy=replace(
-                self.selection_policy,
-                batch_size=min(
-                    self.selection_policy.batch_size,
-                    nbbo_provider.max_batch_size,
-                ),
+            catalog_source=catalog_source,
+            catalog_version=catalog_source_version,
+            catalog_captured_at=catalog_captured_at.isoformat().replace(
+                "+00:00", "Z"
             ),
         )
+        selector = QuantUniverseSelector(policy=self.selection_policy)
         quant_selection = selector.select(
             candidates,
             data_as_of=data_as_of,
@@ -595,11 +463,15 @@ class JsonQuantRunInputProvider:
         input_snapshots = [
             CapturedInputSnapshot(
                 snapshot_kind="security_catalog",
-                source=str(payload.get("catalog_source") or "bundle"),
+                source=catalog_source,
                 schema_version=SOURCE_BUNDLE_SCHEMA_VERSION,
-                captured_at=captured_at,
+                captured_at=catalog_captured_at,
                 data_as_of=official_close,
-                payload=catalog,
+                payload={
+                    "board": "usmain",
+                    "items": catalog,
+                    "source_version": catalog_source_version,
+                },
             ),
             CapturedInputSnapshot(
                 snapshot_kind="exchange_calendar",
@@ -610,38 +482,12 @@ class JsonQuantRunInputProvider:
                 payload=exchange_calendar,
             ),
             CapturedInputSnapshot(
-                snapshot_kind="product_metadata",
-                source=metadata_batch.source,
-                schema_version=metadata_gate["schema_version"],
-                captured_at=captured_at,
-                data_as_of=official_close,
-                payload={
-                    "catalog_coverage": catalog_metadata_coverage,
-                    "catalog_record_count": catalog_metadata_count,
-                    "catalog_symbol_count": len(catalog_symbols),
-                    "gate": metadata_gate,
-                    "manifest": metadata_batch.to_manifest(),
-                    "records": [
-                        metadata_batch.records[symbol].to_dict()
-                        for symbol in sorted(metadata_batch.records)
-                    ],
-                },
-            ),
-            CapturedInputSnapshot(
                 snapshot_kind="tradeability",
                 source=str(payload.get("tradeability_source") or "bundle"),
                 schema_version=SOURCE_BUNDLE_SCHEMA_VERSION,
                 captured_at=captured_at,
                 data_as_of=official_close,
                 payload=tradeability_payload,
-            ),
-            CapturedInputSnapshot(
-                snapshot_kind="nbbo",
-                source=str(nbbo_payload.get("source") or "bundle"),
-                schema_version=SOURCE_BUNDLE_SCHEMA_VERSION,
-                captured_at=captured_at,
-                data_as_of=official_close,
-                payload=nbbo_payload,
             ),
             *[
                 self._reference_snapshot(
@@ -699,16 +545,11 @@ class JsonQuantRunInputProvider:
                 missing_fields.append("news")
             if events.get("status") not in {"available", "not_applicable"}:
                 missing_fields.append("events")
-            metadata = candidate["metadata"]
-            if metadata.get("exposure_direction") == "unknown":
-                missing_fields.append("exposure_direction")
-            if metadata.get("asset_class") == "equity_etf" and metadata.get("leverage") is None:
-                missing_fields.append("leverage")
             ai_contexts[symbol] = AICandidateContext(
                 symbol=symbol,
                 name=candidate["name"],
                 data_as_of=data_as_of.isoformat(),
-                product_metadata=metadata,
+                security_context=candidate["catalog_evidence"],
                 quant_score=candidate["quant_score"],
                 indicators=candidate["indicators"],
                 daily_bars=adjusted_by_symbol[symbol],
@@ -743,20 +584,12 @@ class JsonQuantRunInputProvider:
             quant_selection=quant_selection,
             ai_contexts=ai_contexts,
             input_snapshots=input_snapshots,
-            required_inputs_complete=(
-                quant_selection["status"] == "completed"
-                and metadata_coverage_complete
-            ),
+            required_inputs_complete=quant_selection["status"] == "completed",
             errors=(
                 (
                     []
                     if quant_selection["status"] == "completed"
-                    else ["quant_candidate_boundary_unproven"]
-                )
-                + (
-                    []
-                    if metadata_coverage_complete
-                    else ["product_metadata_catalog_coverage_below_slo"]
+                    else ["quant_selection_incomplete"]
                 )
             ),
         )
@@ -775,10 +608,6 @@ def build_configured_quant_selection_service():
     settings = get_settings()
     if settings.quant_selector_bundle_path is None:
         raise QuantSourceBundleError("QUANT_SELECTOR_BUNDLE_PATH is not configured")
-    if settings.quant_selector_product_metadata_path is None:
-        raise QuantSourceBundleError(
-            "QUANT_SELECTOR_PRODUCT_METADATA_PATH is not configured"
-        )
     credentials = load_ai_credentials()
     api_key = str(credentials.get("DEEPSEEK_API_KEY") or "").strip()
     if not api_key:
@@ -790,7 +619,6 @@ def build_configured_quant_selection_service():
     return QuantSelectionService(
         JsonQuantRunInputProvider(
             settings.quant_selector_bundle_path,
-            settings.quant_selector_product_metadata_path,
         ),
         QuantAISelectionService(ai_provider),
     )

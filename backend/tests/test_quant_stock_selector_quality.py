@@ -29,26 +29,26 @@ class _ConnectionFactory:
 
 
 class QuantSelectionQualityTests(unittest.TestCase):
-    def test_product_scope_evidence_requires_raw_mapping_and_capture_fields(self):
+    def test_catalog_evidence_requires_usmain_source_and_capture_fields(self):
         complete = {
-            "metadata": {
-                "asset_class": "common_stock",
-                "raw_asset_class": "Common Stock",
-                "source": "licensed-metadata",
+            "catalog_evidence": {
+                "market": "US",
+                "board": "USMAIN",
+                "exchange": "NASDAQ",
+                "source": "longbridge",
                 "source_version": "2026-07-24",
                 "captured_at": "2026-07-24T20:05:00.000Z",
-                "mapping_version": "asset-map-v1",
             }
         }
         self.assertTrue(
-            QuantSelectionQualityService._has_product_scope_evidence(complete)
+            QuantSelectionQualityService._has_catalog_evidence(complete)
         )
-        for field in ("raw_asset_class", "captured_at", "mapping_version"):
+        for field in ("board", "captured_at", "source_version"):
             with self.subTest(field=field):
                 incomplete = json.loads(json.dumps(complete))
-                incomplete["metadata"][field] = ""
+                incomplete["catalog_evidence"][field] = ""
                 self.assertFalse(
-                    QuantSelectionQualityService._has_product_scope_evidence(
+                    QuantSelectionQualityService._has_catalog_evidence(
                         incomplete
                     )
                 )
@@ -67,7 +67,7 @@ class QuantSelectionQualityTests(unittest.TestCase):
         *,
         status: str,
         marker: int,
-        boundary_proven: bool,
+        stable_manifest: bool,
         ai_planned: int,
         ai_completed: int,
         duration_seconds: int,
@@ -84,8 +84,18 @@ class QuantSelectionQualityTests(unittest.TestCase):
             "candidates": [{"symbol": "AAA.US", "quant_score": marker}],
             "input_snapshots": references,
             "selection_manifest": {
-                "boundary_proven": boundary_proven,
-                "ranking": [{"symbol": "AAA.US", "q": marker}],
+                "candidate_set_method": (
+                    "deterministic-full-score-v1.2"
+                    if stable_manifest else "legacy-boundary"
+                ),
+                "ranking": [{
+                    "symbol": "AAA.US",
+                    "q": marker,
+                    "median_turnover_20d": 100_000_000,
+                    "rank": 1,
+                }],
+                "top_n": 30,
+                "top_symbols": ["AAA.US"],
             },
         }
         quant_hash = canonical_sha256(quant_manifest)
@@ -143,24 +153,22 @@ class QuantSelectionQualityTests(unittest.TestCase):
         )
         selected = {
             "symbol": "AAA.US",
-            "metadata": {
-                "asset_class": "equity_etf",
-                "raw_asset_class": "ETF",
-                "exposure_direction": "unknown",
-                "leverage": None,
-                "source": "licensed-metadata",
+            "catalog_evidence": {
+                "market": "US",
+                "board": "USMAIN",
+                "exchange": "NASDAQ",
+                "source": "longbridge",
                 "source_version": "2026-07-24",
                 "captured_at": "2026-07-24T20:05:00.000Z",
-                "mapping_version": "asset-map-v1",
             },
             "hard_filters": {
-                f"H{index}": {"status": "pass"} for index in range(1, 12)
+                f"H{index}": {"status": "pass"} for index in range(1, 9)
             },
             "exclusion_reasons": [],
         }
         excluded = {
             "symbol": "BAD.US",
-            "metadata": None,
+            "catalog_evidence": dict(selected["catalog_evidence"]),
             "hard_filters": {
                 "H1": {"status": "fail", "reason": "market_not_us"}
             },
@@ -206,7 +214,7 @@ class QuantSelectionQualityTests(unittest.TestCase):
             "qsr_complete",
             status="completed",
             marker=90,
-            boundary_proven=True,
+            stable_manifest=True,
             ai_planned=1,
             ai_completed=1,
             duration_seconds=100,
@@ -215,7 +223,7 @@ class QuantSelectionQualityTests(unittest.TestCase):
             "qsr_partial",
             status="partial",
             marker=80,
-            boundary_proven=False,
+            stable_manifest=False,
             ai_planned=2,
             ai_completed=1,
             duration_seconds=400,
@@ -225,7 +233,7 @@ class QuantSelectionQualityTests(unittest.TestCase):
             "qsr_replay",
             status="completed",
             marker=80,
-            boundary_proven=True,
+            stable_manifest=True,
             ai_planned=1,
             ai_completed=1,
             duration_seconds=120,
@@ -237,17 +245,15 @@ class QuantSelectionQualityTests(unittest.TestCase):
         self.assertFalse(report["ready"])
         self.assertEqual(report["sample"]["terminal_runs"], 3)
         self.assertEqual(
-            metrics["product_scope_evidence_coverage"]["value"],
+            metrics["catalog_evidence_coverage"]["value"],
             1.0,
         )
-        self.assertEqual(metrics["etf_direction_coverage"]["value"], 0.0)
-        self.assertEqual(metrics["etf_leverage_coverage"]["value"], 0.0)
         self.assertAlmostEqual(
             metrics["hard_filter_reason_coverage"]["value"],
             2 / 3,
         )
         self.assertEqual(metrics["ai_completion_rate"]["value"], 0.75)
-        self.assertEqual(metrics["exact_candidate_boundary_rate"]["value"], 1.0)
+        self.assertEqual(metrics["stable_candidate_ranking_rate"]["value"], 1.0)
         self.assertEqual(metrics["input_hash_validity_rate"]["value"], 1.0)
         self.assertEqual(metrics["quant_replay_consistency_rate"]["value"], 0.0)
         self.assertEqual(metrics["run_duration_p95_seconds"]["value"], 400)
@@ -259,7 +265,7 @@ class QuantSelectionQualityTests(unittest.TestCase):
             "qsr_tampered",
             status="completed",
             marker=90,
-            boundary_proven=True,
+            stable_manifest=True,
             ai_planned=1,
             ai_completed=1,
             duration_seconds=100,
@@ -287,7 +293,7 @@ class QuantSelectionQualityTests(unittest.TestCase):
             report["metrics"]["run_duration_p95_seconds"]["value"]
         )
         self.assertIsNone(
-            report["metrics"]["exact_candidate_boundary_rate"]["value"]
+            report["metrics"]["stable_candidate_ranking_rate"]["value"]
         )
         self.assertIsNone(
             report["metrics"]["input_hash_validity_rate"]["value"]

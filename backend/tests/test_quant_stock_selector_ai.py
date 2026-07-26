@@ -52,8 +52,6 @@ def _context(
     symbol: str,
     *,
     news_status: str = "available",
-    direction: str = "long",
-    leverage: float | None = 1.0,
 ) -> AICandidateContext:
     news_items = [
         {
@@ -80,10 +78,11 @@ def _context(
         symbol=symbol,
         name=symbol,
         data_as_of="2026-07-24",
-        product_metadata={
-            "asset_class": "equity_etf",
-            "exposure_direction": direction,
-            "leverage": leverage,
+        security_context={
+            "board": "USMAIN",
+            "exchange": "NASDAQ",
+            "source": "longbridge",
+            "source_version": "2026-07-24",
         },
         quant_score={"total": 80.0, "trend": 82.0},
         indicators={
@@ -116,7 +115,7 @@ def _quant_selection(symbols, *, status="completed", boundary=True):
                 "name": symbol,
                 "quant_score": dict(contexts[symbol].quant_score),
                 "indicators": dict(contexts[symbol].indicators),
-                "metadata": dict(contexts[symbol].product_metadata),
+                "catalog_evidence": dict(contexts[symbol].security_context),
             }
             for symbol in symbols
         ],
@@ -156,12 +155,8 @@ class _FakeProvider:
 
 
 class AIInputAndParserTests(unittest.TestCase):
-    def test_input_snapshot_caps_news_and_explains_inverse_buy_semantics(self) -> None:
-        context = _context(
-            "SQQQ.US",
-            direction="inverse",
-            leverage=3.0,
-        )
+    def test_input_snapshot_caps_news_without_inferring_product_structure(self) -> None:
+        context = _context("SQQQ.US")
         snapshot = build_ai_input_snapshot(
             context,
             model_alias=DEFAULT_MODEL,
@@ -173,9 +168,10 @@ class AIInputAndParserTests(unittest.TestCase):
             len(snapshot["facts"]["news_snapshot"]["news_items"]),
             10,
         )
-        self.assertIn("inverse ETF", snapshot["system_prompt"])
-        self.assertIn("买入 ETF 份额", snapshot["system_prompt"])
-        self.assertIn('"exposure_direction":"inverse"', snapshot["user_prompt"])
+        self.assertIn("不得根据代码或名称", snapshot["system_prompt"])
+        self.assertNotIn("exposure_direction", snapshot["user_prompt"])
+        self.assertNotIn("leverage", snapshot["user_prompt"])
+        self.assertEqual(snapshot["facts"]["security_context"]["board"], "USMAIN")
         self.assertEqual(len(snapshot["ai_input_hash"]), 64)
 
     def test_equivalent_mapping_order_has_same_ai_input_hash(self) -> None:
