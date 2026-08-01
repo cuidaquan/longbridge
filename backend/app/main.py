@@ -14,6 +14,7 @@ from .db import close_connection
 from .instance_lock import SingleInstanceLock
 from .runtime import get_runtime_metadata
 from .routers import portfolio as portfolio_router
+from .routers import watchlist as watchlist_router
 from .routers import quotes as quotes_router
 from .routers import settings as settings_router
 from .routers import strategies as strategies_router
@@ -70,6 +71,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(settings_router.router)
 app.include_router(quotes_router.router)
 app.include_router(portfolio_router.router)
+app.include_router(watchlist_router.router)
 app.include_router(strategies_router.router)
 app.include_router(strategies_advanced_router.router)
 app.include_router(monitoring_router.router)

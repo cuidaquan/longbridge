@@ -65,6 +65,28 @@ class SecurityCatalogService:
             for item in matches[:limit]
         ]
 
+    def lookup_symbols(self, market: str, symbols: List[str]) -> Dict[str, dict]:
+        """Return official catalog metadata for the requested symbols."""
+        normalized_market = self._normalize_market(market)
+        requested = {
+            symbol.strip().upper()
+            for symbol in symbols
+            if symbol and symbol.strip()
+        }
+        if not requested:
+            return {}
+
+        securities = self._get_market_securities(normalized_market)
+        return {
+            item["symbol"].strip().upper(): {
+                key: value
+                for key, value in item.items()
+                if key != "_search_text"
+            }
+            for item in securities
+            if item.get("symbol", "").strip().upper() in requested
+        }
+
     def refresh(self, market: str) -> List[dict]:
         """Fetch a current official list without falling back to stale cache."""
         normalized_market = self._normalize_market(market)

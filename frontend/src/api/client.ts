@@ -110,6 +110,39 @@ export type PortfolioOverviewResponse = {
   account_balance?: Record<string, any>;
 };
 
+export type WatchlistSecurity = {
+  symbol: string;
+  name: string;
+  name_cn?: string | null;
+  name_en?: string | null;
+  market: string | null;
+  is_pinned: boolean;
+  watched_price: number | null;
+  watched_at: string | null;
+};
+
+export type WatchlistGroup = {
+  id: number;
+  name: string;
+  securities: WatchlistSecurity[];
+};
+
+export type WatchlistsResponse = {
+  groups: WatchlistGroup[];
+  total_groups: number;
+  total_securities: number;
+};
+
+export type WatchlistQuote = {
+  last_done: number | null;
+  prev_close: number | null;
+  change_rate: number | null;
+};
+
+export type WatchlistQuotesResponse = {
+  quotes: Record<string, WatchlistQuote>;
+};
+
 export const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
 
 export class APIError extends Error {
@@ -286,4 +319,31 @@ export async function fetchStreamStatus(): Promise<StreamStatusResponse> {
 export async function fetchPortfolioOverview(): Promise<PortfolioOverviewResponse> {
   const res = await fetch(`${API_BASE}/portfolio/overview`);
   return handleResponse(res);
+}
+
+export async function fetchWatchlists(): Promise<WatchlistsResponse> {
+  const res = await fetch(`${API_BASE}/watchlist`);
+  return handleResponse(res);
+}
+
+export async function fetchWatchlistQuotes(symbols: string[]): Promise<WatchlistQuotesResponse> {
+  const params = new URLSearchParams({ symbols: symbols.join(",") });
+  const res = await fetch(`${API_BASE}/watchlist/quotes?${params.toString()}`);
+  return handleResponse(res);
+}
+
+export async function removeWatchlistSecurity(symbol: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/watchlist/securities/${encodeURIComponent(symbol)}`, {
+    method: "DELETE",
+  });
+  await handleResponse(res);
+}
+
+export async function updateWatchlistPinned(symbol: string, isPinned: boolean): Promise<void> {
+  const res = await fetch(`${API_BASE}/watchlist/securities/${encodeURIComponent(symbol)}/pin`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ is_pinned: isPinned }),
+  });
+  await handleResponse(res);
 }

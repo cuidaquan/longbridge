@@ -5,6 +5,7 @@ import {
   QueryStats,
   Whatshot,
   Visibility,
+  Star,
   MonitorHeart,
   CandlestickChart,
   Settings,
@@ -22,6 +23,7 @@ export type TabType =
   | "quant-stock-selector"
   | "sector-rotation"
   | "strategy-watch"
+  | "watchlist"
   | "monitoring"
   | "position-klines"
   | "settings";
@@ -52,6 +54,12 @@ const navGroups: NavGroup[] = [
       { id: "quant-stock-selector", label: "量化优选", icon: <QueryStats /> },
       { id: "sector-rotation", label: "板块轮动", icon: <Whatshot /> },
       { id: "strategy-watch", label: "策略盯盘", icon: <Visibility /> },
+    ],
+  },
+  {
+    title: "行情中心",
+    items: [
+      { id: "watchlist", label: "关注", icon: <Star /> },
     ],
   },
   {

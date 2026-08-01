@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from .db import get_connection
 from .exceptions import LongbridgeAPIError, LongbridgeDependencyMissing
 from .longbridge_compat import close_longbridge_context
+from .security_catalog import get_security_catalog_service
 from .repositories import (
     fetch_latest_prices,
     fetch_latest_candlestick_timestamp,
@@ -687,6 +688,231 @@ def get_positions() -> List[Dict[str, object]]:
 
     logger.info("get_positions: assembled %d positions", len(positions))
     return positions
+
+
+def get_watchlists() -> List[Dict[str, object]]:
+    """Fetch the user's Longbridge watchlist groups without changing them."""
+    creds = load_credentials()
+    required = (
+        "LONGPORT_APP_KEY",
+        "LONGPORT_APP_SECRET",
+        "LONGPORT_ACCESS_TOKEN",
+    )
+    if any(not creds.get(key) for key in required):
+        raise LongbridgeAPIError("请先在基础配置中保存完整的 Longbridge 凭据")
+
+    try:
+        with _quote_context(creds) as context:
+            response = context.watchlist()
+    except Exception as exc:
+        raise LongbridgeAPIError(f"获取 Longbridge 关注列表失败: {exc}") from exc
+
+    def field(value: object, name: str, default: object = None) -> object:
+        if isinstance(value, dict):
+            return value.get(name, default)
+        return getattr(value, name, default)
+
+    def text(value: object) -> str | None:
+        if value is None:
+            return None
+        label = value.name if hasattr(value, "name") else str(value)
+        return str(label).removeprefix("Market.")
+
+    groups: List[Dict[str, object]] = []
+    for raw_group in response or []:
+        group_id = int(field(raw_group, "id", 0) or 0)
+        group_name = str(field(raw_group, "name", "未命名分组") or "未命名分组")
+        # Longbridge exposes a special "holdings" watchlist group, but it is
+        # not the authoritative account position list and can be empty even
+        # when TradeContext.stock_positions() has positions. Keep it out of
+        # the watchlist API to avoid presenting it as an account holdings tab.
+        if group_id == -6 or group_name.strip().lower() in {"holdings", "持仓"}:
+            continue
+
+        securities: List[Dict[str, object]] = []
+        for raw_security in field(raw_group, "securities", []) or []:
+            symbol = str(field(raw_security, "symbol", "") or "").strip()
+            if not symbol:
+                continue
+            watched_at = field(raw_security, "watched_at")
+            securities.append({
+                "symbol": symbol,
+                "name": str(field(raw_security, "name", "") or "").strip(),
+                "name_cn": str(field(raw_security, "name", "") or "").strip(),
+                "name_en": str(field(raw_security, "name", "") or "").strip(),
+                "market": text(field(raw_security, "market")),
+                "is_pinned": bool(field(raw_security, "is_pinned", False)),
+                "watched_price": _safe_float(
+                    field(raw_security, "watched_price")
+                ),
+                "watched_at": (
+                    watched_at.isoformat()
+                    if hasattr(watched_at, "isoformat")
+                    else str(watched_at) if watched_at is not None else None
+                ),
+            })
+        groups.append({
+            "id": group_id,
+            "name": group_name,
+            "securities": securities,
+        })
+
+    # QuoteContext.watchlist() often returns English names for US securities.
+    # Enrich from the existing official catalog when available, but keep the
+    # watchlist usable if the catalog refresh is unavailable.
+    try:
+        catalog = get_security_catalog_service()
+        for market in ("US", "HK"):
+            market_securities = [
+                security
+                for group in groups
+                for security in group["securities"]
+                if security.get("market") == market
+            ]
+            metadata = catalog.lookup_symbols(
+                market,
+                [security["symbol"] for security in market_securities],
+            )
+            for security in market_securities:
+                item = metadata.get(str(security["symbol"]).upper())
+                if not item:
+                    continue
+                security["name_cn"] = str(
+                    item.get("name") or security.get("name_cn") or ""
+                ).strip()
+                security["name_en"] = str(
+                    item.get("name_en") or security.get("name_en") or ""
+                ).strip()
+    except Exception as exc:  # pragma: no cover - best-effort enrichment
+        logger.warning("Failed to enrich watchlist names: %s", exc)
+
+    return groups
+
+
+def get_watchlist_quotes(symbols: Iterable[str]) -> Dict[str, Dict[str, Optional[float]]]:
+    """Fetch the latest price and day change for watchlist symbols."""
+    symbol_list = list(dict.fromkeys(
+        symbol.strip().upper()
+        for symbol in symbols
+        if symbol and symbol.strip()
+    ))
+    if not symbol_list:
+        return {}
+
+    creds = load_credentials()
+    required = (
+        "LONGPORT_APP_KEY",
+        "LONGPORT_APP_SECRET",
+        "LONGPORT_ACCESS_TOKEN",
+    )
+    if any(not creds.get(key) for key in required):
+        raise LongbridgeAPIError("请先在基础配置中保存完整的 Longbridge 凭据")
+
+    try:
+        with _quote_context(creds) as context:
+            rows = context.quote(symbol_list)
+    except Exception as exc:
+        raise LongbridgeAPIError(f"获取 Longbridge 关注行情失败: {exc}") from exc
+
+    quotes: Dict[str, Dict[str, Optional[float]]] = {}
+    for row in rows or []:
+        symbol = str(getattr(row, "symbol", "") or "").strip().upper()
+        if not symbol:
+            continue
+        last_done = _safe_float(getattr(row, "last_done", None))
+        prev_close = _safe_float(getattr(row, "prev_close", None))
+        change_rate = _safe_float(getattr(row, "change_rate", None))
+        if change_rate is None and last_done is not None and prev_close:
+            change_rate = (last_done - prev_close) / prev_close * 100
+        quotes[symbol] = {
+            "last_done": last_done,
+            "prev_close": prev_close,
+            "change_rate": change_rate,
+        }
+    return quotes
+
+
+def remove_watchlist_security(symbol: str) -> Dict[str, object]:
+    """Remove a security from every Longbridge watchlist group."""
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        raise ValueError("证券代码不能为空")
+
+    creds = load_credentials()
+    required = (
+        "LONGPORT_APP_KEY",
+        "LONGPORT_APP_SECRET",
+        "LONGPORT_ACCESS_TOKEN",
+    )
+    if any(not creds.get(key) for key in required):
+        raise LongbridgeAPIError("请先在基础配置中保存完整的 Longbridge 凭据")
+
+    try:
+        from longbridge.openapi import SecuritiesUpdateMode
+
+        with _quote_context(creds) as context:
+            groups = context.watchlist() or []
+            group_ids = []
+            for group in groups:
+                group_id = int(getattr(group, "id", 0) or 0)
+                if group_id == -6:
+                    continue
+                securities = getattr(group, "securities", []) or []
+                if any(
+                    str(getattr(security, "symbol", "") or "").strip().upper()
+                    == normalized_symbol
+                    for security in securities
+                ):
+                    group_ids.append(group_id)
+
+            for group_id in dict.fromkeys(group_ids):
+                context.update_watchlist_group(
+                    group_id,
+                    securities=[normalized_symbol],
+                    mode=SecuritiesUpdateMode.Remove,
+                )
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise LongbridgeAPIError(f"取消 Longbridge 关注失败: {exc}") from exc
+
+    return {
+        "symbol": normalized_symbol,
+        "removed_from_groups": list(dict.fromkeys(group_ids)),
+    }
+
+
+def update_watchlist_pinned(symbol: str, is_pinned: bool) -> Dict[str, object]:
+    """Pin or unpin a security in the Longbridge watchlist."""
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not normalized_symbol:
+        raise ValueError("证券代码不能为空")
+
+    creds = load_credentials()
+    required = (
+        "LONGPORT_APP_KEY",
+        "LONGPORT_APP_SECRET",
+        "LONGPORT_ACCESS_TOKEN",
+    )
+    if any(not creds.get(key) for key in required):
+        raise LongbridgeAPIError("请先在基础配置中保存完整的 Longbridge 凭据")
+
+    try:
+        from longbridge.openapi import PinnedMode
+
+        mode = PinnedMode.Add if is_pinned else PinnedMode.Remove
+        with _quote_context(creds) as context:
+            context.update_pinned(mode, [normalized_symbol])
+    except ValueError:
+        raise
+    except Exception as exc:
+        action = "置顶" if is_pinned else "取消置顶"
+        raise LongbridgeAPIError(f"{action} Longbridge 关注失败: {exc}") from exc
+
+    return {
+        "symbol": normalized_symbol,
+        "is_pinned": is_pinned,
+    }
 
 
 def get_account_balance() -> Dict[str, object]:

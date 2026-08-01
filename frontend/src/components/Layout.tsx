@@ -12,6 +12,7 @@ const VALID_TABS = new Set<TabType>([
   "quant-stock-selector",
   "sector-rotation",
   "strategy-watch",
+  "watchlist",
   "monitoring",
   "position-klines",
   "settings",
