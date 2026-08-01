@@ -8,6 +8,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 import logging
 import multiprocessing
+import time as time_module
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
@@ -36,6 +37,13 @@ MIN_TOTAL_MARKET_VALUE = 1_000_000_000.0
 MIN_VOLUME_RATIO = 0.8
 MAX_PE_TTM = 50.0
 MONTHLY_HISTORY_QUOTA_CATEGORY = "monthly_history_symbol_quota"
+HISTORY_REQUEST_RATE_LIMIT_CATEGORY = "history_request_rate_limit"
+HISTORY_RATE_LIMIT_MAX_ATTEMPTS = 3
+HISTORY_RATE_LIMIT_BACKOFF_SECONDS = 0.5
+HISTORY_SKIP_CATEGORIES = frozenset({
+    MONTHLY_HISTORY_QUOTA_CATEGORY,
+    HISTORY_REQUEST_RATE_LIMIT_CATEGORY,
+})
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +99,38 @@ def _bar_row(value: Any) -> dict[str, Any]:
     }
 
 
+def _history_candlesticks(
+    context: Any,
+    symbol: str,
+    period: Any,
+    adjust_type: Any,
+    start: date,
+    end: date,
+) -> Any:
+    """Retry transient Longbridge request-rate limits before giving up."""
+    for attempt in range(HISTORY_RATE_LIMIT_MAX_ATTEMPTS):
+        try:
+            return context.history_candlesticks_by_date(
+                symbol,
+                period,
+                adjust_type,
+                start,
+                end,
+            )
+        except Exception as exc:
+            if "301606" not in str(exc):
+                raise
+            if attempt + 1 >= HISTORY_RATE_LIMIT_MAX_ATTEMPTS:
+                raise
+            delay = HISTORY_RATE_LIMIT_BACKOFF_SECONDS * (2 ** attempt)
+            logger.warning(
+                "Longbridge history request rate limited for %s; retrying in %.1fs",
+                symbol,
+                delay,
+            )
+            time_module.sleep(delay)
+
+
 def load_longbridge_daily_bars(
     symbols: Sequence[str],
     *,
@@ -130,14 +170,16 @@ def _load_longbridge_daily_bars_from_context(
     for raw_symbol in symbols:
         symbol = normalize_symbol(raw_symbol)
         try:
-            adjusted = context.history_candlesticks_by_date(
+            adjusted = _history_candlesticks(
+                context,
                 symbol,
                 Period.Day,
                 AdjustType.ForwardAdjust,
                 start,
                 data_as_of,
             )
-            raw = context.history_candlesticks_by_date(
+            raw = _history_candlesticks(
+                context,
                 symbol,
                 Period.Day,
                 AdjustType.NoAdjust,
@@ -168,6 +210,17 @@ def _load_longbridge_daily_bars_from_context(
                         "（301607 Permission limit）"
                     ),
                     "error_category": MONTHLY_HISTORY_QUOTA_CATEGORY,
+                }
+                continue
+            if "301606" in str(exc):
+                result[symbol] = {
+                    "forward_adjusted_bars": [],
+                    "unadjusted_bars": [],
+                    "error": (
+                        "Longbridge 历史 K 线请求频率受限，已跳过该证券"
+                        "（301606 request rate limit）"
+                    ),
+                    "error_category": HISTORY_REQUEST_RATE_LIMIT_CATEGORY,
                 }
                 continue
             result[symbol] = {
@@ -735,12 +788,26 @@ class LongbridgeQuantSourceBundleCollector:
                 bar_results.get(symbol, {}).get("error_category") or ""
             ).strip() == MONTHLY_HISTORY_QUOTA_CATEGORY
         ]
+        history_rate_limit_skips = [
+            symbol
+            for symbol in history_request_symbols
+            if str(
+                bar_results.get(symbol, {}).get("error_category") or ""
+            ).strip() == HISTORY_REQUEST_RATE_LIMIT_CATEGORY
+        ]
         if (
             spy_bar_result.get("error_category")
             == MONTHLY_HISTORY_QUOTA_CATEGORY
         ):
             capture_errors.append(
                 "benchmark:SPY.US:monthly_history_symbol_quota"
+            )
+        elif (
+            spy_bar_result.get("error_category")
+            == HISTORY_REQUEST_RATE_LIMIT_CATEGORY
+        ):
+            capture_errors.append(
+                "benchmark:SPY.US:history_request_rate_limit"
             )
         market_data = {}
         market_symbols = list(eligible_symbols)
@@ -758,7 +825,7 @@ class LongbridgeQuantSourceBundleCollector:
                 bars.get("error_category") or ""
             ).strip() or None
             if (
-                error_category != MONTHLY_HISTORY_QUOTA_CATEGORY
+                error_category not in HISTORY_SKIP_CATEGORIES
                 and error
             ):
                 capture_errors.append(f"bars:{symbol}:{error}")
@@ -832,6 +899,10 @@ class LongbridgeQuantSourceBundleCollector:
                 "history_symbol_count": len(history_request_symbols),
                 "history_quota_skipped_count": len(history_quota_skips),
                 "history_quota_skipped_symbols": history_quota_skips,
+                "history_rate_limit_skipped_count": len(
+                    history_rate_limit_skips
+                ),
+                "history_rate_limit_skipped_symbols": history_rate_limit_skips,
                 "prefilter_policy": {
                     "exchange": "NASDAQ",
                     "minimum_price": MIN_PRICE,

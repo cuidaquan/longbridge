@@ -95,6 +95,9 @@ function formatRunError(value: string) {
   if (value === "benchmark:SPY.US:monthly_history_symbol_quota") {
     return "SPY.US 基准历史 K 线触发月度唯一证券额度限制（301607），已继续处理其余标的";
   }
+  if (value === "benchmark:SPY.US:history_request_rate_limit") {
+    return "SPY.US 基准历史 K 线触发请求频率限制（301606），本次运行未发布最终榜单";
+  }
   return value;
 }
 

@@ -11,6 +11,7 @@ from app.exceptions import LongbridgeAPIError
 from app.quant_stock_selector_longbridge import (
     LongbridgeQuantSourceBundleCollector,
     _load_longbridge_quant_prefilter_indexes_from_context,
+    _load_longbridge_daily_bars_from_context,
     load_longbridge_daily_bars,
     load_longbridge_latest_completed_us_session,
 )
@@ -470,6 +471,56 @@ class LongbridgeQuantSourceBundleCollectorTests(unittest.TestCase):
         )
         self.assertTrue(bundle["market_data"]["AAA.US"]["unadjusted_bars"])
 
+    def test_request_rate_limit_skip_is_preserved_without_aborting_capture(self):
+        def bar_loader(symbols, *, data_as_of):
+            result = _bars(symbols, data_as_of=data_as_of)
+            result["AAA.US"] = {
+                "forward_adjusted_bars": [],
+                "unadjusted_bars": [],
+                "error": "301606 request rate limit",
+                "error_category": "history_request_rate_limit",
+            }
+            return result
+
+        bundle = self._collector(bar_loader=bar_loader).capture()
+
+        self.assertEqual(bundle["source_capture"]["status"], "complete")
+        self.assertEqual(
+            bundle["source_capture"]["history_rate_limit_skipped_count"],
+            1,
+        )
+        self.assertEqual(
+            bundle["source_capture"]["history_rate_limit_skipped_symbols"],
+            ["AAA.US"],
+        )
+        self.assertEqual(
+            bundle["market_data"]["AAA.US"]["bar_error_category"],
+            "history_request_rate_limit",
+        )
+
+    def test_spy_request_rate_limit_keeps_capture_partial(self):
+        def bar_loader(symbols, *, data_as_of):
+            result = _bars(symbols, data_as_of=data_as_of)
+            result["SPY.US"] = {
+                "forward_adjusted_bars": [],
+                "unadjusted_bars": [],
+                "error": "301606 request rate limit",
+                "error_category": "history_request_rate_limit",
+            }
+            return result
+
+        bundle = self._collector(bar_loader=bar_loader).capture()
+
+        self.assertEqual(bundle["source_capture"]["status"], "partial")
+        self.assertEqual(
+            bundle["source_capture"]["errors"],
+            ["benchmark:SPY.US:history_request_rate_limit"],
+        )
+        self.assertEqual(
+            bundle["source_capture"]["history_rate_limit_skipped_symbols"],
+            ["SPY.US"],
+        )
+
     def test_history_requests_have_no_local_symbol_limit(self):
         catalog = [
             {"symbol": f"S{index:03d}.US", "name": str(index)}
@@ -680,6 +731,83 @@ class LongbridgeQuantLoaderTests(unittest.TestCase):
             result["BBB.US"]["error_category"],
             "monthly_history_symbol_quota",
         )
+
+    def test_daily_bars_retries_request_rate_limit_then_succeeds(self):
+        calls = []
+        bar = SimpleNamespace(
+            timestamp=datetime(2026, 7, 24, tzinfo=timezone.utc),
+            open=Decimal("99"),
+            high=Decimal("101"),
+            low=Decimal("98"),
+            close=Decimal("100"),
+            volume=1_000_000,
+            turnover=Decimal("100000000"),
+        )
+
+        def history(symbol, *_args):
+            calls.append(symbol)
+            if len(calls) == 1:
+                raise RuntimeError(
+                    "OpenApiException: code=301606 request rate limit"
+                )
+            return [bar]
+
+        context = SimpleNamespace(history_candlesticks_by_date=history)
+
+        with patch(
+            "app.quant_stock_selector_longbridge.time_module.sleep"
+        ) as sleeper:
+            result = _load_longbridge_daily_bars_from_context(
+                context,
+                ["AAA.US"],
+                data_as_of=DATA_AS_OF,
+            )
+
+        self.assertEqual(calls, ["AAA.US", "AAA.US", "AAA.US"])
+        sleeper.assert_called_once_with(0.5)
+        self.assertIsNone(result["AAA.US"]["error_category"])
+        self.assertTrue(result["AAA.US"]["unadjusted_bars"])
+
+    def test_daily_bars_skips_exhausted_request_rate_limit_and_continues(self):
+        calls = []
+        bar = SimpleNamespace(
+            timestamp=datetime(2026, 7, 24, tzinfo=timezone.utc),
+            open=Decimal("99"),
+            high=Decimal("101"),
+            low=Decimal("98"),
+            close=Decimal("100"),
+            volume=1_000_000,
+            turnover=Decimal("100000000"),
+        )
+
+        def history(symbol, *_args):
+            calls.append(symbol)
+            if symbol == "AAA.US":
+                raise RuntimeError(
+                    "OpenApiException: code=301606 request rate limit"
+                )
+            return [bar]
+
+        context = SimpleNamespace(history_candlesticks_by_date=history)
+
+        with patch(
+            "app.quant_stock_selector_longbridge.time_module.sleep"
+        ):
+            result = _load_longbridge_daily_bars_from_context(
+                context,
+                ["AAA.US", "BBB.US"],
+                data_as_of=DATA_AS_OF,
+            )
+
+        self.assertEqual(
+            calls,
+            ["AAA.US", "AAA.US", "AAA.US", "BBB.US", "BBB.US"],
+        )
+        self.assertEqual(
+            result["AAA.US"]["error_category"],
+            "history_request_rate_limit",
+        )
+        self.assertTrue(result["BBB.US"]["unadjusted_bars"])
 
 
 if __name__ == "__main__":
