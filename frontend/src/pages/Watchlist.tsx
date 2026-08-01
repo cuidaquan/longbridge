@@ -62,7 +62,6 @@ type ChangeSort = "none" | "desc" | "asc";
 export default function WatchlistPage() {
   const [groups, setGroups] = useState<WatchlistGroup[]>([]);
   const [quotes, setQuotes] = useState<Record<string, WatchlistQuote>>({});
-  const [totalSecurities, setTotalSecurities] = useState(0);
   const [loading, setLoading] = useState(true);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -80,7 +79,6 @@ export default function WatchlistPage() {
       const response = await fetchWatchlists();
       const nextGroups = response.groups || [];
       setGroups(nextGroups);
-      setTotalSecurities(response.total_securities || 0);
       setLastUpdated(new Date());
       setError(null);
 
@@ -198,7 +196,6 @@ export default function WatchlistPage() {
         icon={<Star />}
         actions={(
           <div className="flex items-center gap-3">
-            <Badge variant="info">{groups.length} 个分组 · {totalSecurities} 个标的</Badge>
             <span className="hidden text-sm text-slate-500 dark:text-slate-400 sm:inline">
               {quoteLoading ? "行情更新中" : lastUpdated ? lastUpdated.toLocaleTimeString() : "未更新"}
             </span>
