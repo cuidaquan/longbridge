@@ -247,6 +247,38 @@ class QuantSourceBundleTests(unittest.TestCase):
             "source_capture",
         )
 
+    def test_news_loader_only_runs_for_ai_candidates(self):
+        calls = []
+
+        def news_loader(symbol, company_name):
+            calls.append((symbol, company_name))
+            return {
+                "status": "available",
+                "source": "tavily",
+                "news_items": [{
+                    "title": "Fresh report",
+                    "source": "reuters.com",
+                    "published_at": "2026-07-24T19:00:00Z",
+                    "summary": "A factual summary.",
+                }],
+            }
+
+        provider = JsonQuantRunInputProvider(
+            bundle_loader=_bundle,
+            news_loader=news_loader,
+            market_bar_store=MarketBarSnapshotStore(
+                connection_factory=self.factory,
+                clock=lambda: CAPTURED_AT,
+            ),
+        )
+        captured = provider.capture()
+
+        self.assertEqual(calls, [("AAA.US", "AAA")])
+        self.assertEqual(
+            captured.ai_contexts["AAA.US"].news_snapshot["news_items"][0]["title"],
+            "Fresh report",
+        )
+
     def test_partial_source_capture_marks_run_incomplete(self):
         bundle = _bundle()
         bundle["source_capture"] = {

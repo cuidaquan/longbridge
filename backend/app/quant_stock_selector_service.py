@@ -544,18 +544,23 @@ class QuantSelectionRunRepository:
         with self.connection_factory() as connection:
             rows = connection.execute(
                 """
-                SELECT payload FROM quant_selection_candidates
+                SELECT payload, final_selected FROM quant_selection_candidates
                 WHERE run_id = ?
                 ORDER BY final_selected DESC, final_rank ASC NULLS LAST,
                          quant_rank ASC NULLS LAST, symbol ASC
                 """,
                 [run_id],
             ).fetchall()
-        candidates = [json.loads(row[0]) for row in rows]
+        candidate_rows = [
+            (json.loads(payload), final_selected)
+            for payload, final_selected in rows
+        ]
+        candidates = [item for item, _final_selected in candidate_rows]
         final_results = [
-            item["result"] for item in candidates
-            if run["status"] == "completed" and item.get("result")
-            and item["result"].get("eligible")
+            item["result"]
+            for item, final_selected in candidate_rows
+            if run["status"] == "completed" and final_selected
+            and item.get("result")
         ]
         return {"run": run, "results": final_results, "candidates": candidates}
 

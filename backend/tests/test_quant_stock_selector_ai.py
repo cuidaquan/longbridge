@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.quant_stock_selector_ai import (
     AI_PROMPT_VERSION,
+    AI_MAX_TOKENS,
     AICandidateContext,
     AICompletion,
     AIDecisionError,
@@ -17,6 +18,8 @@ from app.quant_stock_selector_ai import (
     DeepSeekQuantSelectorProvider,
     MODEL_POLICY_VERSION,
     QuantAISelectionService,
+    THINKING_MODE,
+    THINKING_REASONING_EFFORT,
     build_ai_input_snapshot,
     parse_ai_decision,
 )
@@ -462,7 +465,7 @@ class DeepSeekProviderTests(unittest.TestCase):
             external_call.call_args.kwargs["retry_if"](RuntimeError("test"))
         )
 
-    def test_provider_uses_json_mode_and_disables_runtime_retry(self) -> None:
+    def test_provider_uses_thinking_json_mode_and_disables_runtime_retry(self) -> None:
         client = MagicMock()
         response = MagicMock()
         response.model = "deepseek-v4-flash-immutable"
@@ -494,12 +497,54 @@ class DeepSeekProviderTests(unittest.TestCase):
         self.assertEqual(kwargs["model"], DEFAULT_MODEL)
         self.assertEqual(kwargs["temperature"], DEFAULT_TEMPERATURE)
         self.assertEqual(kwargs["response_format"], {"type": "json_object"})
-        self.assertEqual(kwargs["max_tokens"], 1200)
+        self.assertEqual(kwargs["max_tokens"], AI_MAX_TOKENS)
+        self.assertEqual(
+            kwargs["extra_body"],
+            {"thinking": {"type": THINKING_MODE}},
+        )
+        self.assertEqual(kwargs["reasoning_effort"], THINKING_REASONING_EFFORT)
         self.assertFalse(kwargs["retry_if"](RuntimeError("test")))
         self.assertEqual(result.resolved_model_id, "deepseek-v4-flash-immutable")
         self.assertNotIn(
             "secret-key",
             provider.safe_error(RuntimeError("api_key=secret-key")),
+        )
+
+    def test_empty_thinking_content_uses_disabled_mode_fallback(self) -> None:
+        empty_response = MagicMock()
+        empty_response.model = "deepseek-v4-flash-immutable"
+        empty_response.choices[0].message.content = ""
+        empty_response.choices[0].message.reasoning_content = "r" * 20
+        empty_response.choices[0].finish_reason = "length"
+        valid_response = MagicMock()
+        valid_response.model = "deepseek-v4-flash-immutable"
+        valid_response.choices[0].message.content = _decision()
+        with (
+            patch(
+                "app.quant_stock_selector_ai.OpenAI",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "app.quant_stock_selector_ai.run_external_call",
+                side_effect=[empty_response, valid_response],
+            ) as external_call,
+        ):
+            provider = DeepSeekQuantSelectorProvider("secret-key")
+            result = provider.complete(
+                system_prompt="system",
+                user_prompt="user",
+                response_schema={},
+            )
+
+        self.assertEqual(result.raw_text, _decision())
+        self.assertEqual(external_call.call_count, 2)
+        self.assertEqual(
+            external_call.call_args_list[0].kwargs["extra_body"],
+            {"thinking": {"type": THINKING_MODE}},
+        )
+        self.assertEqual(
+            external_call.call_args_list[1].kwargs["extra_body"],
+            {"thinking": {"type": "disabled"}},
         )
 
 

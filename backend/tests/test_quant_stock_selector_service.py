@@ -269,6 +269,24 @@ class QuantSelectionServiceTests(unittest.TestCase):
         self.assertEqual(len(results["candidates"]), 2)
         self.assertEqual(provider.complete_calls, 1)
 
+    def test_results_only_include_published_final_candidates(self) -> None:
+        service, _provider = self._service(_captured())
+        run_id = service.create_run()["run_id"]
+        service.execute_run(run_id)
+
+        with self.factory() as connection:
+            connection.execute(
+                """
+                UPDATE quant_selection_candidates
+                SET final_selected = FALSE
+                WHERE run_id = ? AND symbol = 'AAA.US'
+                """,
+                [run_id],
+            )
+
+        results = self.repository.get_results(run_id)
+        self.assertEqual(results["results"], [])
+
     def test_display_scores_are_rounded_without_changing_hash_inputs(self) -> None:
         captured = _captured()
         candidate = captured.quant_selection["candidates"][0]

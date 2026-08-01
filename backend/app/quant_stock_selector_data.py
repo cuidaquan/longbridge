@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+from urllib.parse import urlparse
 
 from .exceptions import LongbridgeAPIError
 from .quant_stock_selector import QuantInputError, calculate_quant_indicators
@@ -35,6 +36,78 @@ NEWS_LIMIT = 10
 
 class QuantSourceBundleError(ValueError):
     pass
+
+
+def _unavailable_news() -> dict[str, Any]:
+    return {
+        "status": "unavailable",
+        "source": "tavily",
+        "news_items": [],
+    }
+
+
+def build_tavily_news_loader(
+    api_key: str | None,
+) -> Callable[[str, str], Mapping[str, Any]] | None:
+    """Create an optional loader for the AI candidate news snapshots only."""
+    key = str(api_key or "").strip()
+    if not key:
+        return None
+    from .news_analyzer import get_news_analyzer
+
+    analyzer = get_news_analyzer(key)
+
+    def load(symbol: str, company_name: str) -> Mapping[str, Any]:
+        if analyzer is None:
+            return _unavailable_news()
+        try:
+            analysis = analyzer.search_stock_news(
+                symbol,
+                company_name=company_name,
+                days=NEWS_LOOKBACK_DAYS,
+            )
+        except Exception:
+            return _unavailable_news()
+        if str(analysis.get("status") or "").lower() != "available":
+            return _unavailable_news()
+
+        items = []
+        for item in analysis.get("news_items", [])[:NEWS_LIMIT]:
+            title = str(item.get("title") or "").strip()
+            summary = str(item.get("content") or "").strip()
+            published_text = str(item.get("published_date") or "").strip()
+            if not title or not summary or not published_text:
+                continue
+            try:
+                published_at = datetime.fromisoformat(
+                    published_text.replace("Z", "+00:00")
+                )
+            except ValueError:
+                try:
+                    published_at = datetime.combine(
+                        date.fromisoformat(published_text),
+                        datetime.min.time(),
+                    )
+                except ValueError:
+                    continue
+            if published_at.tzinfo is None or published_at.utcoffset() is None:
+                published_at = published_at.replace(tzinfo=timezone.utc)
+            source = urlparse(str(item.get("url") or "")).netloc or "tavily"
+            items.append({
+                "title": title,
+                "source": source,
+                "published_at": published_at.astimezone(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "summary": summary[:1000],
+            })
+        return {
+            "status": "available",
+            "source": "tavily",
+            "news_items": items,
+        }
+
+    return load
 
 
 def _datetime(value: Any, *, field: str) -> datetime:
@@ -158,6 +231,7 @@ class JsonQuantRunInputProvider:
         bundle_path: Path | str | None = None,
         *,
         bundle_loader: Callable[[], Mapping[str, Any]] | None = None,
+        news_loader: Callable[[str, str], Mapping[str, Any]] | None = None,
         market_bar_store: MarketBarSnapshotStore | None = None,
         selection_policy: SelectionPolicy | None = None,
     ) -> None:
@@ -167,6 +241,7 @@ class JsonQuantRunInputProvider:
             )
         self.bundle_path = Path(bundle_path) if bundle_path is not None else None
         self.bundle_loader = bundle_loader
+        self.news_loader = news_loader
         self.market_bar_store = market_bar_store or MarketBarSnapshotStore()
         self.selection_policy = selection_policy or SelectionPolicy()
 
@@ -555,6 +630,21 @@ class JsonQuantRunInputProvider:
             data_as_of=data_as_of,
             official_close=official_close,
         )
+        if self.news_loader is not None:
+            for symbol in quant_selection["ai_candidate_symbols"]:
+                source_facts = normalized_market_data.get(symbol)
+                candidate = next(
+                    item
+                    for item in quant_selection["candidates"]
+                    if item["symbol"] == symbol
+                )
+                try:
+                    news = self.news_loader(symbol, candidate["name"])
+                except Exception:
+                    news = _unavailable_news()
+                facts = dict(source_facts or {})
+                facts["news"] = dict(news)
+                normalized_market_data[symbol] = facts
 
         input_snapshots = [
             CapturedInputSnapshot(
@@ -732,9 +822,13 @@ def build_configured_quant_selection_service():
             LongbridgeQuantSourceBundleCollector,
         )
 
+        tavily_loader = build_tavily_news_loader(
+            credentials.get("TAVILY_API_KEY")
+        )
         collector = LongbridgeQuantSourceBundleCollector()
         input_provider = JsonQuantRunInputProvider(
             bundle_loader=collector.capture,
+            news_loader=tavily_loader,
         )
     return QuantSelectionService(
         input_provider,
